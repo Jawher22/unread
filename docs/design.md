@@ -17,6 +17,10 @@ Living document: why Unread exists, what we learned, what we decided and what's 
 | Apple Spoken Content | Free and built in, but robotic and selection-driven |
 | NaturalReader, Speechie, Speak My Text | Document- or selection-centric, no in-place experience |
 | [ReadRead](https://github.com/aaajiao/readread) | Closest open-source project: a menu-bar app on Kokoro with a bundled Python server. Unread differs in being native Swift, using point-and-hold, and highlighting inside the source app |
+| [Sotto](https://github.com/Shreysid/Sotto) | Native menu-bar app on the same stack (Kokoro via FluidAudio/CoreML). Selection + shortcut, no in-place highlight |
+| [aloud-tts](https://pypi.org/project/aloud-tts) | MIT, Kokoro on MLX, select text + ⌃⌥S. Selection-driven |
+
+**What this means (2026-11-03):** the voice stack is a commodity; anyone can wire FluidAudio up in a weekend. Unread's edge is *no selection + highlight in the source app + follow-scroll*, and all three depend on extraction quality. Extraction is the product.
 
 ## 3. What makes Hex feel fast (and why it isn't Rust)
 
@@ -41,7 +45,7 @@ Chosen: **Kokoro-82M via [FluidAudio](https://github.com/FluidInference/FluidAud
 | --- | --- |
 | **Kokoro v3** (current, English) | ~30× real time, SSML/lexicon support, `predictedDurations` exposed (word timing possible). v3 is English/Japanese/Mandarin only |
 | **Kokoro legacy, French** (current) | Works, but only one voice: `ff_siwis` |
-| Pocket TTS (Kyutai, in FluidAudio) | Streams in 80 ms frames, voice cloning, 6 languages including French. Candidate for better French and for "read in my own voice" |
+| Pocket TTS (Kyutai, in FluidAudio) | Streams (~80 ms to first audio; Kokoro doesn't stream), voice cloning, 6 languages. French exists only as the heavier 24-layer pack. Candidate for better French and for "read in my own voice" |
 | Phonon 31m (in FluidAudio) | 103 English voices, Apache-2.0, built-in text normalizer |
 | Qwen3-TTS, Chatterbox, OmniVoice ([speech-swift](https://github.com/soniqo/speech-swift), MLX) | Heavier (0.8–1.7B parameters), more expressive. Possible "premium voice" tier |
 | Cloud (ElevenLabs, OpenAI, Cartesia) | Quality reference. Only ever an optional bring-your-own-key extra |
@@ -54,9 +58,11 @@ Chosen: **Kokoro-82M via [FluidAudio](https://github.com/FluidInference/FluidAud
 | --- | --- |
 | Hold ⌃ (≥0.22 s) + point | Paragraph under the pointer gets a preview outline (after 0.12 s, so taps don't flash) |
 | Release | Read from that paragraph to the end |
-| Tap ⌃ while idle | Read from the first visible paragraph ("continue from where I am") |
+| Tap ⌃ while idle | Nothing (an aborted chord or stray tap must never start speaking) |
+| Double-tap ⌃ while idle | Read from the first visible paragraph ("continue from where I am") |
 | Tap ⌃ while reading | Pause / resume |
-| Double-tap ⌃ | Stop |
+| Double-tap ⌃ while reading | Stop |
+| Reaching the end of the content | Soft chime, then stop |
 | Hold + point while reading | Jump there. Seeking is pointing |
 
 Details that make it feel right:
@@ -68,10 +74,13 @@ Details that make it feel right:
 - **Language is automatic.** English or French is chosen per sentence and is sticky: short or ambiguous sentences keep the current language.
 - **Prewarm on key-down.** The audio engine starts while the key is held, and the release triggers immediate synthesis.
 
+**Primary use is read-along** (decided 2026-11-03): eyes on the screen, following the highlight. Highlight accuracy and time to first audio are what get noticed. Listen-away is secondary and gets only the minimum: pause when headphones are removed, media keys / AirPods play-pause.
+
 Planned UX (not built yet):
-- floating mini-player pill (title, waveform, speed; scroll on it to change speed)
-- media keys, AirPods controls and Now Playing
+- media keys, AirPods play/pause, pause on audio-route change (the listen-away minimum)
 - a "↩ back to voice" chip when you've scrolled away
+- deferred: floating mini-player pill and Now Playing (they serve listen-away, which is secondary)
+- dropped: export / listen later (MP3, M4B, podcast feed): not wanted
 
 ## 6. Technical findings: reading text from any app
 
@@ -123,28 +132,59 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 | Find the document in the front window | ~25 ms |
 | Extract 12 sentences with bounds | ~70–110 ms |
 
+**`--extract` on a T3 Code window (2026-11-03):** 12 sentences in 101 ms, but **9 of 12 had no bounds**, so read-along would show no highlight most of the time in Electron. Inline `code` spans were also split into separate sentences (`sameBlock` treats the span as a new block).
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
-## 8. Next steps (prioritized)
+## 8. Next steps (prioritized, revised 2026-11-03)
 
-1. **Real-use feedback** on the author's articles: latency, voice, highlight tracking.
-2. **Main-content extraction.** It currently reads everything (X timeline handles, timestamps, "Post" buttons). Options:
-   - a Readability-style heuristic over the AX tree (roles such as `AXArticle` / `AXLandmarkMain`, text density)
-   - fetching the URL and running Readability, then mapping back to on-screen text
-3. **Faster first audio.** Synthesize the opening clause of a long first sentence separately.
-4. **Mini-player pill, media keys, Now Playing**, and handling audio-route changes (pause when headphones are removed).
-5. **Sentence-level highlight in Chromium.** Try `AXBoundsForRange` on the `AXStaticText`, or per-line ranges.
-6. **Proper `.app` bundle:** signed, its own Accessibility permission, launch at login, settings for hotkey/voice/speed.
-7. **Voices:** A/B Kokoro voices vs Pocket TTS vs Phonon. Better French (Pocket TTS). Later, voice cloning.
-8. **More sources:** PDF (Preview's AX tree; strip headers, page numbers, hyphenation), EPUB, OCR fallback via ScreenCaptureKit + Vision (opt-in, needs Screen Recording permission).
-9. **Word-level highlight** from Kokoro's `predictedDurations`.
-10. **Export / listen later:** MP3 or M4B, or a private podcast feed.
-11. **Text normalization:** numbers, abbreviations, code blocks, URLs (Phonon's normalizer, Kokoro SSML/lexicon).
+Goal: perfect it for the author's own read-along use first. Public release comes later.
+
+Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one milestone per phase below. Open policy questions are the issues labelled `question`.
+
+**Phase 0: make daily use possible (do first)**
+1. **`.app` bundle + launch at login.** Sign it with a stable local identity so the Accessibility grant survives rebuilds (ad-hoc signatures change every build). No notarization yet.
+2. **Interaction changes:** idle tap does nothing, idle double-tap reads from the first visible paragraph, soft chime at the end.
+3. **Synthesize while the key is held.** The aim target is already known during the hold, so synthesize its first sentence speculatively and throw it away if the pointer moves. Log key-up → first audio (p50/p95) to a local file.
+4. **Use it for at least 3 days** on real reading and keep a friction log. Re-rank everything below from that log.
+
+**Phase 1: read-along quality**
+5. **Chromium bounds.** Fix the missing bounds (9/12 in T3 Code) and the block-level ones: per-line ranges, a union of word ranges (`walk()` already visits every word), or `AXBoundsForRange` on the static text.
+6. **Inline code must not split sentences.** Revisit `sameBlock` for code, links and emphasis.
+7. **Fixture corpus + scorer.** Saved real pages (Anthropic and OpenAI engineering posts, other technical blogs, a T3 Code LLM response, Wikipedia, a TextEdit doc). For each, list the expected sentences and score `--extract` against them, so heuristics stop silently regressing.
+8. **Reading scope ("skip junk, know the end").** Layered:
+   - *Structural:* scope reading to the nearest article / main landmark around the start point. Skip navigation, sidebars, footers, banners, buttons and link-dense lines. Every role used must be confirmed in both WebKit and Chromium before relying on it.
+   - *Heuristic:* text and link density (Readability-style) over the AX subtree, for poorly marked-up pages.
+   - *Model (optional, later):* Apple's on-device Foundation Models to classify a block as content or chrome. It runs during look-ahead, so it stays off the first-audio path. Needs Apple Intelligence and macOS 26+, so it can only be an enhancement.
+   - The skipping matters more than the ending: junk *inside* the article (captions, "Share", related-article cards, handles, timestamps) is what hurts read-along.
+9. **Move AX work off the main thread.** The 30 Hz aim loop, the 10 Hz highlight refresh and `walk()` (two AX calls per word) stall the hotkey and overlay on slow Chromium pages.
+10. **Auto-scroll in native text views.**
+11. **Faster first audio for long first sentences** (synthesize the opening clause separately) if step 3 isn't enough.
+12. **Apply speed and voice changes immediately:** drop and re-synthesize the look-ahead queue.
+
+**Phase 2: sources the author reads**
+13. **PDF and EPUB. Probe before building:** run `--extract` on an EPUB in Apple Books (WebKit, may already work), a PDF in Chrome's viewer (PDFium exposes an AX tree) and a PDF in Preview (PDFKit). Then fix what's missing: page headers, page numbers, hyphenation. OCR via ScreenCaptureKit + Vision is the last resort.
+14. **LLM responses still streaming** (T3 Code, Claude): at the end of the text, wait briefly for it to grow before finishing.
+15. **Text normalization:** numbers, abbreviations, URLs, identifiers in inline code; a policy for code blocks (default: skip `<pre>` blocks, read inline code) and tables.
+
+**Phase 3: polish**
+16. Listen-away minimum: media keys, AirPods, pause on route change.
+17. Word-level highlight from Kokoro's `predictedDurations`, mapped onto the word markers `walk()` already produces.
+18. Voices: A/B Kokoro voices vs Pocket TTS vs Phonon. Better French via Pocket TTS 24-layer later; `ff_siwis` is good enough for now.
+
+**Later: public release**
+- Signing and notarization, first-run onboarding, model download progress, Homebrew cask, MIT license.
+
+**Dropped:** export / listen later.
 
 ## 9. Open decisions
 
+- Code blocks in technical posts: skip silently, or say "code block" and skip? (Default: skip silently and move the highlight past it.)
+- X / timelines: is one post the end, or continue to the next post?
+- Tables: read row by row, or skip?
+- Languages beyond French: none planned. Arabic would need a different engine, since Kokoro has none.
 - License (MIT like Hex is the likely default).
-- When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03).
+- When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03). Not before the author has used it daily for real reading.
 
 ## 10. Naming
 
