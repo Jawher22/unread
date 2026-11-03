@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Inner scroller</title>
+<style>
+body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; }
+header { height: 60px; background: #f4f4f4; }
+/* Like T3 Code: the conversation scrolls inside its own container, so
+   Chromium clips frames of text out of view to this box (0–1 px tall), not
+   to the viewport. That text is off screen, not hidden, and must be read. */
+main { height: 220px; overflow: auto; padding: 0 24px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style></head>
+<body>
+<header></header>
+<main>
+  <div class="msg">
+    <h2 class="sr-only">Assistant</h2>
+    <p><strong>What is left:</strong></p>
+    <ul>
+      <li><strong>Item 1, a bold lead.</strong> The detail for item 1 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 2, a bold lead.</strong> The detail for item 2 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 3, a bold lead.</strong> The detail for item 3 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 4, a bold lead.</strong> The detail for item 4 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 5, a bold lead.</strong> The detail for item 5 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 6, a bold lead.</strong> The detail for item 6 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 7, a bold lead.</strong> The detail for item 7 follows the lead. It has a second sentence too.</li>
+      <li><strong>Item 8, a bold lead.</strong> The detail for item 8 follows the lead. It has a second sentence too.</li>
+    </ul>
+    <p>That is everything for now.</p>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# start: What is left
+What is left:
+• Item 1, a bold lead.
+The detail for item 1 follows the lead.
+It has a second sentence too.
+• Item 2, a bold lead.
+The detail for item 2 follows the lead.
+It has a second sentence too.
+• Item 3, a bold lead.
+The detail for item 3 follows the lead.
+It has a second sentence too.
+• Item 4, a bold lead.
+The detail for item 4 follows the lead.
+It has a second sentence too.
+• Item 5, a bold lead.
+The detail for item 5 follows the lead.
+It has a second sentence too.
+• Item 6, a bold lead.
+The detail for item 6 follows the lead.
+It has a second sentence too.
+• Item 7, a bold lead.
+The detail for item 7 follows the lead.
+It has a second sentence too.
+• Item 8, a bold lead.
+The detail for item 8 follows the lead.
+It has a second sentence too.
+That is everything for now.
