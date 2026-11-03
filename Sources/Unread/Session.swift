@@ -43,7 +43,11 @@ final class ReadingSession {
     private var timing: LatencyRecord?
     private var primed: PrimedSentence?
     /// The article / main area this reading stays in, and what it skips (#10).
-    private let scope: ReadingScope?
+    private var scope: ReadingScope?
+    /// The last sentence extracted, to find our place again if the page
+    /// rebuilds its elements under us.
+    private var lastExtracted: Sentence?
+    private var lastRelocateAttempt = Date.distantPast
     private(set) var suspendHighlight = false
 
     var isPaused: Bool { player.isPaused }
@@ -92,6 +96,7 @@ final class ReadingSession {
     private func consume(_ p: PrimedSentence) {
         primed = nil
         cursor = p.sentence.next
+        lastExtracted = p.sentence
         synthesizing = true
         _ = language.language(for: p.sentence.text) // keep language stickiness in step
         timing?.extractMs = p.extractMs
@@ -105,11 +110,15 @@ final class ReadingSession {
     private func fill() {
         guard !cancelled, !synthesizing, queued.count < lookahead else { return }
         let extractStart = Date()
-        guard let position = cursor, let sentence = document.sentence(from: position, in: scope) else {
+        guard let position = cursor else { if queued.isEmpty { finish() }; return }
+        var found = document.sentence(from: position, in: scope)
+        if found == nil, let last = lastExtracted { found = document.sentence(after: last, scope: &scope) }
+        guard let sentence = found else {
             cursor = nil
             if queued.isEmpty { finish() }
             return
         }
+        lastExtracted = sentence
         if timing != nil, timing?.extractMs == nil {
             timing?.extractMs = LatencyLog.ms(since: extractStart)
             timing?.chars = sentence.text.count
@@ -180,6 +189,11 @@ final class ReadingSession {
             return
         }
         var lines = document.lines(of: current)
+        if lines.isEmpty, let fresh = document.relocate(current) {
+            queued[0] = fresh
+            lines = document.lines(of: fresh)
+            print("[highlight] \(current.text.prefix(40).debugDescription): page re-rendered, found it again")
+        }
         let label = current.text.prefix(40).debugDescription
         guard let bounds = union(lines), let visible = document.visibleRect() else {
             print("[highlight] \(label) → no box: \(document.linesDiagnosis(of: current))")
@@ -197,8 +211,13 @@ final class ReadingSession {
     }
 
     private func refreshHighlight() {
-        guard !suspendHighlight, let current = queued.first else { return }
-        let lines = document.lines(of: current)
+        guard !suspendHighlight, var current = queued.first else { return }
+        var lines = document.lines(of: current)
+        // The page may have rebuilt its elements mid-sentence; look again, but not 10× a second.
+        if lines.isEmpty, Date().timeIntervalSince(lastRelocateAttempt) > 0.5 {
+            lastRelocateAttempt = Date()
+            if let fresh = document.relocate(current) { queued[0] = fresh; current = fresh; lines = document.lines(of: fresh) }
+        }
         guard let bounds = union(lines), let visible = document.visibleRect() else { return }
         // If the user scrolled the sentence away, stop dragging the page
         // back; resume following once it's on screen again.

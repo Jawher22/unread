@@ -27,6 +27,10 @@ protocol ReadableDocument: AnyObject {
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence?
     /// Where a reading that starts at `position` may go.
     func scope(from position: AnyObject) -> ReadingScope?
+    /// The same sentence, found again after the page rebuilt its elements
+    /// (chat apps re-render messages all the time). Nil if it's still alive
+    /// or can't be found.
+    func relocate(_ sentence: Sentence) -> Sentence?
     /// The sentence's on-screen boxes, one per line, so a highlight never
     /// covers the end of the previous sentence or the start of the next.
     func lines(of sentence: Sentence) -> [CGRect]
@@ -39,7 +43,25 @@ protocol ReadableDocument: AnyObject {
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
     func scope(from position: AnyObject) -> ReadingScope? { nil }
+    func relocate(_ sentence: Sentence) -> Sentence? { nil }
     func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
+
+    /// The sentence after `last`. If there's none because the page rebuilt
+    /// its elements under us (stale markers read as nothing), find `last`
+    /// again and carry on from there, with a scope recomputed in the new tree.
+    func sentence(after last: Sentence, scope: inout ReadingScope?) -> Sentence? {
+        if let next = last.next, let s = sentence(from: next, in: scope) { return s }
+        guard let fresh = relocate(last), let next = fresh.next else { return nil } // alive: that's the real end
+        print("[unread] page re-rendered; found \(last.text.prefix(30).debugDescription) again")
+        if scope != nil { scope = self.scope(from: startOf(fresh)) } // the old container may be gone too
+        return sentence(from: next, in: scope)
+    }
+
+    /// Opaque start position of a sentence's range (web only; native ranges
+    /// are indices and never go stale).
+    func startOf(_ s: Sentence) -> AnyObject {
+        CFGetTypeID(s.range) == AXTextMarkerRangeGetTypeID() ? AXTextMarkerRangeCopyStartMarker(s.range as! AXTextMarkerRange) : s.range
+    }
 
     /// The union of the sentence's line boxes.
     func bounds(of sentence: Sentence) -> CGRect? {
@@ -260,6 +282,70 @@ final class WebDocument: ReadableDocument {
             cursor = sentenceEnd
         }
         return nil
+    }
+
+    // MARK: Surviving re-renders
+
+    /// Stale markers point at deleted nodes and read as nothing.
+    private func isStale(_ s: Sentence) -> Bool {
+        let now = SpeechText.clean(string(s.range)) ?? ""
+        if debugWalk { print("    stale? \(s.text.prefix(24).debugDescription) range now reads \(now.prefix(24).debugDescription)") }
+        return now.isEmpty || !now.hasPrefix(String(s.text.prefix(12)))
+    }
+
+    func relocate(_ s: Sentence) -> Sentence? {
+        guard isStale(s) else { return nil }
+        // Search for the start of its text in the current tree. A list item's
+        // bullet is a separate marker element, so match what follows it.
+        var needle = s.text
+        if needle.hasPrefix("• ") { needle.removeFirst(2) }
+        let key = String(needle.prefix(24))
+        guard key.count >= 3 else { return nil }
+        var hits: [(leaf: AXUIElement, offset: Int)] = []
+        _ = AX.firstInOrder(in: element, maxNodes: 8000) { e in
+            guard AX.role(e) == kAXStaticTextRole, let v = AX.attr(e, kAXValueAttribute) as? String,
+                  let r = v.range(of: key) ?? (key.count > 12 ? v.range(of: String(key.prefix(12))) : nil) else { return false }
+            hits.append((e, NSRange(r, in: v).location))
+            return hits.count >= 4 // stop early; Chromium's per-line boxes repeat the parent's text
+        }
+        // Same text twice on a page: prefer the copy nearest where it was.
+        let lastBox = layouts.last?.lines.first
+        let best = hits.min { a, b in
+            guard let box = lastBox, let fa = AX.frame(a.leaf), let fb = AX.frame(b.leaf) else { return false }
+            return hypot(fa.midX - box.midX, fa.midY - box.midY) < hypot(fb.midX - box.midX, fb.midY - box.midY)
+        } ?? hits.first
+        if debugWalk { print("    relocate \(s.text.prefix(30).debugDescription): key \(key.debugDescription), \(hits.count) hit(s) \(hits.map { "\(((AX.attr($0.leaf, kAXValueAttribute) as? String) ?? "").prefix(30).debugDescription)@\($0.offset)" })") }
+        guard let best, let leafRange = p("AXTextMarkerRangeForUIElement", best.leaf) else { return nil }
+        let leafStartMarker = start(of: leafRange)
+        let startMarker = best.offset == 0 ? leafStartMarker : advance(leafStartMarker, by: best.offset)
+        let fresh = sentence(from: startMarker, in: nil)
+        if debugWalk { print("    relocate → \(fresh.map { $0.text.prefix(40).debugDescription } ?? "nil")") }
+        guard let fresh, fresh.text.hasPrefix(String(needle.prefix(8))) || s.text.hasPrefix(String(fresh.text.prefix(8))) else {
+            return nil
+        }
+        return Sentence(text: s.text, range: fresh.range, next: fresh.next)
+    }
+
+    /// The marker `target` UTF-16 units after `from`, or as close as it gets
+    /// without passing it (unlike `walk`, never jumps to a limit).
+    private func advance(_ from: AnyObject, by target: Int) -> AnyObject {
+        func covered(_ m: AnyObject) -> Int { range(from, m).map { (string($0) as NSString).length } ?? 0 }
+        var m = from
+        for _ in 0..<400 {
+            guard let next = p("AXNextWordEndTextMarkerForTextMarker", m), !CFEqual(next, m) else { break }
+            let n = covered(next)
+            if n > target { break }
+            m = next
+            if n == target { return m }
+        }
+        for _ in 0..<64 {
+            guard let next = p("AXNextTextMarkerForTextMarker", m), !CFEqual(next, m) else { break }
+            let n = covered(next)
+            if n > target { break }
+            m = next
+            if n == target { return m }
+        }
+        return m
     }
 
     // MARK: Reading scope (#10)

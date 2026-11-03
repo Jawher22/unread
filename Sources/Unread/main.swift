@@ -145,6 +145,7 @@ if args.contains("--extract") {
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
     //   --from-text "…"               start at the first sentence containing this text (like pointing there)
+    //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
     let pid = value(after: "--pid").flatMap { pid_t($0) }
     let fromStart = args.contains("--from-start")
@@ -154,15 +155,30 @@ if args.contains("--extract") {
         let found = pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument()
         guard let doc = found else { print("no document in \(pid.map { "pid \($0)" } ?? "front window")"); exit(1) }
         print("doc: \(type(of: doc)) found in \(Int(Date().timeIntervalSince(t) * 1000)) ms, visible: \(doc.visibleRect().map { "\($0)" } ?? "nil")")
-        var pos = fromStart || value(after: "--from-text") != nil ? doc.documentStart() : doc.firstVisible()
-        if let needle = value(after: "--from-text") {
-            while let p = pos, let s = doc.sentence(from: p), !s.text.contains(needle) { pos = s.next }
-            if pos == nil { print("text not found: \(needle)"); exit(1) }
+        let slow = args.contains("--slow")
+        func findStart() -> AnyObject? {
+            var pos = fromStart || value(after: "--from-text") != nil ? doc.documentStart() : doc.firstVisible()
+            if let needle = value(after: "--from-text") {
+                while let p = pos, let s = doc.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+            }
+            return pos
         }
-        let scope = pos.flatMap { doc.scope(from: $0) }
+        var pos = findStart()
+        if pos == nil { print("nothing to read"); exit(1) }
+        var scope = pos.flatMap { doc.scope(from: $0) }
         var n = 0
+        var last: Sentence?
         let t2 = Date()
-        while let p = pos, n < limit, let s = doc.sentence(from: p, in: scope) {
+        while n < limit {
+            var next = pos.flatMap { doc.sentence(from: $0, in: scope) }
+            if next == nil, let l = last { next = doc.sentence(after: l, scope: &scope) }
+            if next == nil, last == nil, let again = findStart() { pos = again; scope = doc.scope(from: again); next = doc.sentence(from: again, in: scope) }
+            guard var s = next else { break }
+            if slow {
+                Thread.sleep(forTimeInterval: 1.6)
+                if doc.lines(of: s).isEmpty, let fresh = doc.relocate(s) { s = fresh }
+            }
+            last = s
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
             print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
             if args.contains("--lines") {
