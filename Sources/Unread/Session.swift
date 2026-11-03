@@ -21,6 +21,7 @@ final class ReadingSession {
     private var queued: [Sentence] = []
     private var synthesizing = false
     private var cancelled = false
+    private var spokeAnything = false
     private var following = true
     private var followGraceUntil = Date.distantPast
     private var refresh: Timer?
@@ -88,6 +89,7 @@ final class ReadingSession {
         guard !cancelled else { return }
         guard let samples, !samples.isEmpty else { fill(); return }
         queued.append(sentence)
+        spokeAnything = true
         if queued.count == 1 {
             if startedAt != .distantPast {
                 print(String(format: "[unread] first audio %.0f ms after release", Date().timeIntervalSince(startedAt) * 1000))
@@ -112,9 +114,12 @@ final class ReadingSession {
         fill()
     }
 
+    /// Natural end only (not stop or jump): a soft chime says "that's all",
+    /// so a quiet room doesn't read as "did it stall?".
     private func finish() {
         guard !cancelled else { return }
         stop()
+        if spokeAnything { player.chime() }
         onFinish?()
     }
 
