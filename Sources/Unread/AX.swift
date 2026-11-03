@@ -1,6 +1,23 @@
 import AppKit
 import ApplicationServices
 
+/// Where all Accessibility work runs (#12). AX calls are synchronous IPC
+/// into the target app: tens of milliseconds on a busy Chromium page, up to
+/// the 0.25 s timeout on a hung one. Documents are confined to this serial
+/// queue; the main thread only draws the overlay and handles the hotkey.
+final class AXWorker: @unchecked Sendable {
+    static let shared = AXWorker()
+    private let queue = DispatchQueue(label: "unread.ax", qos: .userInitiated)
+
+    func run<T>(_ work: @escaping () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    func async(_ work: @escaping () -> Void) { queue.async(execute: work) }
+}
+
 /// An AXUIElement usable as a dictionary key (CFEqual / CFHash identity).
 struct AXKey: Hashable {
     let element: AXUIElement

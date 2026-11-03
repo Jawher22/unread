@@ -144,6 +144,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **`--extract` on a T3 Code window (2026-11-03):** 12 sentences in 101 ms, but **9 of 12 had no bounds**, so read-along would show no highlight most of the time in Electron. Inline `code` spans were also split into separate sentences (`sameBlock` treats the span as a new block).
 
+**Main-thread stalls (#12, 2026-11-03),** measured by `--simulate` (a 10 ms main-thread timer during 20 s of muted reading on T3 Code): before moving AX work off the main thread, worst stall ~120 ms with 1–3 stalls over 50 ms; after, worst 33–39 ms and none over 50 ms.
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)

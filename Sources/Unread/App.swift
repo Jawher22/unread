@@ -46,6 +46,10 @@ final class AppController: NSObject {
     private var speculation: Speculation?
     /// The paragraph aimed at, and since when. Speculate once it's stable.
     private var steadyAim: (start: AnyObject, since: Date)?
+    /// Aiming runs on the AX worker; one lookup in flight at a time, and
+    /// results from an earlier hold are dropped.
+    private var aimInFlight = false
+    private var aimToken = 0
     private let speculateAfter: TimeInterval = 0.08
 
     private let holdThreshold: TimeInterval = 0.22
@@ -65,10 +69,11 @@ final class AppController: NSObject {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
             // Ask Chromium/Electron apps to build their AX tree before we need it.
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-                MainActor.assumeIsolated { AX.enableTree(for: app.processIdentifier) }
+                let pid = app.processIdentifier
+                AXWorker.shared.async { AX.enableTree(for: pid) }
             }
         }
-        if let front = NSWorkspace.shared.frontmostApplication { AX.enableTree(for: front.processIdentifier) }
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier { AXWorker.shared.async { AX.enableTree(for: pid) } }
 
         let trusted = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         print("[unread] accessibility trusted: \(trusted)")
@@ -90,7 +95,7 @@ final class AppController: NSObject {
                 self.trustTimer = nil
                 self.accessibilityItem.isHidden = true
                 self.hotkey.start()
-                if let front = NSWorkspace.shared.frontmostApplication { AX.enableTree(for: front.processIdentifier) }
+                if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier { AXWorker.shared.async { AX.enableTree(for: pid) } }
                 print("[unread] accessibility granted")
             }
         }
@@ -174,6 +179,8 @@ final class AppController: NSObject {
         speculation = nil
         steadyAim = nil
         aimResolvedAt = CGPoint(x: -1e6, y: -1e6)
+        aimToken += 1
+        aimInFlight = false
         aimTimer?.invalidate()
         aimTimer = Timer.scheduledTimer(withTimeInterval: previewDelay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.beginAiming() }
@@ -189,14 +196,28 @@ final class AppController: NSObject {
     }
 
     private func aim() {
+        guard !aimInFlight else { return } // the worker is still on the last frame
+        aimInFlight = true
+        let token = aimToken
         let p = AX.mouseLocation()
         // Re-resolving the document walks the AX tree; only do it when the
-        // pointer has really moved. Paragraph lookup is cheap, do it every frame.
-        if aimDocument == nil || hypot(p.x - aimResolvedAt.x, p.y - aimResolvedAt.y) > 40 {
-            aimDocument = DocumentFinder.document(at: p)
-            aimResolvedAt = p
+        // pointer has really moved. Paragraph lookup is cheap (and cached).
+        let reresolve = aimDocument == nil || hypot(p.x - aimResolvedAt.x, p.y - aimResolvedAt.y) > 40
+        let current = aimDocument
+        Task { [weak self] in
+            let (doc, para) = await AXWorker.shared.run { () -> (ReadableDocument?, (start: AnyObject, bounds: CGRect)?) in
+                let doc = reresolve ? DocumentFinder.document(at: p) : current
+                return (doc, doc?.paragraph(at: p))
+            }
+            guard let self, token == self.aimToken else { return }
+            self.aimInFlight = false
+            if reresolve { self.aimDocument = doc; self.aimResolvedAt = p }
+            self.aimed(doc, para)
         }
-        if let doc = aimDocument, let para = doc.paragraph(at: p) {
+    }
+
+    private func aimed(_ doc: ReadableDocument?, _ para: (start: AnyObject, bounds: CGRect)?) {
+        if let doc, let para {
             aimTarget = (doc, para.start)
             if let steady = steadyAim, CFEqual(steady.start, para.start) {
                 if Date().timeIntervalSince(steady.since) >= speculateAfter { speculate(doc, from: para.start) }
@@ -218,24 +239,29 @@ final class AppController: NSObject {
         if let s = speculation, s.matches(doc, start) || !s.done { return }
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
-        let t = Date()
-        let scope = doc.scope(from: start)
-        guard let sentence = doc.sentence(from: start, in: scope) else { spec.done = true; return }
-        let extractMs = LatencyLog.ms(since: t)
         let voice = self.voice, speed = self.speed
-        let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
-        let task = Task { @MainActor [weak spec] in
+        let task = Task { @MainActor [weak spec] () -> PrimedSentence.Prepared? in
+            let extracted = await AXWorker.shared.run { () -> (Sentence, ReadingScope?, Double)? in
+                let t = Date()
+                let scope = doc.scope(from: start)
+                guard let sentence = doc.sentence(from: start, in: scope) else { return nil }
+                return (sentence, scope, LatencyLog.ms(since: t))
+            }
+            guard let (sentence, scope, extractMs) = extracted else { spec?.done = true; return nil }
+            let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
             let t = Date()
             let samples = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
             spec?.done = true
-            return (samples: samples, ms: LatencyLog.ms(since: t))
+            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, samples: samples, synthMs: LatencyLog.ms(since: t))
         }
-        spec.primed = PrimedSentence(sentence: sentence, scope: scope, extractMs: extractMs, samples: task)
+        spec.primed = PrimedSentence(prepared: task)
     }
 
     private func endAiming() {
         aimTimer?.invalidate()
         aimTimer = nil
+        aimToken += 1 // drop any lookup still in flight
+        aimInFlight = false
         overlay.hide()
         session?.setHighlightSuspended(false)
     }
@@ -254,6 +280,19 @@ final class AppController: NSObject {
             if let target {
                 let primed = spec.flatMap { $0.matches(target.document, target.start) ? $0.primed : nil }
                 startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold, primed: primed)
+            } else {
+                // Released before the first lookup came back from the AX worker
+                // (a quick hold while it's busy): look once more, at the release point.
+                let p = AX.mouseLocation()
+                let token = aimToken
+                Task { [weak self] in
+                    let found = await AXWorker.shared.run { () -> (ReadableDocument, AnyObject)? in
+                        guard let doc = DocumentFinder.document(at: p), let para = doc.paragraph(at: p) else { return nil }
+                        return (doc, para.start)
+                    }
+                    guard let self, token == self.aimToken, let (doc, start) = found else { return }
+                    self.startReading(doc, from: start, releasedAt: releasedAt, gesture: .hold)
+                }
             }
             return
         }
@@ -273,12 +312,21 @@ final class AppController: NSObject {
         }
         guard isDoubleTap else { return } // idle single tap: deliberately nothing
         let lookupStart = Date()
-        guard let doc = DocumentFinder.frontDocument(), let start = doc.firstVisible() else {
-            print("[unread] nothing readable in the front window")
-            NSSound.beep()
-            return
+        let token = aimToken
+        Task { [weak self] in
+            let found = await AXWorker.shared.run { () -> (ReadableDocument, AnyObject)? in
+                guard let doc = DocumentFinder.frontDocument(), let start = doc.firstVisible() else { return nil }
+                return (doc, start)
+            }
+            // A new press since then means the user moved on.
+            guard let self, token == self.aimToken, self.session == nil else { return }
+            guard let (doc, start) = found else {
+                print("[unread] nothing readable in the front window")
+                NSSound.beep()
+                return
+            }
+            self.startReading(doc, from: start, releasedAt: releasedAt, gesture: .doubleTap, lookupMs: LatencyLog.ms(since: lookupStart))
         }
-        startReading(doc, from: start, releasedAt: releasedAt, gesture: .doubleTap, lookupMs: LatencyLog.ms(since: lookupStart))
     }
 
     private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date,

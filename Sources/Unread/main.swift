@@ -115,6 +115,18 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     MainActor.assumeIsolated {
+        // Main-thread stall meter (#12): a 10 ms timer; any late tick means the
+        // main thread (overlay drawing, hotkey) was busy for that long.
+        var lastTick = Date(), worst = 0.0, over50 = 0, over16 = 0, measuring = false
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
+            let gap = Date().timeIntervalSince(lastTick) * 1000 - 10
+            lastTick = Date()
+            guard measuring else { return }
+            worst = max(worst, gap)
+            if gap > 16 { over16 += 1 }
+            if gap > 50 { over50 += 1 }
+        }
+        func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms", worst, over16, over50)) }
         let overlay = Overlay(), player = Player(muted: true), voice = Voice()
         let point = CGPoint(x: xy[0], y: xy[1])
         guard let doc = DocumentFinder.document(at: point), let para = doc.paragraph(at: point) else { print("nothing at point"); exit(1) }
@@ -122,17 +134,26 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             try? await voice.prepareEnglish()
             // --primed: start from a pre-synthesized first sentence, like a hold does (#5).
             var primed: PrimedSentence?
-            let scope = doc.scope(from: para.start)
-            if args.contains("--primed"), let first = doc.sentence(from: para.start, in: scope) {
-                let task = Task { @MainActor in (samples: try? await voice.synthesize(first.text, language: .english, speed: 1.3), ms: 0.0) }
-                primed = PrimedSentence(sentence: first, scope: scope, extractMs: 0, samples: task)
+            if args.contains("--primed") {
+                let start = para.start
+                primed = PrimedSentence(prepared: Task { @MainActor () -> PrimedSentence.Prepared? in
+                    let extracted = await AXWorker.shared.run { () -> (Sentence, ReadingScope?)? in
+                        let scope = doc.scope(from: start)
+                        return doc.sentence(from: start, in: scope).map { ($0, scope) }
+                    }
+                    guard let (first, scope) = extracted else { return nil }
+                    let samples = try? await voice.synthesize(first.text, language: .english, speed: 1.3)
+                    return .init(sentence: first, scope: scope, extractMs: 0, samples: samples, synthMs: 0)
+                })
             }
             let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,
                                    startedAt: Date(), primed: primed)
-            s.onFinish = { print("[session] finished"); exit(0) }
+            s.onFinish = { print("[session] finished"); report(); exit(0) }
+            measuring = true
+            lastTick = Date()
             s.start()
             _ = s // keep alive
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); exit(0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); report(); exit(0) }
         }
     }
     app.run()

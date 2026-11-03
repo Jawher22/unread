@@ -37,7 +37,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 
 ## Code map
 
-`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Overlay` (click-through highlight panels) · `Latency` (per-reading timing log + `--stats`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
+`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers, `AXWorker` queue) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Overlay` (click-through highlight panels) · `Latency` (per-reading timing log + `--stats`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
 
 ## Hard-won constraints (details in docs/design.md)
 
@@ -63,5 +63,6 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 - **Reading scope (#10):** reading stays in the nearest `AXDocumentArticle`, else `AXLandmarkMain`, and skips chrome inside it: nav/banner/footer/complementary landmarks, controls (buttons…), code blocks (WebKit `AXPreformattedStyleGroup`; Chromium a group whose only child is `AXCodeStyleGroup`), figure captions, visually hidden text, timestamps, short link rows. A chrome container the user started in is read. Judge a sentence by the leaf one character *inside* its end (the end marker sits on a boundary), climbing past Chromium's per-line `AXStaticText` boxes.
 - **Chromium clips element frames to the nearest scrolling container** (T3 Code's chat, not just the viewport): text out of view comes back full width but 0–1 px tall. Never treat "flat" as hidden; visually hidden text is ~1 px *wide*. Text-marker bounds are not clipped. `fixtures/pages/scroller.html` guards this.
 - **Pages rebuild their elements under you** (T3 Code re-renders messages while an agent works). Stale markers read as `""`. `WebDocument.relocate` finds the sentence's text in the new tree and rebuilds fresh leaf-anchored markers; `sentence(after:scope:)` uses it to keep walking. `fixtures/pages/rerender.html` (run with `--slow`) guards this.
+- **All Accessibility work runs on `AXWorker` (#12), never the main thread.** Documents are confined to that serial queue: create and call them inside `AXWorker.shared.run { }`; the main actor only touches results (sentences, rects). Dev modes in `main.swift` may call documents directly because they're single-threaded. `--simulate` prints a main-thread stall meter.
 - Enable Chromium's tree with `AXManualAccessibility` only. Never set `AXEnhancedUserInterface`: it breaks window animations.
 - Kokoro v3 (fast ANE path) supports English, Japanese and Mandarin only. French uses the legacy pipeline with a single voice, `ff_siwis`.
