@@ -19,6 +19,7 @@ swift build -c release                # Swift 6.2 toolchain; macOS 15+, Apple Si
 ./.build/release/Unread               # menu-bar app; needs Accessibility permission
 ./.build/release/Unread --bench       # silent: model load + synthesis timings
 ./.build/release/Unread --extract     # print sentences + bounds Unread would read from the front window
+./.build/release/Unread --stats       # p50/p95 latency from ~/Library/Logs/Unread/latency.jsonl
 ```
 
 ```bash
@@ -35,7 +36,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 
 ## Code map
 
-`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Overlay` (click-through highlight panels) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
+`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Overlay` (click-through highlight panels) · `Latency` (per-reading timing log + `--stats`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
 
 ## Hard-won constraints (details in docs/design.md)
 
