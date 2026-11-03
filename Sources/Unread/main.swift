@@ -15,6 +15,11 @@ if !devMode, isatty(STDOUT_FILENO) == 0, Bundle.main.bundleIdentifier != nil {
     print("[unread] --- launched \(Date())")
 }
 
+if args.contains("--stats") {
+    LatencyLog.printStats()
+    exit(0)
+}
+
 if args.contains("--bench") {
     // Silent: time model load and per-sentence synthesis, no audio output.
     let sentences = [
