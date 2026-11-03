@@ -302,17 +302,12 @@ final class WebDocument: ReadableDocument {
         let chain = ancestry(of: leaf)
         if let c = scope.container, !chain.contains(where: { CFEqual($0, c) }) { return .end }
         if let pointed = scope.pointedInto, chain.contains(where: { CFEqual($0, pointed) }) { return .read }
-        // Visually hidden ("sr-only") text: Chromium gives the text a ~1 px
-        // frame; WebKit gives the text its full size but its container 1 px.
-        // But Chromium also clips frames to the viewport: text below the fold
-        // comes back 0 px tall on the viewport's edge. That's "can't tell".
-        let visible = visibleRect()
-        func tiny(_ f: CGRect) -> Bool {
-            guard f.width < 4 || f.height < 4 else { return false }
-            if let v = visible, f.maxY >= v.maxY - 1 || f.minY <= v.minY + 1 { return false } // clipped at the top or bottom
-            return true
-        }
-        if chain.prefix(3).contains(where: { AX.frame($0).map(tiny) ?? false }) { return .skip("hidden") }
+        // Visually hidden ("sr-only") text is ~1 px *wide*: Chromium gives the
+        // text a 0–1 px frame, WebKit gives its container 1 px. Don't judge by
+        // height: Chromium clips frames to the nearest scrolling container
+        // (T3 Code's chat, not just the viewport), so text scrolled out of
+        // view comes back full width but 0–1 px tall. That's off screen, not hidden.
+        if chain.prefix(3).contains(where: { AX.frame($0).map { $0.width < 4 } ?? false }) { return .skip("hidden") }
         // …or, when the 1 px container isn't exposed, text wrapped one word
         // per line into a column no real paragraph is that narrow. (Chromium's
         // per-line text boxes are AXStaticText too, so look a level up.)
