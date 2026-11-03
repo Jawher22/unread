@@ -32,6 +32,22 @@ final class AppController: NSObject {
     private var aimTarget: (document: ReadableDocument, start: AnyObject)?
     private var lastTapAt = Date.distantPast
 
+    /// Speculative synthesis of the aimed sentence while the key is held.
+    private final class Speculation {
+        let element: AXUIElement
+        let start: AnyObject
+        var primed: PrimedSentence?
+        var done = false
+        init(element: AXUIElement, start: AnyObject) { self.element = element; self.start = start }
+        func matches(_ doc: ReadableDocument, _ start: AnyObject) -> Bool {
+            CFEqual(element, doc.element) && CFEqual(self.start, start)
+        }
+    }
+    private var speculation: Speculation?
+    /// The paragraph aimed at, and since when. Speculate once it's stable.
+    private var steadyAim: (start: AnyObject, since: Date)?
+    private let speculateAfter: TimeInterval = 0.08
+
     private let holdThreshold: TimeInterval = 0.22
     private let previewDelay: TimeInterval = 0.12
     private let doubleTapWindow: TimeInterval = 0.35
@@ -41,7 +57,10 @@ final class AppController: NSObject {
         setUpMenu()
         hotkey.onPress = { [weak self] in self?.keyDown() }
         hotkey.onRelease = { [weak self] held in self?.keyUp(held: held) }
-        hotkey.onCancel = { [weak self] in self?.endAiming() }
+        hotkey.onCancel = { [weak self] in
+            self?.speculation = nil
+            self?.endAiming()
+        }
 
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
             // Ask Chromium/Electron apps to build their AX tree before we need it.
@@ -152,6 +171,8 @@ final class AppController: NSObject {
         player.warm() // open the audio device now, not on release
         aimTarget = nil
         aimDocument = nil
+        speculation = nil
+        steadyAim = nil
         aimResolvedAt = CGPoint(x: -1e6, y: -1e6)
         aimTimer?.invalidate()
         aimTimer = Timer.scheduledTimer(withTimeInterval: previewDelay, repeats: false) { [weak self] _ in
@@ -177,11 +198,38 @@ final class AppController: NSObject {
         }
         if let doc = aimDocument, let para = doc.paragraph(at: p) {
             aimTarget = (doc, para.start)
+            if let steady = steadyAim, CFEqual(steady.start, para.start) {
+                if Date().timeIntervalSince(steady.since) >= speculateAfter { speculate(doc, from: para.start) }
+            } else {
+                steadyAim = (para.start, Date())
+            }
             overlay.show(para.bounds, style: .preview)
         } else {
             aimTarget = nil
             overlay.hide()
         }
+    }
+
+    /// Extract and synthesize the first sentence of the aimed paragraph now,
+    /// so release → first audio is just scheduling. One job at a time: a stale
+    /// job (pointer moved on) finishes before the next starts, so it can delay
+    /// a fresh one by at most one sentence.
+    private func speculate(_ doc: ReadableDocument, from start: AnyObject) {
+        if let s = speculation, s.matches(doc, start) || !s.done { return }
+        let spec = Speculation(element: doc.element, start: start)
+        speculation = spec
+        let t = Date()
+        guard let sentence = doc.sentence(from: start) else { spec.done = true; return }
+        let extractMs = LatencyLog.ms(since: t)
+        let voice = self.voice, speed = self.speed
+        let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
+        let task = Task { @MainActor [weak spec] in
+            let t = Date()
+            let samples = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
+            spec?.done = true
+            return (samples: samples, ms: LatencyLog.ms(since: t))
+        }
+        spec.primed = PrimedSentence(sentence: sentence, extractMs: extractMs, samples: task)
     }
 
     private func endAiming() {
@@ -194,12 +242,18 @@ final class AppController: NSObject {
     private func keyUp(held: TimeInterval) {
         guard ready else { return }
         let target = aimTarget
+        let spec = speculation
+        speculation = nil
+        steadyAim = nil
         endAiming()
         let releasedAt = Date()
 
         if held >= holdThreshold {
             // Point-and-hold: read from the paragraph we were aiming at.
-            if let target { startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold) }
+            if let target {
+                let primed = spec.flatMap { $0.matches(target.document, target.start) ? $0.primed : nil }
+                startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold, primed: primed)
+            }
             return
         }
 
@@ -227,13 +281,14 @@ final class AppController: NSObject {
     }
 
     private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date,
-                              gesture: LatencyRecord.Gesture, lookupMs: Double? = nil) {
+                              gesture: LatencyRecord.Gesture, lookupMs: Double? = nil, primed: PrimedSentence? = nil) {
         session?.stop()
         print("[unread] reading \(type(of: doc)) in pid \(AX.pid(doc.element))")
         let app = NSRunningApplication(processIdentifier: AX.pid(doc.element))?.bundleIdentifier
-        let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs)
+        let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs,
+                                   speculative: gesture == .hold ? primed != nil : nil)
         let s = ReadingSession(document: doc, start: start, speed: speed, voice: voice, player: player, overlay: overlay,
-                               startedAt: releasedAt, timing: timing)
+                               startedAt: releasedAt, timing: timing, primed: primed)
         s.onFinish = { [weak self, weak s] in
             guard let self, self.session === s else { return }
             self.session = nil
