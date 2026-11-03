@@ -8,7 +8,9 @@ final class Overlay {
     enum Style { case preview, reading }
 
     private var panels: [NSPanel] = []
-    private var layers: [CALayer] = []
+    private var layers: [CAShapeLayer] = []
+    /// Rects per panel last shown, to decide whether the shape can glide.
+    private var shownCounts: [Int] = []
 
     init() {
         rebuild()
@@ -31,9 +33,8 @@ final class Overlay {
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             let view = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
             view.wantsLayer = true
-            let layer = CALayer()
-            layer.cornerRadius = 6
-            layer.cornerCurve = .continuous
+            let layer = CAShapeLayer()
+            layer.fillRule = .nonZero // overlapping line boxes fill once, no darker seams
             layer.opacity = 0
             view.layer?.addSublayer(layer)
             panel.contentView = view
@@ -42,32 +43,48 @@ final class Overlay {
             panels.append(panel)
             layers.append(layer)
         }
+        shownCounts = Array(repeating: 0, count: layers.count)
     }
 
-    /// Show a highlight around `axRect` (AX coordinates). Moving between
-    /// rects animates, so the highlight glides from sentence to sentence.
-    func show(_ axRect: CGRect, style: Style) {
+    /// Show a highlight around `axRect` (AX coordinates).
+    func show(_ axRect: CGRect, style: Style) { show([axRect], style: style) }
+
+    /// Show a highlight made of several boxes (a sentence's lines), drawn as
+    /// one shape. Moving between highlights with the same number of boxes
+    /// animates, so the highlight glides from sentence to sentence.
+    func show(_ axRects: [CGRect], style: Style) {
+        guard !axRects.isEmpty else { hide(); return }
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
-        let cocoa = CGRect(x: axRect.minX, y: primaryHeight - axRect.maxY, width: axRect.width, height: axRect.height)
-            .insetBy(dx: -4, dy: -2)
-        for (panel, layer) in zip(panels, layers) {
-            guard panel.frame.intersects(cocoa) else { hide(layer); continue }
-            let local = cocoa.offsetBy(dx: -panel.frame.minX, dy: -panel.frame.minY)
+        let cocoa = axRects.map {
+            CGRect(x: $0.minX, y: primaryHeight - $0.maxY, width: $0.width, height: $0.height).insetBy(dx: -4, dy: -2)
+        }
+        for (i, (panel, layer)) in zip(panels, layers).enumerated() {
+            let mine = cocoa.filter { panel.frame.intersects($0) }
+            guard !mine.isEmpty else { hide(layer); shownCounts[i] = 0; continue }
+            let path = CGMutablePath()
+            for r in mine {
+                path.addRoundedRect(in: r.offsetBy(dx: -panel.frame.minX, dy: -panel.frame.minY), cornerWidth: 5, cornerHeight: 5)
+            }
             let accent = NSColor.controlAccentColor
             CATransaction.begin()
-            CATransaction.setAnimationDuration(layer.opacity == 0 ? 0 : 0.18)
+            // Paths only morph cleanly between the same number of boxes; otherwise jump.
+            let glide = layer.opacity > 0 && shownCounts[i] == mine.count
+            CATransaction.setAnimationDuration(glide ? 0.18 : 0)
+            CATransaction.setDisableActions(!glide)
             CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-            layer.frame = local
+            layer.path = path
             switch style {
             case .preview:
-                layer.backgroundColor = accent.withAlphaComponent(0.08).cgColor
-                layer.borderColor = accent.withAlphaComponent(0.55).cgColor
-                layer.borderWidth = 1.5
+                layer.fillColor = accent.withAlphaComponent(0.08).cgColor
+                layer.strokeColor = accent.withAlphaComponent(0.55).cgColor
+                layer.lineWidth = 1.5
             case .reading:
-                layer.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.22).cgColor
-                layer.borderWidth = 0
+                layer.fillColor = NSColor.systemYellow.withAlphaComponent(0.22).cgColor
+                layer.strokeColor = nil
+                layer.lineWidth = 0
             }
             CATransaction.commit()
+            shownCounts[i] = mine.count
             CATransaction.begin()
             CATransaction.setAnimationDuration(0.12)
             layer.opacity = 1
@@ -75,9 +92,12 @@ final class Overlay {
         }
     }
 
-    func hide() { layers.forEach(hide) }
+    func hide() {
+        layers.forEach(hide)
+        shownCounts = shownCounts.map { _ in 0 }
+    }
 
-    private func hide(_ layer: CALayer) {
+    private func hide(_ layer: CAShapeLayer) {
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.15)
         layer.opacity = 0

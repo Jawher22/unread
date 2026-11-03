@@ -169,25 +169,32 @@ final class ReadingSession {
 
     private func showCurrent(scroll: Bool) {
         guard !suspendHighlight, let current = queued.first else { return }
-        guard var bounds = document.bounds(of: current), let visible = document.visibleRect() else {
-            overlay.hide(); return
-        }
+        var lines = document.lines(of: current)
+        guard let bounds = union(lines), let visible = document.visibleRect() else { overlay.hide(); return }
         if scroll, following, !visible.contains(bounds) {
             document.scrollIntoView(current)
             followGraceUntil = Date().addingTimeInterval(0.8)
-            bounds = document.bounds(of: current) ?? bounds
+            let moved = document.lines(of: current)
+            if !moved.isEmpty { lines = moved }
         }
-        let shown = bounds.intersection(visible)
-        if shown.isNull || shown.isEmpty { overlay.hide() } else { overlay.show(shown, style: .reading) }
+        show(lines, in: visible)
     }
 
     private func refreshHighlight() {
-        guard !suspendHighlight, let current = queued.first,
-              let bounds = document.bounds(of: current), let visible = document.visibleRect() else { return }
+        guard !suspendHighlight, let current = queued.first else { return }
+        let lines = document.lines(of: current)
+        guard let bounds = union(lines), let visible = document.visibleRect() else { return }
         // If the user scrolled the sentence away, stop dragging the page
         // back; resume following once it's on screen again.
         if Date() > followGraceUntil { following = visible.intersects(bounds) }
-        let shown = bounds.intersection(visible)
-        if shown.isNull || shown.isEmpty { overlay.hide() } else { overlay.show(shown, style: .reading) }
+        show(lines, in: visible)
     }
+
+    /// Draw the sentence's lines, clipped to the visible part of the document.
+    private func show(_ lines: [CGRect], in visible: CGRect) {
+        let shown = lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
+        if shown.isEmpty { overlay.hide() } else { overlay.show(shown, style: .reading) }
+    }
+
+    private func union(_ lines: [CGRect]) -> CGRect? { lines.dropFirst().reduce(lines.first) { $0?.union($1) } }
 }

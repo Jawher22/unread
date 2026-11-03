@@ -72,21 +72,51 @@ enum AX {
     }
 
     /// Chromium and Electron only build their accessibility tree once a
-    /// client asks for it. Flip the switch once per process.
-    private static var enabledPids = Set<pid_t>()
+    /// client asks for it, and recent Chromium switches it off again after a
+    /// while without use (auto-disable). The flag can't be read back (it
+    /// always reads false), so judge by the tree itself: switched off, the
+    /// app's "focused window" comes back as a stub (an AXApplication, not an
+    /// AXWindow). Re-enable only then, and at most every 10 s: setting the
+    /// flag restarts Chromium's tree build, so setting it repeatedly means the
+    /// tree never finishes.
+    private static var enabledAt: [pid_t: Date] = [:]
     static func enableTree(for pid: pid_t) {
-        guard pid > 0, !enabledPids.contains(pid) else { return }
-        enabledPids.insert(pid)
+        guard pid > 0, pid != getpid() else { return }
+        if let last = enabledAt[pid] {
+            guard Date().timeIntervalSince(last) > 10, !treeLooksAlive(pid) else { return }
+            print("[unread] accessibility tree of pid \(pid) was switched off; re-enabling")
+        }
+        enabledAt[pid] = Date()
         let app = AXUIElementCreateApplication(pid)
         // Deliberately not AXEnhancedUserInterface: it breaks window
         // animations in some apps. Chromium/Electron honour this one.
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
 
+    private static func treeLooksAlive(_ pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        guard let window = element(attr(app, kAXFocusedWindowAttribute)) ?? element(attr(app, kAXMainWindowAttribute)) else {
+            return true // no window to judge by (or not a windowed app): leave it alone
+        }
+        return role(window) == kAXWindowRole
+    }
+
     static func mouseLocation() -> CGPoint {
         let m = NSEvent.mouseLocation
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         return CGPoint(x: m.x, y: primaryHeight - m.y)
+    }
+
+    /// Depth-first (document order) search, bounded, for the first element matching `match`.
+    static func firstInOrder(in root: AXUIElement, maxNodes: Int, _ match: (AXUIElement) -> Bool) -> AXUIElement? {
+        var stack = [root]
+        var seen = 0
+        while let e = stack.popLast(), seen < maxNodes {
+            seen += 1
+            if match(e) { return e }
+            stack.append(contentsOf: children(e).reversed())
+        }
+        return nil
     }
 
     /// Breadth-first search, bounded, for the first element matching `match`.

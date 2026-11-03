@@ -76,11 +76,35 @@ if args.contains("--axtree"), let i = args.firstIndex(of: "--axtree"), args.indi
     exit(0)
 }
 
+if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
+    // What would a hold at this point (AX coordinates) pick? `--at 700,300`
+    let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
+    let point = CGPoint(x: xy[0], y: xy[1])
+    MainActor.assumeIsolated {
+        func describe(_ e: AXUIElement?) -> String {
+            guard let e else { return "nil" }
+            let text = ((AX.attr(e, kAXValueAttribute) as? String) ?? "").prefix(60).debugDescription
+            return "\(AX.role(e) ?? "?") \(AX.frame(e).map { "\($0)" } ?? "-") \(text)"
+        }
+        let hit = AX.element(at: point)
+        print("hit:  \(describe(hit))")
+        if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
+        guard let doc = DocumentFinder.document(at: point) else { print("no document"); exit(1) }
+        if let para = doc.paragraph(at: point), let s = doc.sentence(from: para.start) {
+            print("paragraph box: \(para.bounds)")
+            print("first sentence: \(s.text.prefix(80).debugDescription)")
+            print("lines: \(doc.lines(of: s))")
+        } else { print("no paragraph") }
+    }
+    exit(0)
+}
+
 if args.contains("--extract") {
     // Print what we'd read, without speaking.
     //   --extract                     front window, from the first visible paragraph, 12 sentences
     //   --extract --pid N --from-start  any app's main window (no focus needed), whole document
     //   --limit N                     stop after N sentences
+    //   --lines                       also print each sentence's line boxes
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
     let pid = value(after: "--pid").flatMap { pid_t($0) }
     let fromStart = args.contains("--from-start")
@@ -96,6 +120,9 @@ if args.contains("--extract") {
         while let p = pos, n < limit, let s = doc.sentence(from: p) {
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
             print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
+            if args.contains("--lines") {
+                print("     lines " + doc.lines(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" }.joined(separator: " "))
+            }
             pos = s.next
             n += 1
         }
