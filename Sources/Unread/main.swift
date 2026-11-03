@@ -151,6 +151,10 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             s.onFinish = { print("[session] finished"); report(); exit(0) }
             measuring = true
             lastTick = Date()
+            // --speed-change-at T: switch to 1.75× after T seconds (#15).
+            if let j = args.firstIndex(of: "--speed-change-at"), args.indices.contains(j + 1), let at = Double(args[j + 1]) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); s.speed = 1.75 }
+            }
             s.start()
             _ = s // keep alive
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); report(); exit(0) }

@@ -22,7 +22,8 @@ struct PrimedSentence {
 @MainActor
 final class ReadingSession {
     let document: ReadableDocument
-    var speed: Float
+    /// Changing it re-synthesizes everything not yet playing (#15).
+    var speed: Float { didSet { if speed != oldValue { settingsChanged() } } }
     var onFinish: (() -> Void)?
 
     private let voice: Voice
@@ -32,8 +33,24 @@ final class ReadingSession {
     private let lookahead = 3
 
     private var cursor: AnyObject?
-    /// Scheduled, not yet finished. `first` is the one being spoken.
+    /// On the player, not yet finished. `first` is the one being spoken; at
+    /// most one more is scheduled, in the current one's closing pause.
     private var queued: [Sentence] = []
+    /// Synthesized, waiting for the player. Can still be thrown away.
+    private var ready: [Ready] = []
+    /// Sentences to synthesize again after a speed or voice change, before
+    /// extracting new ones.
+    private var redo: [Pending] = []
+    /// Bumped by a speed or voice change; audio from an older generation is redone.
+    private var generation = 0
+    /// Sentences are numbered as they're extracted and played strictly in order.
+    private var nextSeq = 0
+    private var nextToPlay = 0
+    /// The player has consumed everything handed to it and can take the next sentence.
+    private var playerWantsMore = true
+
+    private struct Pending { let sentence: Sentence; let language: NLLanguage; let seq: Int }
+    private struct Ready { let pending: Pending; let samples: [Float]; let speed: Float }
     /// Extracting or synthesizing the next sentence (one at a time).
     private var producing = false
     private var cancelled = false
@@ -51,6 +68,8 @@ final class ReadingSession {
     /// once at first audio, then nil.
     private var timing: LatencyRecord?
     private var primed: PrimedSentence?
+    /// The speed the primed sentence was synthesized at.
+    private let primedSpeed: Float
     /// The article / main area this reading stays in, and what it skips (#10).
     private var scope: ReadingScope?
     private var scopeResolved = false
@@ -72,6 +91,18 @@ final class ReadingSession {
         self.startedAt = startedAt
         self.timing = timing
         self.primed = primed
+        self.primedSpeed = speed
+    }
+
+    /// Speed or voice changed: keep the sentence that's playing, throw away
+    /// the audio waiting behind it and synthesize those sentences again.
+    /// A synthesis already running is redone when it finishes.
+    func settingsChanged() {
+        generation += 1
+        redo = (ready.map(\.pending) + redo).sorted { $0.seq < $1.seq }
+        ready = []
+        if debugSession { print("[session] settings changed; redoing \(redo.count) sentence(s)") }
+        fill()
     }
 
     func start() {
@@ -117,16 +148,29 @@ final class ReadingSession {
             self.scopeResolved = true
             self.cursor = prepared.sentence.next
             self.lastExtracted = prepared.sentence
-            _ = self.language.language(for: prepared.sentence.text) // keep language stickiness in step
+            let lang = self.language.language(for: prepared.sentence.text) // keep language stickiness in step
             self.timing?.extractMs = prepared.extractMs
             self.timing?.chars = prepared.sentence.text.count
-            self.enqueue(prepared.sentence, samples: prepared.samples, synthMs: prepared.synthMs)
+            let pending = Pending(sentence: prepared.sentence, language: lang, seq: self.nextSeq)
+            self.nextSeq += 1
+            if self.speed != self.primedSpeed {
+                // The speed changed during the hold: synthesize the first sentence again.
+                self.redo.append(pending)
+                self.fill()
+                return
+            }
+            self.enqueue(pending, samples: prepared.samples, speed: self.speed, synthMs: prepared.synthMs)
         }
     }
 
     private func fill() {
-        guard !cancelled, !producing, queued.count < lookahead else { return }
-        guard let position = cursor else { if queued.isEmpty { finish() }; return }
+        guard !cancelled, !producing, ready.count + max(0, queued.count - 1) < lookahead else { return }
+        if !redo.isEmpty {
+            producing = true
+            synthesize(redo.removeFirst())
+            return
+        }
+        guard let position = cursor else { if queued.isEmpty, ready.isEmpty { finish() }; return }
         producing = true
         let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
         Task { [weak self] in
@@ -143,7 +187,7 @@ final class ReadingSession {
             guard let sentence = found else {
                 self.producing = false
                 self.cursor = nil
-                if self.queued.isEmpty { self.finish() }
+                if self.queued.isEmpty, self.ready.isEmpty, self.redo.isEmpty { self.finish() }
                 return
             }
             self.lastExtracted = sentence
@@ -152,34 +196,76 @@ final class ReadingSession {
                 self.timing?.extractMs = LatencyLog.ms(since: extractStart)
                 self.timing?.chars = sentence.text.count
             }
-            let lang = self.language.language(for: sentence.text)
-            let synthStart = Date()
-            let samples = try? await self.voice.synthesize(sentence.text, language: lang, speed: self.speed)
-            guard !self.cancelled else { return }
-            self.producing = false
-            self.enqueue(sentence, samples: samples, synthMs: LatencyLog.ms(since: synthStart))
+            let pending = Pending(sentence: sentence, language: self.language.language(for: sentence.text), seq: self.nextSeq)
+            self.nextSeq += 1
+            self.synthesize(pending)
         }
     }
 
-    private func enqueue(_ sentence: Sentence, samples: [Float]?, synthMs: Double) {
+    /// Synthesize at the current settings. If they change before it's done,
+    /// the sentence goes back into `redo` instead of playing.
+    private func synthesize(_ pending: Pending) {
+        let generation = self.generation, speed = self.speed, voice = self.voice
+        Task { [weak self] in
+            let synthStart = Date()
+            let samples = try? await voice.synthesize(pending.sentence.text, language: pending.language, speed: speed)
+            guard let self, !self.cancelled else { return }
+            self.producing = false
+            guard generation == self.generation else {
+                self.redo = (self.redo + [pending]).sorted { $0.seq < $1.seq }
+                self.fill()
+                return
+            }
+            self.enqueue(pending, samples: samples, speed: speed, synthMs: LatencyLog.ms(since: synthStart))
+        }
+    }
+
+    private func enqueue(_ pending: Pending, samples: [Float]?, speed: Float, synthMs: Double) {
         guard !cancelled else { return }
-        guard let samples, !samples.isEmpty else { fill(); return }
-        queued.append(sentence)
-        spokeAnything = true
-        if queued.count == 1 { showCurrent(scroll: true) }
-        player.schedule(samples) { [weak self] in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
+        // Nothing to say (synthesis failed): keep its place so order holds, then skip it.
+        ready.append(Ready(pending: pending, samples: samples ?? [], speed: speed))
+        ready.sort { $0.pending.seq < $1.pending.seq }
+        if timing != nil, timing?.synthMs == nil { timing?.synthMs = synthMs }
+        scheduleNext()
+        fill()
+    }
+
+    /// Hand the next sentence to the player, if it's ready and the player has
+    /// consumed the previous one's speech (it's now in its closing pause).
+    private func scheduleNext() {
+        while !cancelled, playerWantsMore, let next = ready.first, next.pending.seq == nextToPlay {
+            ready.removeFirst()
+            nextToPlay += 1
+            guard !next.samples.isEmpty else { continue }
+            playerWantsMore = false
+            queued.append(next.pending.sentence)
+            spokeAnything = true
+            if debugSession {
+                print(String(format: "[session] playing #%d at %.2g× (%.1fs) %@", next.pending.seq, next.speed,
+                             Double(next.samples.count) / 24_000, next.pending.sentence.text.prefix(40).debugDescription))
+            }
+            if queued.count == 1 { showCurrent(scroll: true) }
+            player.schedule(next.samples, consumed: { [weak self] in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.speechConsumed() } }
+            }, played: { [weak self] in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
+            })
+            if var t = timing {
+                // Measured after scheduling: that's when the buffer is queued on a running engine.
+                t.firstAudioMs = LatencyLog.ms(since: startedAt)
+                t.outputLatencyMs = (player.outputLatency * 1000).rounded()
+                timing = nil
+                print(String(format: "[unread] first audio %.0f ms after release (%@, extract %.0f, synth %.0f, +%.0f device)",
+                             t.firstAudioMs!, t.gesture.rawValue, t.extractMs ?? 0, t.synthMs ?? 0, t.outputLatencyMs!))
+                LatencyLog.append(t)
+            }
         }
-        if var t = timing {
-            // Measured after scheduling: that's when the buffer is queued on a running engine.
-            t.firstAudioMs = LatencyLog.ms(since: startedAt)
-            t.synthMs = synthMs
-            t.outputLatencyMs = (player.outputLatency * 1000).rounded()
-            timing = nil
-            print(String(format: "[unread] first audio %.0f ms after release (%@, extract %.0f, synth %.0f, +%.0f device)",
-                         t.firstAudioMs!, t.gesture.rawValue, t.extractMs ?? 0, synthMs, t.outputLatencyMs!))
-            LatencyLog.append(t)
-        }
+    }
+
+    private func speechConsumed() {
+        guard !cancelled else { return }
+        playerWantsMore = true
+        scheduleNext()
         fill()
     }
 
@@ -189,7 +275,7 @@ final class ReadingSession {
         queued.removeFirst()
         if queued.isEmpty {
             overlay.hide()
-            if cursor == nil, !producing { finish() }
+            if cursor == nil, !producing, ready.isEmpty, redo.isEmpty { finish() }
         } else {
             showCurrent(scroll: true)
         }

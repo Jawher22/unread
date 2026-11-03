@@ -89,10 +89,19 @@ final class Player {
         if !engine.isRunning { try? engine.start() }
     }
 
-    func schedule(_ samples: [Float], played: @escaping @Sendable () -> Void) {
+    /// Schedule one sentence and the pause after it. `consumed` fires when the
+    /// speech has been handed to the hardware (the pause is still ahead, so
+    /// there's ~120 ms to schedule the next sentence gaplessly); `played` when
+    /// the pause has been heard too.
+    ///
+    /// The session schedules one sentence at a time on purpose: a buffer
+    /// on the node can't be taken back, so audio waiting here couldn't follow a
+    /// speed or voice change (#15).
+    func schedule(_ samples: [Float], consumed: @escaping @Sendable () -> Void, played: @escaping @Sendable () -> Void) {
         warm()
-        guard let buf = buffer(samples + gap) else { return }
-        node.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in played() }
+        guard let speech = buffer(samples), let pause = buffer(gap) else { return }
+        node.scheduleBuffer(speech, completionCallbackType: .dataConsumed) { _ in consumed() }
+        node.scheduleBuffer(pause, completionCallbackType: .dataPlayedBack) { _ in played() }
         if !isPaused, !node.isPlaying { node.play() }
     }
 
