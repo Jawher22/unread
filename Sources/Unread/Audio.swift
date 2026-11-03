@@ -60,6 +60,22 @@ final class Player {
     private(set) var isPaused = false
     /// Breath between sentences.
     private let gap = [Float](repeating: 0, count: 24_000 * 12 / 100)
+    /// Two soft, overlapping bell-like notes (E5 → B5), quiet and short.
+    private lazy var chimeBuffer: AVAudioPCMBuffer? = {
+        let rate = 24_000.0, length = Int(rate * 0.6)
+        var samples = [Float](repeating: 0, count: length)
+        for (freq, start, amp) in [(659.25, 0.0, 0.10), (987.77, 0.11, 0.08)] {
+            let first = Int(start * rate)
+            for i in first..<length {
+                let t = Double(i - first) / rate
+                let envelope = min(t / 0.006, 1) * exp(-t / 0.12) // 6 ms attack, gentle decay
+                // A quiet octave partial makes it a bell rather than a beep.
+                let tone = sin(2 * .pi * freq * t) + 0.25 * sin(4 * .pi * freq * t)
+                samples[i] += Float(amp * envelope * tone)
+            }
+        }
+        return buffer(samples)
+    }()
 
     init() {
         engine.attach(node)
@@ -74,12 +90,26 @@ final class Player {
 
     func schedule(_ samples: [Float], played: @escaping @Sendable () -> Void) {
         warm()
-        let all = samples + gap
-        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(all.count)) else { return }
-        buf.frameLength = AVAudioFrameCount(all.count)
-        all.withUnsafeBufferPointer { buf.floatChannelData![0].update(from: $0.baseAddress!, count: all.count) }
+        guard let buf = buffer(samples + gap) else { return }
         node.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in played() }
         if !isPaused, !node.isPlaying { node.play() }
+    }
+
+    /// The end-of-reading chime, through the same engine as speech so it
+    /// follows the same output and volume.
+    func chime() {
+        guard let chimeBuffer else { return }
+        warm()
+        node.scheduleBuffer(chimeBuffer)
+        node.play()
+        releaseDeviceLater()
+    }
+
+    private func buffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
+        guard !samples.isEmpty, let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
+        buf.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { buf.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
+        return buf
     }
 
     func pause() { isPaused = true; node.pause() }
@@ -88,7 +118,11 @@ final class Player {
     func stop() {
         isPaused = false
         node.stop()
-        // Release the audio device after a while so Bluetooth headphones can sleep.
+        releaseDeviceLater()
+    }
+
+    /// Release the audio device after a while so Bluetooth headphones can sleep.
+    private func releaseDeviceLater() {
         idleTimer?.invalidate()
         idleTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.engine.stop() }

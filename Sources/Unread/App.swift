@@ -5,9 +5,10 @@ import ServiceManagement
 /// The interaction:
 ///   hold ⌃ Control → the paragraph under the pointer lights up
 ///   release        → read from that paragraph to the end
-///   tap            → idle: read from the top of what's visible
+///   tap            → idle: nothing (a stray tap must never start talking)
 ///                    reading: pause / resume
-///   double-tap     → stop
+///   double-tap     → idle: read from the top of what's visible
+///                    reading: stop
 @MainActor
 final class AppController: NSObject {
     private let overlay = Overlay()
@@ -202,10 +203,12 @@ final class AppController: NSObject {
             return
         }
 
-        // Tap.
-        defer { lastTapAt = releasedAt }
+        // Tap. A double-tap consumes both taps, so a third quick tap starts a
+        // new sequence instead of undoing what the double-tap just did.
+        let isDoubleTap = releasedAt.timeIntervalSince(lastTapAt) < doubleTapWindow
+        lastTapAt = isDoubleTap ? .distantPast : releasedAt
         if let session {
-            if releasedAt.timeIntervalSince(lastTapAt) < doubleTapWindow {
+            if isDoubleTap {
                 stopReading()
             } else {
                 session.togglePause()
@@ -213,6 +216,7 @@ final class AppController: NSObject {
             }
             return
         }
+        guard isDoubleTap else { return } // idle single tap: deliberately nothing
         guard let doc = DocumentFinder.frontDocument(), let start = doc.firstVisible() else {
             print("[unread] nothing readable in the front window")
             NSSound.beep()
@@ -235,9 +239,11 @@ final class AppController: NSObject {
         s.start()
     }
 
+    /// Manual stop (double-tap). The chime confirms it, same as reaching the end.
     private func stopReading() {
         session?.stop()
         session = nil
+        player.chime()
         setStatus("Hold ⌃ and point to read")
     }
 

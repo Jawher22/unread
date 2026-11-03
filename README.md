@@ -12,9 +12,11 @@ No selecting, no copy-paste, no "open in reader". Point at a paragraph, hold a k
 | --- | --- |
 | **Hold ⌃ Control** and point | The paragraph under the pointer lights up |
 | **Release** | Unread reads from that paragraph to the end, highlighting each sentence in place |
-| **Tap ⌃** | Nothing playing: read from the top of what's visible. Playing: pause / resume |
-| **Double-tap ⌃** | Stop |
+| **Tap ⌃** | Playing: pause / resume. Nothing playing: nothing, so a stray tap never starts talking |
+| **Double-tap ⌃** | Nothing playing: read from the top of what's visible. Playing: stop |
 | **Hold ⌃ and point elsewhere** while reading | Jump there |
+
+A soft chime plays when reading ends, whether it reached the end or you stopped it.
 
 The highlight is drawn *on top of the app you're already in* (Safari, Chrome, Arc, Dia, Electron apps, TextEdit, Notes…). There is no separate reader window. If you scroll away it stops following you; scroll back and it picks up again.
 
