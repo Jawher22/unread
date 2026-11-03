@@ -419,7 +419,10 @@ final class AppController: NSObject {
     @objc private func pickVoice(_ item: NSMenuItem) {
         let v = item.title
         item.menu?.items.forEach { $0.state = $0 === item ? .on : .off }
-        Task { await voice.setEnglishVoice(v) }
+        Task {
+            await voice.setEnglishVoice(v)
+            session?.settingsChanged() // re-voice what's waiting behind the current sentence
+        }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
