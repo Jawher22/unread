@@ -50,6 +50,8 @@ final class AppController: NSObject {
     /// results from an earlier hold are dropped.
     private var aimInFlight = false
     private var aimToken = 0
+    /// Why the last aim found nothing, logged if the hold ends without a target.
+    private var aimMiss: String?
     private let speculateAfter: TimeInterval = 0.08
 
     private let holdThreshold: TimeInterval = 0.22
@@ -181,6 +183,7 @@ final class AppController: NSObject {
         aimResolvedAt = CGPoint(x: -1e6, y: -1e6)
         aimToken += 1
         aimInFlight = false
+        aimMiss = nil
         aimTimer?.invalidate()
         aimTimer = Timer.scheduledTimer(withTimeInterval: previewDelay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.beginAiming() }
@@ -205,12 +208,14 @@ final class AppController: NSObject {
         let reresolve = aimDocument == nil || hypot(p.x - aimResolvedAt.x, p.y - aimResolvedAt.y) > 40
         let current = aimDocument
         Task { [weak self] in
-            let (doc, para) = await AXWorker.shared.run { () -> (ReadableDocument?, (start: AnyObject, bounds: CGRect)?) in
+            let (doc, para, miss) = await AXWorker.shared.run { () -> (ReadableDocument?, (start: AnyObject, bounds: CGRect)?, String?) in
                 let doc = reresolve ? DocumentFinder.document(at: p) : current
-                return (doc, doc?.paragraph(at: p))
+                let para = doc?.paragraph(at: p)
+                return (doc, para, para == nil ? DocumentFinder.whyNothing(at: p, found: doc) : nil)
             }
             guard let self, token == self.aimToken else { return }
             self.aimInFlight = false
+            self.aimMiss = miss
             if reresolve { self.aimDocument = doc; self.aimResolvedAt = p }
             self.aimed(doc, para)
         }
@@ -290,7 +295,12 @@ final class AppController: NSObject {
                         guard let doc = DocumentFinder.document(at: p), let para = doc.paragraph(at: p) else { return nil }
                         return (doc, para.start)
                     }
-                    guard let self, token == self.aimToken, let (doc, start) = found else { return }
+                    guard let self, token == self.aimToken else { return }
+                    guard let (doc, start) = found else {
+                        let why = await AXWorker.shared.run { DocumentFinder.whyNothing(at: p, found: DocumentFinder.document(at: p)) }
+                        print("[unread] hold found nothing to read: \(self.aimMiss ?? why)")
+                        return
+                    }
                     self.startReading(doc, from: start, releasedAt: releasedAt, gesture: .hold)
                 }
             }
@@ -314,14 +324,15 @@ final class AppController: NSObject {
         let lookupStart = Date()
         let token = aimToken
         Task { [weak self] in
-            let found = await AXWorker.shared.run { () -> (ReadableDocument, AnyObject)? in
-                guard let doc = DocumentFinder.frontDocument(), let start = doc.firstVisible() else { return nil }
-                return (doc, start)
+            let (found, why) = await AXWorker.shared.run { () -> ((ReadableDocument, AnyObject)?, String) in
+                guard let doc = DocumentFinder.frontDocument() else { return (nil, "no web area or text view in the front window of \(DocumentFinder.frontAppName())") }
+                guard let start = doc.firstVisible() else { return (nil, "\(type(of: doc)) in \(DocumentFinder.frontAppName()) has no readable paragraph in view") }
+                return ((doc, start), "")
             }
             // A new press since then means the user moved on.
             guard let self, token == self.aimToken, self.session == nil else { return }
             guard let (doc, start) = found else {
-                print("[unread] nothing readable in the front window")
+                print("[unread] double-tap found nothing to read: \(why)")
                 NSSound.beep()
                 return
             }

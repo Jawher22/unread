@@ -5,11 +5,13 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
-const file = path.resolve(process.argv[process.argv.length - 1]);
+const target = process.argv[process.argv.length - 1];
+const remote = /^https?:\/\//.test(target); // live pages, for investigating
+const file = remote ? target : path.resolve(target);
 app.dock?.hide();
 app.whenReady().then(() => {
   const win = new BrowserWindow({ x: 60, y: 60, width: 900, height: 1000, show: false,
                                   title: `Unread fixture (Chromium): ${path.basename(file)}` });
-  win.loadFile(file);
+  if (remote) win.loadURL(file); else win.loadFile(file);
   win.once('ready-to-show', () => win.showInactive());
 });

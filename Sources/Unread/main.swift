@@ -89,7 +89,9 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
         let hit = AX.element(at: point)
         print("hit:  \(describe(hit))")
         if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
-        guard let doc = DocumentFinder.document(at: point) else { print("no document"); exit(1) }
+        // --pid N: use that app's window even if it isn't on top (fixture hosts).
+        let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
+        guard let doc = pinned.map({ DocumentFinder.document(inApp: $0) }) ?? DocumentFinder.document(at: point) else { print("no document"); exit(1) }
         guard let para = doc.paragraph(at: point) else { print("no paragraph"); exit(1) }
         print("paragraph box: \(para.bounds)")
         let scope = doc.scope(from: para.start)

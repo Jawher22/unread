@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Icon buttons</title>
+<style>body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; } main { max-width: 640px; margin: 24px auto; } button { border: 0; background: none; }</style></head>
+<body>
+<!-- Modelled on raphaelsalaja.com/library: icon-only buttons (share, copy)
+     between the date and the first paragraph. WebKit exposes each as U+FFFC
+     in the text; that "sentence" made the walker skip three paragraphs. -->
+<main>
+  <article>
+    <header>
+      <h1>Information wants a voice</h1>
+      <time datetime="2026-10-29">29 October 2026</time>
+      <button aria-label="Share"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg></button>
+      <button aria-label="Copy link"><svg width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10"/></svg></button>
+    </header>
+    <p>Almost everything I know, I learned for free. Nobody charged me to read the source.</p>
+    <p>I think about that a lot. It did not have to be that way.</p>
+    <h2>Where I learned</h2>
+    <p>Most of it came from a browser.</p>
+  </article>
+</main>
+</body>
+</html>
