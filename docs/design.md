@@ -144,7 +144,7 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 ## 9. Open decisions
 
 - License (MIT like Hex is the likely default).
-- GitHub repo: create `unread` under the author's account, public or private.
+- When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03).
 
 ## 10. Naming
 
