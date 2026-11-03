@@ -77,8 +77,9 @@ final class Player {
         return buffer(samples)
     }()
 
-    init() {
+    init(muted: Bool = false) {
         engine.attach(node)
+        if muted { engine.mainMixerNode.outputVolume = 0 }
         engine.connect(node, to: engine.mainMixerNode, format: format)
         engine.prepare()
     }

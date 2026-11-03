@@ -31,6 +31,7 @@ final class ReadingSession {
     private var synthesizing = false
     private var cancelled = false
     private var spokeAnything = false
+    private let debugSession = ProcessInfo.processInfo.environment["UNREAD_DEBUG_OVERLAY"] != nil
     private var following = true
     private var followGraceUntil = Date.distantPast
     private var refresh: Timer?
@@ -145,6 +146,7 @@ final class ReadingSession {
 
     private func sentenceFinished() {
         guard !cancelled, !queued.isEmpty else { return }
+        if debugSession { print("[session] finished \(queued[0].text.prefix(40).debugDescription), \(queued.count - 1) queued") }
         queued.removeFirst()
         if queued.isEmpty {
             overlay.hide()
@@ -168,9 +170,18 @@ final class ReadingSession {
     // MARK: Highlight
 
     private func showCurrent(scroll: Bool) {
-        guard !suspendHighlight, let current = queued.first else { return }
+        guard !suspendHighlight, let current = queued.first else {
+            if suspendHighlight { print("[highlight] skipped: suspended while aiming") }
+            return
+        }
         var lines = document.lines(of: current)
-        guard let bounds = union(lines), let visible = document.visibleRect() else { overlay.hide(); return }
+        let label = current.text.prefix(40).debugDescription
+        guard let bounds = union(lines), let visible = document.visibleRect() else {
+            print("[highlight] \(label) → no box: \(document.linesDiagnosis(of: current))")
+            overlay.hide(); return
+        }
+        if !visible.intersects(bounds) { print("[highlight] \(label) → off screen \(bounds), visible \(visible), following: \(following)") }
+        else { print("[highlight] \(label) → \(lines.count) line(s)") }
         if scroll, following, !visible.contains(bounds) {
             document.scrollIntoView(current)
             followGraceUntil = Date().addingTimeInterval(0.8)

@@ -90,13 +90,50 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
         print("hit:  \(describe(hit))")
         if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
         guard let doc = DocumentFinder.document(at: point) else { print("no document"); exit(1) }
-        if let para = doc.paragraph(at: point), let s = doc.sentence(from: para.start) {
-            print("paragraph box: \(para.bounds)")
-            print("first sentence: \(s.text.prefix(80).debugDescription)")
-            print("lines: \(doc.lines(of: s))")
-        } else { print("no paragraph") }
+        guard let para = doc.paragraph(at: point) else { print("no paragraph"); exit(1) }
+        print("paragraph box: \(para.bounds)")
+        // Walk on like a reading session would, so a missing highlight on
+        // later sentences shows up here too.
+        var pos: AnyObject? = para.start
+        for n in 0..<6 {
+            guard let p = pos, let s = doc.sentence(from: p) else { break }
+            print("  \(n). \(s.text.prefix(70).debugDescription)")
+            print("     lines \(doc.lines(of: s))")
+            pos = s.next
+        }
     }
     exit(0)
+}
+
+if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
+    // Read from a point exactly like a hold does, but muted, then quit:
+    // `--simulate 700,450 [seconds]`. With UNREAD_DEBUG_OVERLAY=1 it logs
+    // every highlight change. Draws the real highlight on screen.
+    let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
+    let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 12 : 12
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated {
+        let overlay = Overlay(), player = Player(muted: true), voice = Voice()
+        let point = CGPoint(x: xy[0], y: xy[1])
+        guard let doc = DocumentFinder.document(at: point), let para = doc.paragraph(at: point) else { print("nothing at point"); exit(1) }
+        Task { @MainActor in
+            try? await voice.prepareEnglish()
+            // --primed: start from a pre-synthesized first sentence, like a hold does (#5).
+            var primed: PrimedSentence?
+            if args.contains("--primed"), let first = doc.sentence(from: para.start) {
+                let task = Task { @MainActor in (samples: try? await voice.synthesize(first.text, language: .english, speed: 1.3), ms: 0.0) }
+                primed = PrimedSentence(sentence: first, extractMs: 0, samples: task)
+            }
+            let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,
+                                   startedAt: Date(), primed: primed)
+            s.onFinish = { print("[session] finished"); exit(0) }
+            s.start()
+            _ = s // keep alive
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); exit(0) }
+        }
+    }
+    app.run()
 }
 
 if args.contains("--extract") {

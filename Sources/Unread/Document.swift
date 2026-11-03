@@ -26,11 +26,15 @@ protocol ReadableDocument: AnyObject {
     /// The sentence's on-screen boxes, one per line, so a highlight never
     /// covers the end of the previous sentence or the start of the next.
     func lines(of sentence: Sentence) -> [CGRect]
+    /// Why the last `lines(of:)` came back the way it did (for the log).
+    func linesDiagnosis(of sentence: Sentence) -> String
     func visibleRect() -> CGRect?
     func scrollIntoView(_ sentence: Sentence)
 }
 
 extension ReadableDocument {
+    func linesDiagnosis(of sentence: Sentence) -> String { "" }
+
     /// The union of the sentence's line boxes.
     func bounds(of sentence: Sentence) -> CGRect? {
         let l = lines(of: sentence)
@@ -336,6 +340,16 @@ final class WebDocument: ReadableDocument {
         if layouts.count > 6 { layouts.removeFirst() }
         if debugWalk { print("    lines: \(good.count)/\(words.count) words kept, line \(Int(lineHeight)) → \(lines)") }
         return plausible(lines)
+    }
+
+    /// When a sentence gets no box: are its markers still alive (the page
+    /// may have re-rendered since it was extracted), and what did the words say?
+    func linesDiagnosis(of sentence: Sentence) -> String {
+        let now = SpeechText.clean(string(sentence.range)) ?? ""
+        let words = wordBoxes(in: sentence.range)
+        let whole = rect(sentence.range).map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"
+        let alive = now == sentence.text ? "markers alive" : "markers STALE (range now reads \(now.prefix(30).debugDescription))"
+        return "\(alive), \(words.count) word boxes, whole-range box \(whole)"
     }
 
     /// Words in reading order → one box per visual line.
