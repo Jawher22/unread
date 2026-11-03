@@ -5,6 +5,8 @@ import NaturalLanguage
 /// hotkey was held, so reading can start the moment it's released.
 struct PrimedSentence {
     let sentence: Sentence
+    /// The reading scope computed with it, so release doesn't pay for it again.
+    let scope: ReadingScope?
     let extractMs: Double
     /// Samples plus how long synthesis took.
     let samples: Task<(samples: [Float]?, ms: Double), Never>
@@ -40,6 +42,8 @@ final class ReadingSession {
     /// once at first audio, then nil.
     private var timing: LatencyRecord?
     private var primed: PrimedSentence?
+    /// The article / main area this reading stays in, and what it skips (#10).
+    private let scope: ReadingScope?
     private(set) var suspendHighlight = false
 
     var isPaused: Bool { player.isPaused }
@@ -54,6 +58,7 @@ final class ReadingSession {
         self.startedAt = startedAt
         self.timing = timing
         self.primed = primed
+        self.scope = primed.map { $0.scope } ?? document.scope(from: start)
     }
 
     func start() {
@@ -100,7 +105,7 @@ final class ReadingSession {
     private func fill() {
         guard !cancelled, !synthesizing, queued.count < lookahead else { return }
         let extractStart = Date()
-        guard let position = cursor, let sentence = document.sentence(from: position) else {
+        guard let position = cursor, let sentence = document.sentence(from: position, in: scope) else {
             cursor = nil
             if queued.isEmpty { finish() }
             return

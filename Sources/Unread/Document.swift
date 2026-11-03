@@ -22,7 +22,11 @@ protocol ReadableDocument: AnyObject {
     func firstVisible() -> AnyObject?
     /// The very beginning of the document (dev tools and fixtures).
     func documentStart() -> AnyObject?
-    func sentence(from position: AnyObject) -> Sentence?
+    /// The next sentence to read from `position`. With a scope, sentences
+    /// outside it end the reading and page chrome inside it is skipped.
+    func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence?
+    /// Where a reading that starts at `position` may go.
+    func scope(from position: AnyObject) -> ReadingScope?
     /// The sentence's on-screen boxes, one per line, so a highlight never
     /// covers the end of the previous sentence or the start of the next.
     func lines(of sentence: Sentence) -> [CGRect]
@@ -34,6 +38,8 @@ protocol ReadableDocument: AnyObject {
 
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
+    func scope(from position: AnyObject) -> ReadingScope? { nil }
+    func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
 
     /// The union of the sentence's line boxes.
     func bounds(of sentence: Sentence) -> CGRect? {
@@ -42,7 +48,31 @@ extension ReadableDocument {
     }
 }
 
+/// Where a reading may go (#10): the article, or else the main area, it
+/// started in. Reading ends when it leaves that container. Page chrome inside
+/// it (navigation, buttons, code blocks, captions, hidden labels, timestamps,
+/// link rows) is skipped, except a chrome container the user started inside:
+/// pointing at something means "read this".
+final class ReadingScope {
+    let container: AXUIElement?
+    let pointedInto: AXUIElement?
+    init(container: AXUIElement?, pointedInto: AXUIElement?) {
+        self.container = container
+        self.pointedInto = pointedInto
+    }
+}
+
 enum SpeechText {
+    private static let timestamp = try! NSRegularExpression(
+        pattern: #"^(\d{1,2}:\d{2}(:\d{2})?\s?([AaPp]\.?[Mm]\.?)?|\d+\s?(s|m|h|d|w|mo|y|sec|min|hr|hrs)|\d+\s(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\sago|yesterday|today|just now)$"#,
+        options: .caseInsensitive)
+
+    /// "6:03 PM", "4h", "2 days ago": metadata, not something to read aloud.
+    static func isTimestamp(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        return timestamp.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
+    }
+
     private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|citation needed|edit)\]"#, options: .caseInsensitive)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
 
@@ -129,6 +159,13 @@ final class WebDocument: ReadableDocument {
     /// the last paragraph's box, that's still the answer.
     private var lastParagraph: (start: AnyObject, bounds: CGRect)?
 
+    /// Consecutive sentences share most of their ancestors; remember what each
+    /// element turned out to be, so judging a sentence costs a few AX calls
+    /// instead of dozens.
+    private var parentMemo: [AXKey: AXUIElement?] = [:]
+    private var chromeMemo: [AXKey: String?] = [:]
+    private var linkRowMemo: [AXKey: Bool] = [:]
+
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
         if let last = lastParagraph, last.bounds.contains(point) { return last }
         lastParagraph = findParagraph(at: point)
@@ -154,23 +191,28 @@ final class WebDocument: ReadableDocument {
 
     func firstVisible() -> AnyObject? {
         guard let visible = visibleRect() else { return nil }
+        // Start in the content, not in the site header or a sidebar.
+        let isChrome = { (m: AnyObject) in self.scope(from: m)?.pointedInto != nil }
         if let m = p("AXStartTextMarkerForBounds", AX.rectValue(visible.insetBy(dx: 0, dy: 8))),
-           let para = p("AXParagraphTextMarkerRangeForTextMarker", m) {
+           let para = p("AXParagraphTextMarkerRangeForTextMarker", m), !isChrome(start(of: para)) {
             return start(of: para)
         }
         // Scan down the viewport for the first readable paragraph.
         // Start a little below the top to skip toolbars and sticky headers.
+        var fallback: AnyObject?
         for y in stride(from: visible.minY + visible.height * 0.12, to: visible.maxY, by: 24) {
             for x in [visible.minX + visible.width * 0.5, visible.minX + visible.width * 0.3] {
-                if let para = paragraph(at: CGPoint(x: x, y: y)) { return para.start }
+                guard let para = paragraph(at: CGPoint(x: x, y: y)) else { continue }
+                if !isChrome(para.start) { return para.start }
+                fallback = fallback ?? para.start
             }
         }
-        return nil
+        return fallback
     }
 
-    func sentence(from position: AnyObject) -> Sentence? {
+    func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
-        for _ in 0..<64 { // skip empty fragments: images, separators, icons
+        for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
             guard let (chunkEnd, blockBreaks) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
             let chunk = string(chunkRange)
             let chunkNS = chunk as NSString
@@ -204,12 +246,161 @@ final class WebDocument: ReadableDocument {
                 print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(first) len=\(length) range→\(got.debugDescription)")
             }
             if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(chunkNS.substring(to: length)) {
-                return Sentence(text: text, range: r, next: sentenceEnd)
+                guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd) }
+                switch verdict(text: text, endingAt: sentenceEnd, in: scope) {
+                case .read: return Sentence(text: text, range: r, next: sentenceEnd)
+                case .end:
+                    if debugWalk { print("    end of scope at \(text.prefix(40).debugDescription)") }
+                    return nil
+                case .skip(let why):
+                    if debugWalk { print("    skip (\(why)) \(text.prefix(40).debugDescription)") }
+                }
             }
             if CFEqual(sentenceEnd, cursor) { return nil }
             cursor = sentenceEnd
         }
         return nil
+    }
+
+    // MARK: Reading scope (#10)
+
+    func scope(from position: AnyObject) -> ReadingScope? {
+        // The position may sit on the boundary with the previous element, so
+        // judge by where the first sentence actually ends.
+        guard let first = sentence(from: position, in: nil), let leaf = leaf(endingAt: first.next ?? end(of: first.range)) else { return nil }
+        let chain = ancestry(of: leaf)
+        let container = chain.first { AX.subrole($0) == "AXDocumentArticle" } ?? chain.first { AX.subrole($0) == "AXLandmarkMain" }
+        let pointedInto = chain.first { chromeKind($0) != nil }
+        if debugWalk {
+            print("    scope: \(container.map { AX.subrole($0) ?? "?" } ?? "whole document"), pointed into: \(pointedInto.map { Self.chromeKind($0) ?? "?" } ?? "nothing")")
+        }
+        return ReadingScope(container: container, pointedInto: pointedInto)
+    }
+
+    private enum Verdict { case read, skip(String), end }
+
+    /// The text leaf a sentence ending at `marker` belongs to. The end marker
+    /// itself sits on the boundary with whatever follows, and which side it
+    /// reports is up to the engine, so ask one character before it.
+    ///
+    /// Chromium may answer with an internal per-line text box (no value, and
+    /// zero height on a paragraph's last line), so climb to the static text.
+    private func leaf(endingAt marker: AnyObject) -> AXUIElement? {
+        let inside = p("AXPreviousTextMarkerForTextMarker", marker) ?? marker
+        guard let hit = AX.element(p("AXUIElementForTextMarker", inside)) ?? AX.element(p("AXUIElementForTextMarker", marker)) else { return nil }
+        var cur: AXUIElement? = hit
+        for _ in 0..<3 {
+            guard let c = cur else { break }
+            if AX.role(c) == kAXStaticTextRole { return c }
+            cur = AX.parent(c)
+        }
+        return hit
+    }
+
+    private func verdict(text: String, endingAt marker: AnyObject, in scope: ReadingScope) -> Verdict {
+        guard let leaf = leaf(endingAt: marker) else { return .read }
+        let chain = ancestry(of: leaf)
+        if let c = scope.container, !chain.contains(where: { CFEqual($0, c) }) { return .end }
+        if let pointed = scope.pointedInto, chain.contains(where: { CFEqual($0, pointed) }) { return .read }
+        // Visually hidden ("sr-only") text: Chromium gives the text a ~1 px
+        // frame; WebKit gives the text its full size but its container 1 px.
+        // But Chromium also clips frames to the viewport: text below the fold
+        // comes back 0 px tall on the viewport's edge. That's "can't tell".
+        let visible = visibleRect()
+        func tiny(_ f: CGRect) -> Bool {
+            guard f.width < 4 || f.height < 4 else { return false }
+            if let v = visible, f.maxY >= v.maxY - 1 || f.minY <= v.minY + 1 { return false } // clipped at the top or bottom
+            return true
+        }
+        if chain.prefix(3).contains(where: { AX.frame($0).map(tiny) ?? false }) { return .skip("hidden") }
+        // …or, when the 1 px container isn't exposed, text wrapped one word
+        // per line into a column no real paragraph is that narrow. (Chromium's
+        // per-line text boxes are AXStaticText too, so look a level up.)
+        if text.count > 8, chain.prefix(2).contains(where: { AX.frame($0).map { $0.height >= 40 && $0.width < 120 } ?? false }) {
+            return .skip("hidden")
+        }
+        for e in chain {
+            if let c = scope.container, CFEqual(e, c) { break }
+            if let kind = chromeKind(e) { return .skip(kind) }
+        }
+        if SpeechText.isTimestamp(text) { return .skip("timestamp") }
+        if let block = Self.block(containing: leaf), isLinkRow(block) { return .skip("links") }
+        return .read
+    }
+
+    /// `e`, its parent, … up to and including the web area (bounded, memoized).
+    private func ancestry(of e: AXUIElement) -> [AXUIElement] {
+        var out: [AXUIElement] = []
+        var cur: AXUIElement? = e
+        while let c = cur, out.count < 48 {
+            out.append(c)
+            if CFEqual(c, element) { break }
+            let key = AXKey(element: c)
+            if let known = parentMemo[key] { cur = known } else { cur = AX.parent(c); parentMemo[key] = cur }
+        }
+        return out
+    }
+
+    private func chromeKind(_ e: AXUIElement) -> String? {
+        let key = AXKey(element: e)
+        if let known = chromeMemo[key] { return known }
+        let kind = Self.chromeKind(e)
+        chromeMemo[key] = kind
+        return kind
+    }
+
+    private func isLinkRow(_ block: AXUIElement) -> Bool {
+        let key = AXKey(element: block)
+        if let known = linkRowMemo[key] { return known }
+        let row = Self.isLinkRow(block)
+        linkRowMemo[key] = row
+        return row
+    }
+
+    private static let controlRoles: Set<String> = [
+        "AXButton", "AXPopUpButton", "AXMenuButton", "AXCheckBox", "AXRadioButton", "AXComboBox", "AXTextField",
+        "AXToolbar", "AXMenu", "AXMenuBar", "AXMenuItem", "AXTabGroup", "AXSlider", "AXOutline",
+    ]
+    private static let chromeLandmarks: Set<String> = [
+        "AXLandmarkNavigation", "AXLandmarkBanner", "AXLandmarkContentInfo", "AXLandmarkComplementary", "AXLandmarkSearch",
+    ]
+
+    /// Is `e` page chrome that a listener doesn't want read? Both engines
+    /// expose the same roles/subroles for these (see docs/design.md §6).
+    static func chromeKind(_ e: AXUIElement) -> String? {
+        guard let role = AX.role(e) else { return nil }
+        if controlRoles.contains(role) { return "control" }
+        let sub = AX.subrole(e)
+        if let sub, chromeLandmarks.contains(sub) { return "landmark" }
+        guard role == kAXGroupRole else { return nil }
+        // <pre>: WebKit says so; Chromium shows a group whose only child is the code.
+        if sub == "AXPreformattedStyleGroup" { return "code" }
+        let kids = AX.children(e)
+        if sub == nil, kids.count == 1, AX.subrole(kids[0]) == "AXCodeStyleGroup" { return "code" }
+        // <figcaption>: a text group beside an image in a small figure group.
+        if let parent = AX.parent(e), AX.role(parent) == kAXGroupRole {
+            let siblings = AX.children(parent)
+            if siblings.count <= 3, siblings.contains(where: { AX.role($0) == kAXImageRole }),
+               !kids.contains(where: { AX.role($0) == kAXImageRole }) { return "caption" }
+        }
+        return nil
+    }
+
+    /// A short block that is mostly links: share rows, tag lists, "related" lines.
+    static func isLinkRow(_ block: AXUIElement) -> Bool {
+        var total = 0, linked = 0
+        func visit(_ e: AXUIElement, inLink: Bool, depth: Int) {
+            guard depth < 6, total < 400 else { return }
+            let role = AX.role(e)
+            if role == kAXStaticTextRole {
+                let n = ((AX.attr(e, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: .whitespaces).count
+                total += n
+                if inLink { linked += n }
+            }
+            for c in AX.children(e) { visit(c, inLink: inLink || role == "AXLink", depth: depth + 1) }
+        }
+        visit(block, inLink: false, depth: 0)
+        return total > 0 && total < 200 && Double(linked) >= Double(total) * 0.6
     }
 
     /// A ~600 character window of text starting exactly at `cursor` (so no
@@ -257,7 +448,8 @@ final class WebDocument: ReadableDocument {
         guard let role = AX.role(e) else { return false }
         if inlineRoles.contains(role) { return true }
         // AXCodeStyleGroup, AXStrongStyleGroup, AXEmphasisStyleGroup, AXSubscriptStyleGroup…
-        return role == kAXGroupRole && ((AX.attr(e, kAXSubroleAttribute) as? String)?.hasSuffix("StyleGroup") ?? false)
+        guard role == kAXGroupRole, let sub = AX.attr(e, kAXSubroleAttribute) as? String else { return false }
+        return sub.hasSuffix("StyleGroup") && sub != "AXPreformattedStyleGroup" // <pre> is a block
     }
 
     static func block(containing e: AXUIElement) -> AXUIElement? {
@@ -476,7 +668,7 @@ final class NativeDocument: ReadableDocument {
         return (s?.location ?? r.location) as NSNumber
     }
 
-    func sentence(from position: AnyObject) -> Sentence? {
+    func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         let start = (position as! NSNumber).intValue
         guard var i = sentences.firstIndex(where: { NSMaxRange($0) > start }) else { return nil }
         while i < sentences.count {

@@ -1,6 +1,13 @@
 import AppKit
 import ApplicationServices
 
+/// An AXUIElement usable as a dictionary key (CFEqual / CFHash identity).
+struct AXKey: Hashable {
+    let element: AXUIElement
+    static func == (a: AXKey, b: AXKey) -> Bool { CFEqual(a.element, b.element) }
+    func hash(into h: inout Hasher) { h.combine(CFHash(element)) }
+}
+
 /// Thin helpers over the Accessibility C API. All coordinates are AX
 /// coordinates: global, origin at the top-left of the primary screen.
 enum AX {
@@ -21,6 +28,7 @@ enum AX {
     }
 
     static func role(_ e: AXUIElement) -> String? { attr(e, kAXRoleAttribute) as? String }
+    static func subrole(_ e: AXUIElement) -> String? { attr(e, kAXSubroleAttribute) as? String }
     static func parent(_ e: AXUIElement) -> AXUIElement? { element(attr(e, kAXParentAttribute)) }
     static func children(_ e: AXUIElement) -> [AXUIElement] { (attr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] }
 
@@ -85,6 +93,11 @@ enum AX {
         if let last = enabledAt[pid] {
             guard Date().timeIntervalSince(last) > 10, !treeLooksAlive(pid) else { return }
             print("[unread] accessibility tree of pid \(pid) was switched off; re-enabling")
+        } else if treeLooksAlive(pid, strict: true) {
+            // Already on (another client, or a previous run of Unread): leave
+            // it alone rather than restart its build.
+            enabledAt[pid] = .distantPast
+            return
         }
         enabledAt[pid] = Date()
         let app = AXUIElementCreateApplication(pid)
@@ -93,12 +106,18 @@ enum AX {
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
 
-    private static func treeLooksAlive(_ pid: pid_t) -> Bool {
+    /// `strict` (first contact): the tree must already contain a web area. A
+    /// Chromium window whose tree was never built still shows an AXWindow with
+    /// native groups, just no web content. (Native apps fail this too, and
+    /// setting the flag on them is harmless.)
+    private static func treeLooksAlive(_ pid: pid_t, strict: Bool = false) -> Bool {
         let app = AXUIElementCreateApplication(pid)
-        guard let window = element(attr(app, kAXFocusedWindowAttribute)) ?? element(attr(app, kAXMainWindowAttribute)) else {
-            return true // no window to judge by (or not a windowed app): leave it alone
+        guard let window = element(attr(app, kAXFocusedWindowAttribute)) ?? element(attr(app, kAXMainWindowAttribute))
+                ?? (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            return !strict // no window to judge by (or not a windowed app)
         }
-        return role(window) == kAXWindowRole
+        guard role(window) == kAXWindowRole else { return false }
+        return !strict || find(in: window, maxNodes: 300) { _, r in r == "AXWebArea" } != nil
     }
 
     static func mouseLocation() -> CGPoint {

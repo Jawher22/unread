@@ -219,7 +219,8 @@ final class AppController: NSObject {
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
         let t = Date()
-        guard let sentence = doc.sentence(from: start) else { spec.done = true; return }
+        let scope = doc.scope(from: start)
+        guard let sentence = doc.sentence(from: start, in: scope) else { spec.done = true; return }
         let extractMs = LatencyLog.ms(since: t)
         let voice = self.voice, speed = self.speed
         let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
@@ -229,7 +230,7 @@ final class AppController: NSObject {
             spec?.done = true
             return (samples: samples, ms: LatencyLog.ms(since: t))
         }
-        spec.primed = PrimedSentence(sentence: sentence, extractMs: extractMs, samples: task)
+        spec.primed = PrimedSentence(sentence: sentence, scope: scope, extractMs: extractMs, samples: task)
     }
 
     private func endAiming() {

@@ -92,11 +92,12 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
         guard let doc = DocumentFinder.document(at: point) else { print("no document"); exit(1) }
         guard let para = doc.paragraph(at: point) else { print("no paragraph"); exit(1) }
         print("paragraph box: \(para.bounds)")
+        let scope = doc.scope(from: para.start)
         // Walk on like a reading session would, so a missing highlight on
         // later sentences shows up here too.
         var pos: AnyObject? = para.start
         for n in 0..<6 {
-            guard let p = pos, let s = doc.sentence(from: p) else { break }
+            guard let p = pos, let s = doc.sentence(from: p, in: scope) else { break }
             print("  \(n). \(s.text.prefix(70).debugDescription)")
             print("     lines \(doc.lines(of: s))")
             pos = s.next
@@ -121,9 +122,10 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             try? await voice.prepareEnglish()
             // --primed: start from a pre-synthesized first sentence, like a hold does (#5).
             var primed: PrimedSentence?
-            if args.contains("--primed"), let first = doc.sentence(from: para.start) {
+            let scope = doc.scope(from: para.start)
+            if args.contains("--primed"), let first = doc.sentence(from: para.start, in: scope) {
                 let task = Task { @MainActor in (samples: try? await voice.synthesize(first.text, language: .english, speed: 1.3), ms: 0.0) }
-                primed = PrimedSentence(sentence: first, extractMs: 0, samples: task)
+                primed = PrimedSentence(sentence: first, scope: scope, extractMs: 0, samples: task)
             }
             let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,
                                    startedAt: Date(), primed: primed)
@@ -142,6 +144,7 @@ if args.contains("--extract") {
     //   --extract --pid N --from-start  any app's main window (no focus needed), whole document
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
+    //   --from-text "…"               start at the first sentence containing this text (like pointing there)
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
     let pid = value(after: "--pid").flatMap { pid_t($0) }
     let fromStart = args.contains("--from-start")
@@ -151,10 +154,15 @@ if args.contains("--extract") {
         let found = pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument()
         guard let doc = found else { print("no document in \(pid.map { "pid \($0)" } ?? "front window")"); exit(1) }
         print("doc: \(type(of: doc)) found in \(Int(Date().timeIntervalSince(t) * 1000)) ms, visible: \(doc.visibleRect().map { "\($0)" } ?? "nil")")
-        var pos = fromStart ? doc.documentStart() : doc.firstVisible()
+        var pos = fromStart || value(after: "--from-text") != nil ? doc.documentStart() : doc.firstVisible()
+        if let needle = value(after: "--from-text") {
+            while let p = pos, let s = doc.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+            if pos == nil { print("text not found: \(needle)"); exit(1) }
+        }
+        let scope = pos.flatMap { doc.scope(from: $0) }
         var n = 0
         let t2 = Date()
-        while let p = pos, n < limit, let s = doc.sentence(from: p) {
+        while let p = pos, n < limit, let s = doc.sentence(from: p, in: scope) {
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
             print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
             if args.contains("--lines") {

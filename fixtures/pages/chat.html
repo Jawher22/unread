@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Chat</title>
+<style>
+body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; display: flex; }
+nav.threads { width: 220px; background: #f4f4f4; padding: 12px; }
+main { flex: 1; max-width: 720px; padding: 16px 24px; }
+.msg { margin: 16px 0; } .meta { color: #888; font-size: 12px; }
+.tool { display: block; border: 0; background: none; color: #777; font: inherit; padding: 4px 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style></head>
+<body>
+<!-- Structure modelled on an agent chat app (T3 Code): a thread list in a
+     navigation landmark, then messages in main, each with a speaker heading
+     (sometimes visually hidden), a timestamp, tool-call rows as buttons and
+     action buttons. All text original. -->
+<nav class="threads" aria-label="Threads"><ul><li><a href="#">Plan the next steps</a> <span>4h</span></li><li><a href="#">Pick a name</a> <span>2d</span></li></ul></nav>
+<main>
+  <div class="msg">
+    <h2>You</h2>
+    <p>Can you check why the highlight stops after one sentence?</p>
+    <div class="meta">6:00 PM</div>
+    <button aria-label="Copy message">⧉</button>
+  </div>
+  <div class="msg">
+    <h2 class="sr-only">Assistant</h2>
+    <p>I looked at the session first. The highlight moves when each sentence ends.</p>
+    <button class="tool">Ran 2 commands</button>
+    <p>Then I checked the overlay. It draws every line separately now.</p>
+    <ul><li>The first fix covers the boxes.</li><li>The second fix covers pointing.</li></ul>
+    <div class="meta">6:03 PM</div>
+    <button aria-label="Copy message">⧉</button>
+  </div>
+</main>
+</body>
+</html>

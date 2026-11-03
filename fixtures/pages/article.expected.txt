@@ -1,0 +1,12 @@
+# start: Most text on a screen
+Most text on a screen was never meant to be heard.
+This post explains how we turned a page into something a voice can read without stumbling.
+Why it matters
+A good reader skips what a listener does not need.
+Menus, buttons and timestamps are noise, and earlier attempts read all of it aloud.
+Here is the smallest version of the idea.
+The rest of this post is about everything that one line hides.
+Listening should take less effort than reading.
+• Find where the article starts.
+• Skip everything that is not the article.
+That is the whole trick, and it took us a year to get right.
