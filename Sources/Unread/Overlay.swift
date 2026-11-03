@@ -52,7 +52,15 @@ final class Overlay {
     /// Show a highlight made of several boxes (a sentence's lines), drawn as
     /// one shape. Moving between highlights with the same number of boxes
     /// animates, so the highlight glides from sentence to sentence.
+    /// `UNREAD_DEBUG_OVERLAY=1` logs every highlight change.
+    private let debug = ProcessInfo.processInfo.environment["UNREAD_DEBUG_OVERLAY"] != nil
+    private var lastLogged = ""
+
     func show(_ axRects: [CGRect], style: Style) {
+        if debug {
+            let line = "\(style) " + axRects.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" }.joined(separator: " ")
+            if line != lastLogged { print(String(format: "[overlay %.2f] show ", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000)) + line); lastLogged = line }
+        }
         guard !axRects.isEmpty else { hide(); return }
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         let cocoa = axRects.map {
@@ -93,6 +101,7 @@ final class Overlay {
     }
 
     func hide() {
+        if debug, lastLogged != "hidden" { print(String(format: "[overlay %.2f] hide", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))); lastLogged = "hidden" }
         layers.forEach(hide)
         shownCounts = shownCounts.map { _ in 0 }
     }
