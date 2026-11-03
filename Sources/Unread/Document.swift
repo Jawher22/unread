@@ -20,6 +20,8 @@ protocol ReadableDocument: AnyObject {
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)?
     /// Where to start when the user didn't point anywhere.
     func firstVisible() -> AnyObject?
+    /// The very beginning of the document (dev tools and fixtures).
+    func documentStart() -> AnyObject?
     func sentence(from position: AnyObject) -> Sentence?
     func bounds(of sentence: Sentence) -> CGRect?
     func visibleRect() -> CGRect?
@@ -53,6 +55,7 @@ enum SpeechText {
 /// to find each sentence's on-screen range.
 final class WebDocument: ReadableDocument {
     let element: AXUIElement
+    private let debugWalk = ProcessInfo.processInfo.environment["UNREAD_DEBUG_WALK"] != nil
 
     init(area: AXUIElement) { element = area }
 
@@ -63,11 +66,37 @@ final class WebDocument: ReadableDocument {
     private func range(_ a: AnyObject, _ b: AnyObject) -> AnyObject? { p("AXTextMarkerRangeForUnorderedTextMarkers", [a, b] as CFArray) }
 
     /// A marker at a screen point: WebKit answers directly; for Chromium,
-    /// hit-test the element and take the start of its text.
+    /// hit-test the element and take the start of its text leaf.
     private func marker(at point: CGPoint) -> AnyObject? {
         if let m = p("AXTextMarkerForPosition", AX.pointValue(point)) { return m }
-        guard let hit = AX.element(at: point), let r = p("AXTextMarkerRangeForUIElement", hit) else { return nil }
-        return start(of: r)
+        guard let hit = AX.element(at: point) else { return nil }
+        return leafStart(Self.textLeaf(in: hit, at: point) ?? hit)
+    }
+
+    /// Markers must be anchored to a text leaf. A marker taken from a
+    /// container's range (a hit-tested message block, the web area itself)
+    /// stays anchored to that container through every navigation call, and
+    /// Chromium then answers every bounds query with the container's box.
+    private func leafStart(_ e: AXUIElement) -> AnyObject? {
+        p("AXTextMarkerRangeForUIElement", e).map(start(of:))
+    }
+
+    /// The static text under `point` inside `e`: descend through children
+    /// whose frame contains it; if the point falls between lines, take the
+    /// first text at or below it in the deepest container that holds it.
+    /// Without a point, the first static text.
+    static func textLeaf(in e: AXUIElement, at point: CGPoint? = nil) -> AXUIElement? {
+        if AX.role(e) == kAXStaticTextRole { return e }
+        guard let point else { return AX.find(in: e, maxNodes: 400) { _, role in role == kAXStaticTextRole } }
+        var cur = e
+        for _ in 0..<24 {
+            guard let child = AX.children(cur).first(where: { AX.frame($0)?.contains(point) ?? false }) else { break }
+            if AX.role(child) == kAXStaticTextRole { return child }
+            cur = child
+        }
+        return AX.find(in: cur, maxNodes: 600) { leaf, role in
+            role == kAXStaticTextRole && (AX.frame(leaf).map { $0.maxY >= point.y } ?? false)
+        }
     }
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
@@ -77,6 +106,14 @@ final class WebDocument: ReadableDocument {
               let bounds = AX.rect(p("AXBoundsForTextMarkerRange", para))
         else { return nil }
         return (start(of: para), bounds)
+    }
+
+    func documentStart() -> AnyObject? {
+        // A marker taken straight from the web area's range is anchored to the
+        // web area itself; Chromium keeps that anchor through navigation and
+        // then reports every range's bounds as the whole viewport.
+        // So start from the first text leaf (see `leafStart`).
+        leafStart(Self.textLeaf(in: element) ?? element)
     }
 
     func firstVisible() -> AnyObject? {
@@ -106,14 +143,30 @@ final class WebDocument: ReadableDocument {
                 cursor = next
                 continue
             }
+            // A new paragraph's chunk starts with its separator ("\nRun swift…").
+            // Tokenized as is, that lone "\n" comes back as the first "sentence",
+            // and walking to cover it swallows the next word. So tokenize from
+            // the first visible character; the sentence's range simply keeps
+            // the leading whitespace (it's cleaned out of the spoken text).
+            let lead = chunkNS.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted).location
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = chunk
-            let first = tokenizer.tokens(for: chunk.startIndex..<chunk.endIndex).first.map { NSRange($0, in: chunk) }
-                ?? NSRange(location: 0, length: chunkNS.length)
+            let from = String.Index(utf16Offset: lead, in: chunk)
+            let first = tokenizer.tokens(for: from..<chunk.endIndex).first.map { NSRange($0, in: chunk) }
+                ?? NSRange(location: lead, length: chunkNS.length - lead)
             // Chromium joins separate blocks with no separator ("TitleBody…"),
             // so a block boundary always ends the sentence.
             let length = min(NSMaxRange(first), blockBreaks.first { $0 > first.location } ?? .max)
-            let sentenceEnd = length >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: length, limit: chunkEnd)
+            // The on-screen range must end on the sentence's last visible
+            // character: not short of its final "." and never into the next word.
+            var visibleEnd = length
+            while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
+                  CharacterSet.whitespacesAndNewlines.contains(c) { visibleEnd -= 1 }
+            let sentenceEnd = length >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+            if debugWalk {
+                let got = range(cursor, sentenceEnd).map(string) ?? "?"
+                print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(first) len=\(length) range→\(got.debugDescription)")
+            }
             if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(chunkNS.substring(to: length)) {
                 return Sentence(text: text, range: r, next: sentenceEnd)
             }
@@ -149,45 +202,154 @@ final class WebDocument: ReadableDocument {
         return chunkEnd.map { ($0, breaks) }
     }
 
-    /// Same block element? Wrapped lines share a text node; inline spans
-    /// (bold, links, `code`) share the paragraph one or two levels up.
+    /// Same block element? Both engines expose inline markup the same way:
+    /// static text, links and style groups (code, strong, emphasis…) sit
+    /// inside the paragraph, heading or list item they flow in. So climb past
+    /// inline elements to the enclosing block and compare. (Counting hops
+    /// doesn't work: sibling paragraphs share their article within two hops.)
     private func sameBlock(_ a: AnyObject, _ b: AnyObject) -> Bool {
         guard let ea = AX.element(p("AXUIElementForTextMarker", a)),
               let eb = AX.element(p("AXUIElementForTextMarker", b)) else { return false }
         if CFEqual(ea, eb) { return true }
-        let ancestorsA = ancestors(ea, 3), ancestorsB = ancestors(eb, 3)
-        // Nearest common ancestor within two hops of both = same paragraph.
-        for (i, x) in ancestorsA.enumerated() {
-            if let j = ancestorsB.firstIndex(where: { CFEqual($0, x) }) {
-                return i <= 2 && j <= 2 && AX.role(x) != "AXWebArea" && AX.role(x) != kAXListRole
-            }
+        guard let blockA = Self.block(containing: ea), let blockB = Self.block(containing: eb) else { return false }
+        return CFEqual(blockA, blockB)
+    }
+
+    private static let inlineRoles: Set<String> = [kAXStaticTextRole, "AXLink", "AXListMarker", kAXImageRole]
+
+    private static func isInline(_ e: AXUIElement) -> Bool {
+        guard let role = AX.role(e) else { return false }
+        if inlineRoles.contains(role) { return true }
+        // AXCodeStyleGroup, AXStrongStyleGroup, AXEmphasisStyleGroup, AXSubscriptStyleGroup…
+        return role == kAXGroupRole && ((AX.attr(e, kAXSubroleAttribute) as? String)?.hasSuffix("StyleGroup") ?? false)
+    }
+
+    static func block(containing e: AXUIElement) -> AXUIElement? {
+        var cur: AXUIElement? = e
+        for _ in 0..<8 {
+            guard let c = cur else { return nil }
+            if !isInline(c) { return c }
+            cur = AX.parent(c)
         }
-        return false
+        return nil
     }
 
-    private func ancestors(_ e: AXUIElement, _ n: Int) -> [AXUIElement] {
-        var out: [AXUIElement] = []
-        var cur: AXUIElement? = AX.parent(e)
-        while let c = cur, out.count < n { out.append(c); cur = AX.parent(c) }
-        return out
-    }
-
-    /// Step word by word until the text from `start` covers `utf16Length`.
-    private func walk(from start: AnyObject, utf16Length: Int, limit: AnyObject) -> AnyObject {
+    /// The end marker of the text from `start` covering exactly `utf16Length`.
+    /// Word steps first, never past the target (overshooting would put the
+    /// next sentence's first word in this one); then single characters for
+    /// trailing punctuation after the last word end.
+    private func walk(from start: AnyObject, utf16Length target: Int, limit: AnyObject) -> AnyObject {
+        func covered(_ m: AnyObject) -> Int { range(start, m).map { (string($0) as NSString).length } ?? 0 }
         var m = start
         for _ in 0..<400 {
-            guard let next = p("AXNextWordEndTextMarkerForTextMarker", m), !CFEqual(next, m) else { return limit }
+            guard let next = p("AXNextWordEndTextMarkerForTextMarker", m), !CFEqual(next, m) else { break }
+            let n = covered(next)
+            if n > target { break }
             m = next
-            if let r = range(start, m), (string(r) as NSString).length >= utf16Length - 1 { return m }
+            if n == target { return m }
         }
-        return limit
+        for _ in 0..<8 {
+            guard let next = p("AXNextTextMarkerForTextMarker", m), !CFEqual(next, m) else { break }
+            let n = covered(next)
+            if n > target { break }
+            m = next
+            if n == target { return m }
+        }
+        return CFEqual(m, start) ? limit : m
     }
 
+    /// Per-sentence word layout, so the 10 Hz highlight refresh costs one AX
+    /// call instead of one per word: re-measure the anchor word, shift the union.
+    private struct Layout { let range: AnyObject; let anchor: AnyObject; let anchorRect: CGRect; let union: CGRect }
+    private var layouts: [Layout] = []
+
+    /// The sentence's on-screen box: the union of its words' boxes.
+    ///
+    /// Asking Chromium for the bounds of the whole range only works when both
+    /// ends sit inside a text leaf. A range that starts or ends on a leaf
+    /// boundary (a new paragraph, just after a final ".") gets the bounds of
+    /// an enclosing block, which is the "block-level highlight". Word ranges
+    /// are almost always inside a leaf; the few that aren't come back much
+    /// taller than a line and are dropped. WebKit is precise either way.
     func bounds(of sentence: Sentence) -> CGRect? {
-        guard let r = AX.rect(p("AXBoundsForTextMarkerRange", sentence.range)) else { return nil }
-        // Chromium sometimes answers with the whole viewport; that's not a sentence.
+        if let cached = layouts.first(where: { $0.range === sentence.range }) {
+            if let now = rect(cached.anchor), abs(now.width - cached.anchorRect.width) < 1, abs(now.height - cached.anchorRect.height) < 1 {
+                return plausible(cached.union.offsetBy(dx: now.minX - cached.anchorRect.minX, dy: now.minY - cached.anchorRect.minY))
+            }
+            layouts.removeAll { $0.range === sentence.range } // reflowed: measure again
+        }
+        let words = wordBoxes(in: sentence.range)
+        guard let lineHeight = words.map(\.rect.height).sorted().dropFirst(words.count / 2).first else {
+            return plausible(rect(sentence.range))
+        }
+        // Too tall (spans lines/blocks) or too wide for its characters (a
+        // single-line block's box): not that word's box.
+        func fits(_ r: CGRect, chars: Int) -> Bool { r.height <= lineHeight * 1.5 && r.width <= CGFloat(chars + 1) * lineHeight }
+        // A rejected word usually starts on a leaf boundary (a new paragraph)
+        // or on the space before a line wrap. Measure it from one character in,
+        // which lands inside the leaf / on the new line, and extend left by
+        // the characters that skipped.
+        if debugWalk {
+            for w in words { print("      word \(string(w.range).debugDescription) \(w.rect) fits=\(fits(w.rect, chars: w.chars)) repaired=\(fits(w.rect, chars: w.chars) ? "-" : repairedBox(w.range, lineHeight: lineHeight).map { "\($0)" } ?? "nil")") }
+        }
+        let good = words.compactMap { w -> (range: AnyObject, rect: CGRect, chars: Int)? in
+            if fits(w.rect, chars: w.chars) { return w }
+            return repairedBox(w.range, lineHeight: lineHeight).map { (w.range, $0, w.chars) }
+        }
+        guard let first = good.first else { return plausible(rect(sentence.range)) }
+        let union = good.dropFirst().reduce(first.rect) { $0.union($1.rect) }
+        layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: first.rect, union: union))
+        if layouts.count > 6 { layouts.removeFirst() }
+        if debugWalk { print("    bounds: \(good.count)/\(words.count) words kept, line \(Int(lineHeight)) → \(union)") }
+        return plausible(union)
+    }
+
+    private func rect(_ range: AnyObject) -> CGRect? { AX.rect(p("AXBoundsForTextMarkerRange", range)) }
+
+    /// Measure a word from up to three characters in (past a leaf boundary
+    /// or the space before a wrap), then extend left by what was skipped.
+    private func repairedBox(_ word: AnyObject, lineHeight: CGFloat) -> CGRect? {
+        let visible = { (r: AnyObject) in self.string(r).filter { !$0.isWhitespace }.count }
+        let total = visible(word)
+        var inner = start(of: word)
+        for _ in 0..<3 {
+            guard let next = p("AXNextTextMarkerForTextMarker", inner), !CFEqual(next, inner) else { return nil }
+            inner = next
+            guard let rest = range(inner, end(of: word)) else { return nil }
+            let shown = visible(rest)
+            guard shown > 0 else { return nil }
+            if let r = rect(rest), r.height <= lineHeight * 1.5, r.width <= CGFloat(shown + 1) * lineHeight {
+                let charWidth = r.width / CGFloat(shown), missing = CGFloat(max(0, total - shown))
+                return CGRect(x: r.minX - missing * charWidth, y: r.minY, width: r.width + missing * charWidth, height: r.height)
+            }
+        }
+        return nil
+    }
+
+    /// Chromium sometimes answers with the whole viewport; that's not a sentence.
+    private func plausible(_ r: CGRect?) -> CGRect? {
+        guard let r else { return nil }
         if let v = visibleRect(), r.width >= v.width * 0.95, r.height >= v.height * 0.9 { return nil }
         return r
+    }
+
+    /// Each word's range (previous word end → this word end) and its box,
+    /// stepping until the words cover the sentence's text.
+    private func wordBoxes(in sentenceRange: AnyObject) -> [(range: AnyObject, rect: CGRect, chars: Int)] {
+        let begin = start(of: sentenceRange)
+        let total = (string(sentenceRange) as NSString).length
+        var out: [(AnyObject, CGRect, Int)] = []
+        var m = begin
+        var before = 0
+        for _ in 0..<200 {
+            guard let next = p("AXNextWordEndTextMarkerForTextMarker", m), !CFEqual(next, m),
+                  let covered = range(begin, next).map({ (string($0) as NSString).length }), covered <= total else { break }
+            if let w = range(m, next), let r = rect(w) { out.append((w, r, covered - before)) }
+            m = next
+            before = covered
+            if covered == total { break }
+        }
+        return out
     }
 
     func visibleRect() -> CGRect? {
@@ -241,6 +403,8 @@ final class NativeDocument: ReadableDocument {
         guard SpeechText.clean(text.substring(with: para)) != nil, let b = bounds(para) else { return nil }
         return (para.location as NSNumber, b)
     }
+
+    func documentStart() -> AnyObject? { 0 as NSNumber }
 
     func firstVisible() -> AnyObject? {
         guard let v = AX.attr(element, kAXVisibleCharacterRangeAttribute) else { return 0 as NSNumber }
@@ -304,10 +468,16 @@ enum DocumentFinder {
     /// The main readable document in the frontmost window.
     static func frontDocument() -> ReadableDocument? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        AX.enableTree(for: app.processIdentifier)
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        return document(inApp: app.processIdentifier)
+    }
+
+    /// The main readable document in an app's focused (or main, or first) window.
+    static func document(inApp pid: pid_t) -> ReadableDocument? {
+        AX.enableTree(for: pid)
+        let axApp = AXUIElementCreateApplication(pid)
         guard let window = AX.element(AX.attr(axApp, kAXFocusedWindowAttribute))
-                ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute)) else { return nil }
+                ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute))
+                ?? (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first else { return nil }
         let found = AX.find(in: window) { e, role in
             role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }

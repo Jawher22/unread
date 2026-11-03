@@ -32,6 +32,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 - Never copy `.build` between folders: Swift's precompiled headers bake in absolute paths and the build fails.
 - The first launch of a new binary spends ~13 s preparing the CoreML models. After that, load is ~0.8 s.
 - Models (~360 MB) are cached in `~/.cache/fluidaudio`.
+- `scripts/extract-fixture.sh fixtures/pages/<page>.html` checks extraction in both engines (WebKit and Electron windows that never take focus) against `<page>.expected.txt`. Run it before and after any change to `Document.swift`. See `fixtures/README.md`.
 - `--extract` and `--bench` are the safe ways to verify changes without hijacking the user's keyboard or playing audio. Ask before launching the full app or playing sound on the user's machine.
 
 ## Code map
@@ -53,5 +54,8 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
   `WebDocument` deliberately uses only this common subset. Keep it that way.
 - Chromium reports each **wrapped line** as a paragraph and joins blocks with **no separator**. That's why sentences are cut from a ~600-character window and block breaks are detected via a shared ancestor.
 - Chromium sometimes returns viewport-sized bounds. Treat those as "no bounds".
+- **Markers must be anchored to a text leaf (`AXStaticText`).** A marker taken from a container's range (the web area, a hit-tested message block) keeps that anchor through every navigation call, and Chromium then answers every bounds query with the container's box. Hit-test results are resolved down to the leaf under the point (`WebDocument.textLeaf`).
+- **Chromium measures a range precisely only if both ends are inside a leaf.** Sentence bounds are therefore the union of per-word boxes, dropping words that come back taller or wider than a word can be and re-measuring those from a few characters in.
+- **Block breaks come from roles, not hop counts:** static text, links, list markers and `…StyleGroup` subroles (code, strong, emphasis) are inline; anything else is a block. Both engines expose the same structure.
 - Enable Chromium's tree with `AXManualAccessibility` only. Never set `AXEnhancedUserInterface`: it breaks window animations.
 - Kokoro v3 (fast ANE path) supports English, Japanese and Mandarin only. French uses the legacy pipeline with a single voice, `ff_siwis`.
