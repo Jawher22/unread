@@ -86,10 +86,10 @@ final class ReadingScope {
 
 enum SpeechText {
     private static let timestamp = try! NSRegularExpression(
-        pattern: #"^(\d{1,2}:\d{2}(:\d{2})?\s?([AaPp]\.?[Mm]\.?)?|\d+\s?(s|m|h|d|w|mo|y|sec|min|hr|hrs)|\d+\s(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\sago|yesterday|today|just now)$"#,
+        pattern: #"^(\d{1,2}:\d{2}(:\d{2})?\s?([AaPp]\.?[Mm]\.?)?|\d+\s?(s|m|h|d|w|mo|y|sec|min|hr|hrs)|\d+\s(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\sago|yesterday|today|just now|\d{1,2}\s[A-Za-z]{3,9}\.?,?\s\d{4}|[A-Za-z]{3,9}\.?\s\d{1,2},?\s\d{4}|\d{4}-\d{2}-\d{2})$"#,
         options: .caseInsensitive)
 
-    /// "6:03 PM", "4h", "2 days ago": metadata, not something to read aloud.
+    /// "6:03 PM", "4h", "2 days ago", "29 October 2026": metadata, not something to read aloud.
     static func isTimestamp(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
         return timestamp.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
@@ -232,14 +232,17 @@ final class WebDocument: ReadableDocument {
         return fallback
     }
 
+    /// Whitespace plus U+FFFC (embedded objects): nothing to say, nothing to cover.
+    static let blank = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FFFC}"))
+
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
         for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
             guard let (chunkEnd, blockBreaks) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
             let chunk = string(chunkRange)
             let chunkNS = chunk as NSString
-            guard chunkNS.length > 0, !chunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                guard let next = p("AXNextTextMarkerForTextMarker", chunkEnd), !CFEqual(next, cursor) else { return nil }
+            guard chunkNS.length > 0, !chunk.trimmingCharacters(in: Self.blank).isEmpty else {
+                guard let next = step(past: chunkEnd), !CFEqual(next, cursor) else { return nil }
                 cursor = next
                 continue
             }
@@ -248,7 +251,9 @@ final class WebDocument: ReadableDocument {
             // and walking to cover it swallows the next word. So tokenize from
             // the first visible character; the sentence's range simply keeps
             // the leading whitespace (it's cleaned out of the spoken text).
-            let lead = chunkNS.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted).location
+            // Also skip U+FFFC: WebKit's stand-in for embedded objects (icon
+            // buttons, images). Alone, "￼" would come back as a sentence too.
+            let lead = chunkNS.rangeOfCharacter(from: Self.blank.inverted).location
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = chunk
             let from = String.Index(utf16Offset: lead, in: chunk)
@@ -261,8 +266,11 @@ final class WebDocument: ReadableDocument {
             // character: not short of its final "." and never into the next word.
             var visibleEnd = length
             while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
-                  CharacterSet.whitespacesAndNewlines.contains(c) { visibleEnd -= 1 }
-            let sentenceEnd = length >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+                  Self.blank.contains(c) { visibleEnd -= 1 }
+            // End on the last visible character, even when the sentence runs to
+            // the chunk's end: trailing "￼" (an icon button) would otherwise
+            // make the sentence count as part of that button.
+            let sentenceEnd = visibleEnd >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
             if debugWalk {
                 let got = range(cursor, sentenceEnd).map(string) ?? "?"
                 print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(first) len=\(length) range→\(got.debugDescription)")
@@ -484,6 +492,48 @@ final class WebDocument: ReadableDocument {
         return total > 0 && total < 200 && Double(linked) >= Double(total) * 0.6
     }
 
+    /// The next position after `m`. WebKit's character step returns nothing at
+    /// the end of an embedded object (an icon button's "￼"), which stalled the
+    /// walk in front of it; fall back to the next word end, then the next
+    /// paragraph end (both in the common subset).
+    ///
+    /// When a step crosses an embedded object ("￼"), it may stall at the next
+    /// one (WebKit moves past one icon button at a time and then stops), so
+    /// jump to the next text leaf in document order instead.
+    private func step(past m: AnyObject) -> AnyObject? {
+        var stepped: AnyObject?
+        for name in ["AXNextTextMarkerForTextMarker", "AXNextWordEndTextMarkerForTextMarker", "AXNextParagraphEndTextMarkerForTextMarker"] {
+            if let n = p(name, m), !CFEqual(n, m), let r = range(m, n), (string(r) as NSString).length > 0 { stepped = n; break }
+        }
+        // Only an embedded object stalls the step; plain whitespace and line
+        // breaks are ordinary separators (and block-break detection relies on them).
+        if let n = stepped, let r = range(m, n), !string(r).contains("\u{FFFC}") { return n }
+        return leafStart(after: m) ?? stepped
+    }
+
+    /// The start of the first text leaf after the element holding `m`, in
+    /// document order: later siblings first, then up a level. Unlike
+    /// `textLeaf`, off-screen leaves count (Chromium clips their frames).
+    private func leafStart(after m: AnyObject) -> AnyObject? {
+        guard var node = AX.element(p("AXUIElementForTextMarker", m)) else { return nil }
+        func firstText(in e: AXUIElement) -> AXUIElement? {
+            AX.firstInOrder(in: e, maxNodes: 300) { x in
+                AX.role(x) == kAXStaticTextRole && !(((AX.attr(x, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: Self.blank).isEmpty)
+            }
+        }
+        for _ in 0..<16 {
+            guard !CFEqual(node, element), let parent = AX.parent(node) else { return nil }
+            let siblings = AX.children(parent)
+            if let i = siblings.firstIndex(where: { CFEqual($0, node) }) {
+                for sibling in siblings[(i + 1)...] {
+                    if let leaf = firstText(in: sibling), let start = leafStart(leaf) { return start }
+                }
+            }
+            node = parent
+        }
+        return nil
+    }
+
     /// A ~600 character window of text starting exactly at `cursor` (so no
     /// character is ever lost), extended paragraph by paragraph. Chromium
     /// reports every wrapped line as a "paragraph", so sentences are cut from
@@ -496,14 +546,14 @@ final class WebDocument: ReadableDocument {
         for _ in 0..<12 {
             guard let para = p("AXParagraphTextMarkerRangeForTextMarker", probe) else { break }
             var paraEnd = end(of: para)
-            if CFEqual(paraEnd, probe), let n = p("AXNextTextMarkerForTextMarker", paraEnd),
+            if CFEqual(paraEnd, probe), let n = step(past: paraEnd),
                let nextPara = p("AXParagraphTextMarkerRangeForTextMarker", n) {
                 paraEnd = end(of: nextPara) // probe sat on a boundary; take the following paragraph
             }
             chunkEnd = paraEnd
             let length = range(cursor, paraEnd).map { (string($0) as NSString).length } ?? 0
             if length >= 600 { break }
-            guard let n = p("AXNextTextMarkerForTextMarker", paraEnd), !CFEqual(n, probe) else { break }
+            guard let n = step(past: paraEnd), !CFEqual(n, probe) else { break }
             if !sameBlock(paraEnd, n) { breaks.append(length) }
             probe = n
         }
@@ -557,14 +607,19 @@ final class WebDocument: ReadableDocument {
             m = next
             if n == target { return m }
         }
+        var overshoot: AnyObject?
         for _ in 0..<8 {
             guard let next = p("AXNextTextMarkerForTextMarker", m), !CFEqual(next, m) else { break }
             let n = covered(next)
-            if n > target { break }
+            if n > target { overshoot = next; break }
             m = next
             if n == target { return m }
         }
-        return CFEqual(m, start) ? limit : m
+        // Couldn't land exactly (an embedded object counts as one character
+        // but steps as more): take the smallest overshoot. Jumping to `limit`
+        // (the end of the 600-character window) silently skipped paragraphs.
+        if CFEqual(m, start) { return overshoot ?? limit }
+        return m
     }
 
     /// Per-sentence word layout, so the 10 Hz highlight refresh costs one AX
@@ -604,11 +659,17 @@ final class WebDocument: ReadableDocument {
         // two in, which lands inside the leaf / on the new line, and extend
         // left by the characters that were skipped.
         let good = words.compactMap { w -> (range: AnyObject, rect: CGRect)? in
-            if fits(w.rect, chars: w.chars) { return (w.range, w.rect) }
+            // A word that starts across a line break or an embedded object
+            // ("\n￼\nAlmost") gets a box at the separator (an icon on the line
+            // above); always measure it from its first visible character.
+            let crosses = string(w.range).trimmingCharacters(in: .whitespaces).contains { $0 == "\n" || $0 == "\u{FFFC}" }
+            if !crosses, fits(w.rect, chars: w.chars) { return (w.range, w.rect) }
             return repairedBox(w.range, lineHeight: lineHeight).map { (w.range, $0) }
         }
         guard let first = good.first else { return plausible(rect(sentence.range).map { [$0] } ?? []) }
-        let lines = Self.groupIntoLines(good.map(\.rect))
+        // A caret-thin box (< 3 px) is a position on a line boundary, not a
+        // glyph: WebKit can place a word's start at the end of the line above.
+        let lines = Self.groupIntoLines(good.map(\.rect).filter { $0.width >= 3 })
         layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: first.rect, lines: lines))
         if layouts.count > 6 { layouts.removeFirst() }
         if debugWalk { print("    lines: \(good.count)/\(words.count) words kept, line \(Int(lineHeight)) → \(lines)") }
@@ -651,15 +712,20 @@ final class WebDocument: ReadableDocument {
     /// Measure a word from up to three characters in (past a leaf boundary
     /// or the space before a wrap), then extend left by what was skipped.
     private func repairedBox(_ word: AnyObject, lineHeight: CGFloat) -> CGRect? {
-        let visible = { (r: AnyObject) in self.string(r).filter { !$0.isWhitespace }.count }
+        let isBlank = { (c: Character) in c.isWhitespace || c == "\u{FFFC}" }
+        let visible = { (r: AnyObject) in self.string(r).filter { !isBlank($0) }.count }
         let total = visible(word)
+        // Step past any leading separators (newlines, "￼"), then a little more.
+        let leading = string(word).prefix { isBlank($0) }.utf16.count
         var inner = start(of: word)
-        for _ in 0..<3 {
+        for _ in 0..<(leading + 3) {
             guard let next = p("AXNextTextMarkerForTextMarker", inner), !CFEqual(next, inner) else { return nil }
             inner = next
             guard let rest = range(inner, end(of: word)) else { return nil }
+            let restText = string(rest)
             let shown = visible(rest)
             guard shown > 0 else { return nil }
+            if let first = restText.first, isBlank(first) { continue } // still on a separator
             if let r = rect(rest), r.height <= lineHeight * 1.5, r.width <= CGFloat(shown + 1) * lineHeight {
                 let charWidth = r.width / CGFloat(shown), missing = CGFloat(max(0, total - shown))
                 return CGRect(x: r.minX - missing * charWidth, y: r.minY, width: r.width + missing * charWidth, height: r.height)
@@ -820,6 +886,17 @@ enum DocumentFinder {
         }
         return nil
     }
+
+    /// For the log: why pointing at `point` gave nothing to read.
+    static func whyNothing(at point: CGPoint, found doc: ReadableDocument?) -> String {
+        let hit = AX.element(at: point)
+        let app = hit.map { NSRunningApplication(processIdentifier: AX.pid($0))?.localizedName ?? "pid \(AX.pid($0))" } ?? "?"
+        let what = hit.map { "\(AX.role($0) ?? "?")\(AX.subrole($0).map { "/\($0)" } ?? "")" } ?? "nothing (hit test failed or timed out)"
+        if doc == nil { return "no web area or text view under the pointer in \(app) (hit: \(what))" }
+        return "\(type(of: doc!)) in \(app) has no readable paragraph at the pointer (hit: \(what))"
+    }
+
+    static func frontAppName() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "?" }
 
     /// The main readable document in the frontmost window.
     static func frontDocument() -> ReadableDocument? {

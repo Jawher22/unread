@@ -1,11 +1,13 @@
 // Fixture host (WebKit): shows one HTML file in a WKWebView window without
 // taking focus, so `Unread --extract --pid` can read it like Safari content.
 //   swiftc -O fixtures/hosts/webkit/main.swift -o build/fixture-host-webkit
-//   build/fixture-host-webkit fixtures/pages/inline.html
+//   build/fixture-host-webkit fixtures/pages/inline.html   (or an https:// URL)
 import AppKit
 import WebKit
 
-let url = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
+let arg = CommandLine.arguments[1]
+let isRemote = arg.hasPrefix("http://") || arg.hasPrefix("https://") // live pages, for investigating
+let url = isRemote ? URL(string: arg)! : URL(fileURLWithPath: arg).standardizedFileURL
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory) // no Dock icon, never becomes frontmost
 
@@ -15,6 +17,6 @@ window.title = "Unread fixture (WebKit): \(url.lastPathComponent)"
 let web = WKWebView(frame: window.contentView!.bounds)
 web.autoresizingMask = [.width, .height]
 window.contentView = web
-web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+if isRemote { web.load(URLRequest(url: url)) } else { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
 window.orderBack(nil)
 app.run()
