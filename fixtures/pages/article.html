@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Teaching a parser to listen</title>
+<style>
+body { font: 13px/1.35 -apple-system, sans-serif; margin: 0; }
+p, h1, h2, h3, ul, figure, blockquote, pre { margin: 6px 0; } h1 { font-size: 20px; }
+header.site, footer.site { background: #f4f4f4; padding: 12px 24px; }
+.layout { display: flex; gap: 32px; max-width: 980px; margin: 24px auto; }
+main { flex: 1; } aside.sidebar { width: 220px; }
+pre { background: #f6f6f6; padding: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style></head>
+<body>
+<!-- Structure modelled on real engineering blogs: site header + nav, main
+     with an article (header, share row, figure, code, quote, list, related
+     aside), more-posts cards, a sidebar and a site footer. All text original.
+     Compact on purpose: it fits the fixture window, because Chromium clips
+     element frames to the viewport and can't tell hidden text below the fold. -->
+<header class="site">
+  <nav aria-label="Primary"><a href="#">Home</a> <a href="#">Research</a> <a href="#">Engineering</a> <a href="#">Company</a> <button>Try it free</button></nav>
+</header>
+<div class="layout">
+<main>
+  <article>
+    <header>
+      <p><a href="#">Engineering</a></p>
+      <h1>Teaching a parser to listen</h1>
+      <p>Published <time datetime="2026-11-03">Nov 3, 2026</time> · 8 min read</p>
+    </header>
+    <p>Most text on a screen was never meant to be heard. This post explains how we turned a page into something a voice can read without stumbling.</p>
+    <div class="share"><a href="#">Share on X</a> <a href="#">LinkedIn</a> <button>Copy link</button></div>
+    <h2>Why it matters</h2>
+    <p>A good reader skips what a listener does not need. Menus, buttons and timestamps are noise, and <a href="#">earlier attempts</a> read all of it aloud.</p>
+    <figure><img alt="Diagram of the pipeline" width="400" height="120" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><figcaption>Figure 1: The pipeline from page to speech.</figcaption></figure>
+    <p>Here is the smallest version of the idea.</p>
+    <pre><code>let page = load(url)
+speak(page.mainText)</code></pre>
+    <p>The rest of this post is about everything that one line hides.</p>
+    <blockquote><p>Listening should take less effort than reading.</p></blockquote>
+    <ul>
+      <li>Find where the article starts.</li>
+      <li>Skip everything that is not the article.</li>
+    </ul>
+    <aside aria-label="Related posts"><h3>Related</h3><a href="#">How we measure latency</a> <a href="#">A voice for every language</a></aside>
+    <p>That is the whole trick, and it took us a year to get right.</p>
+    <span class="sr-only">End of article</span>
+  </article>
+  <section aria-label="More posts">
+    <h2>More from engineering</h2>
+    <article><a href="#"><h3>Keeping models warm</h3></a><p>Why the first sentence is the hardest one.</p></article>
+  </section>
+</main>
+<aside class="sidebar" aria-label="Newsletter"><h2>Newsletter</h2><p>Get new posts by email.</p><button>Subscribe</button></aside>
+</div>
+<footer class="site"><nav aria-label="Footer"><a href="#">Privacy</a> <a href="#">Terms</a></nav><p>© 2026 Example Labs</p></footer>
+</body>
+</html>

@@ -29,18 +29,25 @@ trap 'kill $WK $EL 2>/dev/null; pkill -f "MacOS/Electron fixtures/hosts/electron
 
 EXPECTED="${PAGE%.html}.expected.txt"
 FAILED=0
+# An expected file may begin with "# start: <text>": start reading at the
+# first sentence containing <text>, as if the user pointed there.
+START=()
+if [[ -f "$EXPECTED" ]] && head -1 "$EXPECTED" | grep -q '^# start: '; then
+    START=(--from-text "$(head -1 "$EXPECTED" | sed 's/^# start: //')")
+fi
 check() { # name, output
     [[ -f "$EXPECTED" ]] || return 0
     local got; got=$(echo "$2" | sed -nE 's/^  [0-9]+\. (\([^)]*\)|no bounds)  //p')
-    if [[ "$got" == "$(cat "$EXPECTED")" ]]; then echo "   text: PASS"; else
-        echo "   text: FAIL"; diff <(cat "$EXPECTED") <(echo "$got") | sed 's/^/     /'; FAILED=1; fi
+    local want; want=$(grep -v '^# start: ' "$EXPECTED")
+    if [[ "$got" == "$want" ]]; then echo "   text: PASS"; else
+        echo "   text: FAIL"; { diff <(echo "$want") <(echo "$got") || true; } | sed "s/^/     /"; FAILED=1; fi
     local missing; missing=$(echo "$2" | grep -c "^  [0-9]*\. no bounds" || true)
     if [[ "$missing" == 0 ]]; then echo "   bounds: PASS"; else echo "   bounds: FAIL ($missing without)"; FAILED=1; fi
 }
 
 extract() { # name, pid
     for _ in $(seq 1 12); do # the first query switches Chromium's tree on; it takes a few seconds, and re-asking too often restarts it
-        if out=$(.build/release/Unread --extract --pid "$2" --from-start ${EXTRA[@]+"${EXTRA[@]}"} 2>&1) && [[ "$out" != *"0 sentences"* ]]; then
+        if out=$(.build/release/Unread --extract --pid "$2" --from-start ${START[@]+"${START[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} 2>&1) && ! grep -q "^0 sentences" <<<"$out"; then
             echo "== $1"; echo "$out" | tail -n +2; check "$1" "$out"; return; fi
         sleep 2
     done

@@ -12,7 +12,9 @@ scripts/extract-fixture.sh fixtures/pages/inline.html
 - **WebKit**: `hosts/webkit/main.swift`, a `WKWebView` (what Safari exposes)
 - **Chromium**: `hosts/electron/`, an Electron window (what Chrome, Dia and Electron apps expose)
 
-Then it runs `Unread --extract --pid … --from-start` against each. If `<page>.expected.txt` exists (one sentence per line), it checks the text and that every sentence has bounds, and exits 1 on failure.
+Then it runs `Unread --extract --pid … --from-start` against each. If `<page>.expected.txt` exists (one sentence per line), it checks the text and that every sentence has bounds, and exits 1 on failure. An expected file may start with `# start: <text>`: reading then starts at the first sentence containing `<text>`, as if the user pointed there, with the reading scope (#10) applied.
+
+Pages: `inline.html` (inline formatting, sentence and block boundaries), `article.html` (an engineering-blog layout: header, nav, article with share row, figure, code, quote, list, related aside; more-posts cards, sidebar, footer), `chat.html` (an agent-chat layout like T3 Code: thread nav, speaker headings, timestamps, tool-call buttons). All text is original; the structure is modelled on real sites.
 
 Useful while investigating:
 

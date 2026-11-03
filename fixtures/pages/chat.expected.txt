@@ -1,0 +1,8 @@
+# start: Can you check why
+Can you check why the highlight stops after one sentence?
+I looked at the session first.
+The highlight moves when each sentence ends.
+Then I checked the overlay.
+It draws every line separately now.
+• The first fix covers the boxes.
+• The second fix covers pointing.

@@ -114,6 +114,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - Both engines expose inline markup identically: `AXStaticText`, `AXLink`, `AXListMarker`, and `AXGroup` with `AXCodeStyleGroup` / `AXStrongStyleGroup` / `AXEmphasisStyleGroup` subroles. Paragraphs are plain `AXGroup`s, articles are `AXGroup/AXDocumentArticle`, lists `AXList/AXContentList`.
 - `NLTokenizer` returns a lone leading `"\n"` as its own sentence; walking to cover it swallowed the next word (first word of every WebKit paragraph was lost).
 
+**Reading scope (#10, 2026-11-03):** both engines expose page structure with the same roles/subroles: `AXLandmarkBanner` / `Navigation` / `Main` / `Complementary` / `ContentInfo` / `Region`, `AXDocumentArticle`, `AXSectionHeader`, `AXTimeGroup`. A `<pre>` is `AXPreformattedStyleGroup` in WebKit but a plain group around an `AXCodeStyleGroup` in Chromium. A figure is a small group holding an `AXImage` and the caption group. Visually hidden text: Chromium gives the text a ~1 px frame, WebKit gives its container 1 px (or, if the container isn't exposed, wraps the text one word per line into a ~40 px column). Chromium clips frames to the viewport, so hidden text below the fold can't be detected until it scrolls into view. T3 Code's chat has no articles; messages sit in `AXLandmarkMain`, tool rows are `AXButton`s, speaker labels are headings (the assistant's is hidden), timestamps are bare text.
+
 **Resulting algorithm (`WebDocument`), common subset only:**
 
 1. Hit-test the element under the point → descend to the text leaf under it → the start of its text range → the paragraph start.
@@ -122,7 +124,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 4. `NLTokenizer` finds the first sentence, starting from the first visible character. A block break always ends it.
 5. Step word by word (`AXNextWordEnd…`), never past the sentence's last visible character, then by characters for trailing punctuation. That range is the sentence.
 6. Bounds: the union of the sentence's word boxes (implausible ones re-measured or dropped), cached per sentence; the 10 Hz refresh re-measures one word and shifts the cached box.
-7. First visible paragraph when nothing is pointed at: `AXStartTextMarkerForBounds`, or else scan the viewport downward from 12% of its height (to skip toolbars).
+7. Scope: reading stays in the nearest article, else main area, around the start, and ends (with the chime) when a sentence falls outside it. Page chrome inside is skipped (landmarks, controls, code blocks, captions, hidden text, timestamps, short link rows), except a chrome container the user started in. Per-element answers are memoized per document (~30 ms per sentence on T3 Code).
+8. First visible paragraph when nothing is pointed at: `AXStartTextMarkerForBounds`, or else scan the viewport downward from 12% of its height (to skip toolbars).
 
 **Native text views (`NativeDocument`):**
 - `AXValue`, `AXRangeForPosition`, `AXBoundsForRange`, `AXVisibleCharacterRange`, with sentences from `NLTokenizer`.
@@ -155,7 +158,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 3. **Synthesize while the key is held.** The aim target is already known during the hold, so synthesize its first sentence speculatively and throw it away if the pointer moves. Log key-up → first audio (p50/p95) to a local file.
 4. **Use it for at least 3 days** on real reading and keep a friction log. Re-rank everything below from that log.
 
-**Phase 1: read-along quality**
+**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, per-line highlight, fixture hosts)
 5. **Chromium bounds.** Fix the missing bounds (9/12 in T3 Code) and the block-level ones: per-line ranges, a union of word ranges (`walk()` already visits every word), or `AXBoundsForRange` on the static text.
 6. **Inline code must not split sentences.** Revisit `sameBlock` for code, links and emphasis.
 7. **Fixture corpus + scorer.** Saved real pages (Anthropic and OpenAI engineering posts, other technical blogs, a T3 Code LLM response, Wikipedia, a TextEdit doc). For each, list the expected sentences and score `--extract` against them, so heuristics stop silently regressing.
@@ -186,8 +189,8 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 
 ## 9. Open decisions
 
-- Code blocks in technical posts: skip silently, or say "code block" and skip? (Default: skip silently and move the highlight past it.)
-- X / timelines: is one post the end, or continue to the next post?
+- Code blocks in technical posts: **skipped silently** for now (#24 default, implemented in #10). Revisit if it's confusing in use.
+- X / timelines: with article scope, each post is its own article, so reading **stops after the post** (with the chime). Continuing to the next post is still open (#25).
 - Tables: read row by row, or skip?
 - Languages beyond French: none planned. Arabic would need a different engine, since Kokoro has none.
 - License (MIT like Hex is the likely default).
