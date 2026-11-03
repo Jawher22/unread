@@ -195,6 +195,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 - X / timelines: with article scope, each post is its own article, so reading **stops after the post** (with the chime). Continuing to the next post is still open (#25).
 - Tables: read row by row, or skip?
 - Languages beyond French: none planned. Arabic would need a different engine, since Kokoro has none.
+- **Sentence highlight in Chromium browsers (Aside, Chrome, Arc, Dia):** they give no text positions to Unread (no inline text boxes; `AXManualAccessibility` is Electron-only), so highlights fall back to the whole paragraph. Setting `AXEnhancedUserInterface` on the browser (what VoiceOver does) would give exact sentence boxes, at the cost of the window-animation side effects that made us ban it, plus some browser overhead. Opt-in per app?
 - License (MIT like Hex is the likely default).
 - When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03). Not before the author has used it daily for real reading.
 

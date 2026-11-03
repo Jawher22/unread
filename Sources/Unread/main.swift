@@ -60,7 +60,8 @@ if args.contains("--axtree"), let i = args.firstIndex(of: "--axtree"), args.indi
     MainActor.assumeIsolated {
         AX.enableTree(for: pid)
         let axApp = AXUIElementCreateApplication(pid)
-        guard let window = (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first,
+        guard let window = AX.element(AX.attr(axApp, kAXFocusedWindowAttribute)) ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute))
+                ?? (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first,
               let root = AX.find(in: window, { _, role in role == "AXWebArea" }) else { print("no web area"); exit(1) }
         func dump(_ e: AXUIElement, _ depth: Int) {
             guard depth < 14 else { return }
