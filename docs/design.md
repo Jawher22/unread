@@ -108,14 +108,21 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
   - Bounds are sometimes viewport-sized (bogus) or block-level rather than sentence-level.
   - The tree must be enabled per process with `AXManualAccessibility` (avoid `AXEnhancedUserInterface`).
 
+**More findings (2026-11-03, from the fixture hosts):**
+- Markers inherit their *anchor*. One derived from a container's range (web area, message block) stays anchored to it, and Chromium returns that container's box for any range. Starting from a text leaf fixes it: all later markers stay leaf-anchored.
+- Even leaf-anchored, Chromium returns an enclosing block's box when a range starts or ends on a leaf boundary (a new paragraph, after a final ".", the space before a wrap). Word-sized ranges are almost always inside a leaf.
+- Both engines expose inline markup identically: `AXStaticText`, `AXLink`, `AXListMarker`, and `AXGroup` with `AXCodeStyleGroup` / `AXStrongStyleGroup` / `AXEmphasisStyleGroup` subroles. Paragraphs are plain `AXGroup`s, articles are `AXGroup/AXDocumentArticle`, lists `AXList/AXContentList`.
+- `NLTokenizer` returns a lone leading `"\n"` as its own sentence; walking to cover it swallowed the next word (first word of every WebKit paragraph was lost).
+
 **Resulting algorithm (`WebDocument`), common subset only:**
 
-1. Hit-test the element under the point → the start of its text range → the paragraph start.
+1. Hit-test the element under the point → descend to the text leaf under it → the start of its text range → the paragraph start.
 2. From the cursor, read a ~600-character window extended paragraph by paragraph. The window always starts exactly at the cursor, so no character is lost; stepping with `NextTextMarker` past a boundary used to drop the first letter.
-3. Record block breaks: places where consecutive "paragraphs" don't share a close ancestor. Inline spans (bold, links, `code`) share the paragraph one or two levels up.
-4. `NLTokenizer` finds the first sentence. A block break always ends it.
-5. Step word by word (`AXNextWordEnd…`) until the range covers the sentence. That range is used for highlighting.
-6. First visible paragraph when nothing is pointed at: `AXStartTextMarkerForBounds`, or else scan the viewport downward from 12% of its height (to skip toolbars).
+3. Record block breaks: places where consecutive "paragraphs" sit in different blocks. The block is found by climbing past inline elements (static text, links, list markers, style groups).
+4. `NLTokenizer` finds the first sentence, starting from the first visible character. A block break always ends it.
+5. Step word by word (`AXNextWordEnd…`), never past the sentence's last visible character, then by characters for trailing punctuation. That range is the sentence.
+6. Bounds: the union of the sentence's word boxes (implausible ones re-measured or dropped), cached per sentence; the 10 Hz refresh re-measures one word and shifts the cached box.
+7. First visible paragraph when nothing is pointed at: `AXStartTextMarkerForBounds`, or else scan the viewport downward from 12% of its height (to skip toolbars).
 
 **Native text views (`NativeDocument`):**
 - `AXValue`, `AXRangeForPosition`, `AXBoundsForRange`, `AXVisibleCharacterRange`, with sentences from `NLTokenizer`.

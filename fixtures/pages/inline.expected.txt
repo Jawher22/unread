@@ -1,0 +1,9 @@
+Inline formatting
+Run swift build -c release before you launch the app.
+The second sentence follows the first.
+Set stock-target-quantity: "Mets le stock à 100" and then continue reading.
+This sentence has a link in the middle and ends here.
+Another one has bold text and italic text inside it.
+• A list item with inline code inside it.
+• A second item.
+The final paragraph is plain.
