@@ -140,8 +140,8 @@ final class WebDocument: ReadableDocument {
         // it lands on text under the point; otherwise find the text by
         // descending from the web area. Never anchor to a container.
         if let hit = AX.element(at: point), AX.frame(hit)?.contains(point) ?? false,
-           let leaf = Self.textLeaf(in: hit, at: point) {
-            return leafStart(leaf)
+           let leaf = Self.textLeaf(in: hit, at: point), let m = leafStart(leaf) {
+            return m
         }
         return Self.textLeaf(in: element, at: point).flatMap(leafStart)
     }
@@ -198,7 +198,14 @@ final class WebDocument: ReadableDocument {
         guard let m = marker(at: point),
               let para = p("AXParagraphTextMarkerRangeForTextMarker", m),
               SpeechText.clean(string(para)) != nil,
-              let bounds = AX.rect(p("AXBoundsForTextMarkerRange", para))
+              let bounds = { () -> CGRect? in
+                  probeTextGeometry(near: para)
+                  if noTextGeometry {
+                      let frames = elementFrames(of: para)
+                      return frames.dropFirst().reduce(frames.first) { acc, f in acc?.union(f) }
+                  }
+                  return AX.rect(p("AXBoundsForTextMarkerRange", para))
+              }()
         else { return nil }
         return (start(of: para), bounds)
     }
@@ -644,9 +651,16 @@ final class WebDocument: ReadableDocument {
             }
             layouts.removeAll { $0.range === sentence.range } // reflowed: measure again
         }
+        probeTextGeometry(near: sentence.range)
+        if noTextGeometry { return elementFrames(of: sentence.range) }
         let words = wordBoxes(in: sentence.range)
         guard let lineHeight = words.map(\.rect.height).sorted().dropFirst(words.count / 2).first else {
-            return plausible(rect(sentence.range).map { [$0] } ?? [])
+            if let whole = rect(sentence.range) { return plausible([whole]) }
+            // No text positions at all, yet the text has a frame: a Chromium
+            // browser without inline text boxes (Aside, Chrome without
+            // VoiceOver). Highlight the text's element instead, and stop
+            // asking for word boxes on this page.
+            return elementFrames(of: sentence.range)
         }
         // Too tall (spans lines/blocks) or too wide for its characters (a
         // single-line block's box): not that word's box.
@@ -708,6 +722,42 @@ final class WebDocument: ReadableDocument {
     }
 
     private func rect(_ range: AnyObject) -> CGRect? { AX.rect(p("AXBoundsForTextMarkerRange", range)) }
+
+    /// Set once the app answers text-position queries with zero-size boxes
+    /// while its elements have real frames: a Chromium browser without inline
+    /// text boxes (Aside; Chrome when VoiceOver hasn't switched on its full
+    /// mode). Then highlights fall back to whole text blocks.
+    private var noTextGeometry = false
+    private var geometryProbed = false
+
+    /// Ask once, on a text element that's on screen: does measuring its own
+    /// text give a real box? (Off-screen text can't tell: Chromium clips frames.)
+    private func probeTextGeometry(near range: AnyObject) {
+        guard !geometryProbed, let leaf = leaf(endingAt: end(of: range)), let frame = AX.frame(leaf),
+              frame.width >= 4, frame.height >= 4, let own = p("AXTextMarkerRangeForUIElement", leaf) else { return }
+        geometryProbed = true
+        if AX.rect(p("AXBoundsForTextMarkerRange", own)) == nil {
+            noTextGeometry = true
+            print("[unread] this page gives no text positions (no inline text boxes); highlighting whole text blocks")
+        }
+    }
+
+    /// Frames of the text blocks (paragraph, heading, list item) a range starts
+    /// and ends in: the coarse fallback when the app gives no text positions.
+    /// The start is judged from inside the first word (the start marker sits
+    /// on the boundary with the previous block).
+    private func elementFrames(of range: AnyObject) -> [CGRect] {
+        let begin = start(of: range)
+        let firstWord = p("AXNextWordEndTextMarkerForTextMarker", begin) ?? begin
+        var frames: [CGRect] = []
+        for m in [firstWord, end(of: range)] {
+            guard let leaf = leaf(endingAt: m) else { continue }
+            let box = Self.block(containing: leaf).flatMap(AX.frame) ?? AX.frame(leaf)
+            guard let f = box, f.width >= 4, f.height >= 4, !frames.contains(f) else { continue }
+            frames.append(f)
+        }
+        return frames
+    }
 
     /// Measure a word from up to three characters in (past a leaf boundary
     /// or the space before a wrap), then extend left by what was skipped.
