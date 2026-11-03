@@ -57,6 +57,7 @@ Developer tools:
 ```bash
 ./.build/release/Unread --bench     # silent: model load + synthesis timings
 ./.build/release/Unread --extract   # print the sentences Unread would read from the front window
+./.build/release/Unread --stats     # latency percentiles from your real use
 ```
 
 ## How it works
@@ -69,6 +70,7 @@ Sources/Unread/
   Session.swift   Synthesis pipeline, playback queue, highlight following
   Audio.swift     Kokoro voices (EN v3 + FR), language detection, gapless AVAudioEngine playback
   Overlay.swift   Click-through highlight layer above every app
+  Latency.swift   Per-reading timing log (~/Library/Logs/Unread/latency.jsonl) and --stats
   App.swift       Menu bar, interaction state machine
 ```
 

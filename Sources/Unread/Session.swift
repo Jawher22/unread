@@ -26,11 +26,14 @@ final class ReadingSession {
     private var followGraceUntil = Date.distantPast
     private var refresh: Timer?
     private let startedAt: Date
+    /// Filled in as the first sentence goes through the pipeline, written
+    /// once at first audio, then nil.
+    private var timing: LatencyRecord?
     private(set) var suspendHighlight = false
 
     var isPaused: Bool { player.isPaused }
 
-    init(document: ReadableDocument, start: AnyObject, speed: Float, voice: Voice, player: Player, overlay: Overlay, startedAt: Date) {
+    init(document: ReadableDocument, start: AnyObject, speed: Float, voice: Voice, player: Player, overlay: Overlay, startedAt: Date, timing: LatencyRecord? = nil) {
         self.document = document
         self.cursor = start
         self.speed = speed
@@ -38,6 +41,7 @@ final class ReadingSession {
         self.player = player
         self.overlay = overlay
         self.startedAt = startedAt
+        self.timing = timing
     }
 
     func start() {
@@ -68,10 +72,15 @@ final class ReadingSession {
 
     private func fill() {
         guard !cancelled, !synthesizing, queued.count < lookahead else { return }
+        let extractStart = Date()
         guard let position = cursor, let sentence = document.sentence(from: position) else {
             cursor = nil
             if queued.isEmpty { finish() }
             return
+        }
+        if timing != nil, timing?.extractMs == nil {
+            timing?.extractMs = LatencyLog.ms(since: extractStart)
+            timing?.chars = sentence.text.count
         }
         cursor = sentence.next
         synthesizing = true
@@ -79,25 +88,31 @@ final class ReadingSession {
         let speed = self.speed
         let voice = self.voice
         Task { [weak self] in
+            let synthStart = Date()
             let samples = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
-            self?.enqueue(sentence, samples: samples)
+            self?.enqueue(sentence, samples: samples, synthMs: LatencyLog.ms(since: synthStart))
         }
     }
 
-    private func enqueue(_ sentence: Sentence, samples: [Float]?) {
+    private func enqueue(_ sentence: Sentence, samples: [Float]?, synthMs: Double) {
         synthesizing = false
         guard !cancelled else { return }
         guard let samples, !samples.isEmpty else { fill(); return }
         queued.append(sentence)
         spokeAnything = true
-        if queued.count == 1 {
-            if startedAt != .distantPast {
-                print(String(format: "[unread] first audio %.0f ms after release", Date().timeIntervalSince(startedAt) * 1000))
-            }
-            showCurrent(scroll: true)
-        }
+        if queued.count == 1 { showCurrent(scroll: true) }
         player.schedule(samples) { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
+        }
+        if var t = timing {
+            // Measured after scheduling: that's when the buffer is queued on a running engine.
+            t.firstAudioMs = LatencyLog.ms(since: startedAt)
+            t.synthMs = synthMs
+            t.outputLatencyMs = (player.outputLatency * 1000).rounded()
+            timing = nil
+            print(String(format: "[unread] first audio %.0f ms after release (%@, extract %.0f, synth %.0f, +%.0f device)",
+                         t.firstAudioMs!, t.gesture.rawValue, t.extractMs ?? 0, synthMs, t.outputLatencyMs!))
+            LatencyLog.append(t)
         }
         fill()
     }

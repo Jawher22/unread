@@ -112,6 +112,9 @@ final class Player {
         return buf
     }
 
+    /// Output device latency, as the engine reports it (Bluetooth adds a lot).
+    var outputLatency: TimeInterval { engine.outputNode.presentationLatency }
+
     func pause() { isPaused = true; node.pause() }
     func resume() { isPaused = false; warm(); node.play() }
 

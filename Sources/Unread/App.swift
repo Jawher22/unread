@@ -199,7 +199,7 @@ final class AppController: NSObject {
 
         if held >= holdThreshold {
             // Point-and-hold: read from the paragraph we were aiming at.
-            if let target { startReading(target.document, from: target.start, releasedAt: releasedAt) }
+            if let target { startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold) }
             return
         }
 
@@ -217,18 +217,23 @@ final class AppController: NSObject {
             return
         }
         guard isDoubleTap else { return } // idle single tap: deliberately nothing
+        let lookupStart = Date()
         guard let doc = DocumentFinder.frontDocument(), let start = doc.firstVisible() else {
             print("[unread] nothing readable in the front window")
             NSSound.beep()
             return
         }
-        startReading(doc, from: start, releasedAt: releasedAt)
+        startReading(doc, from: start, releasedAt: releasedAt, gesture: .doubleTap, lookupMs: LatencyLog.ms(since: lookupStart))
     }
 
-    private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date) {
+    private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date,
+                              gesture: LatencyRecord.Gesture, lookupMs: Double? = nil) {
         session?.stop()
         print("[unread] reading \(type(of: doc)) in pid \(AX.pid(doc.element))")
-        let s = ReadingSession(document: doc, start: start, speed: speed, voice: voice, player: player, overlay: overlay, startedAt: releasedAt)
+        let app = NSRunningApplication(processIdentifier: AX.pid(doc.element))?.bundleIdentifier
+        let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs)
+        let s = ReadingSession(document: doc, start: start, speed: speed, voice: voice, player: player, overlay: overlay,
+                               startedAt: releasedAt, timing: timing)
         s.onFinish = { [weak self, weak s] in
             guard let self, self.session === s else { return }
             self.session = nil
