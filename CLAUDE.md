@@ -56,6 +56,9 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 - Chromium sometimes returns viewport-sized bounds. Treat those as "no bounds".
 - **Markers must be anchored to a text leaf (`AXStaticText`).** A marker taken from a container's range (the web area, a hit-tested message block) keeps that anchor through every navigation call, and Chromium then answers every bounds query with the container's box. Hit-test results are resolved down to the leaf under the point (`WebDocument.textLeaf`).
 - **Chromium measures a range precisely only if both ends are inside a leaf.** Sentence bounds are therefore the union of per-word boxes, dropping words that come back taller or wider than a word can be and re-measuring those from a few characters in.
+- **Chromium's hit test is unreliable** (in T3 Code it can return a 1 px button that doesn't contain the point). Use a hit only if it contains the point and holds text; otherwise descend from the web area by frame. Never anchor a marker to a container.
+- **Chromium can switch its tree off again** (auto-disable), leaving the focused "window" as an `AXApplication` stub. `AXManualAccessibility` always reads back false, so `AX.enableTree` judges by tree health and re-enables at most every 10 s (setting it restarts the build).
+- **Highlights are per line** (`ReadableDocument.lines(of:)`), drawn as one shape; a single union box covers the neighbouring sentences.
 - **Block breaks come from roles, not hop counts:** static text, links, list markers and `…StyleGroup` subroles (code, strong, emphasis) are inline; anything else is a block. Both engines expose the same structure.
 - Enable Chromium's tree with `AXManualAccessibility` only. Never set `AXEnhancedUserInterface`: it breaks window animations.
 - Kokoro v3 (fast ANE path) supports English, Japanese and Mandarin only. French uses the legacy pipeline with a single voice, `ff_siwis`.
