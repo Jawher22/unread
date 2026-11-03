@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Re-rendering message</title>
+<style>body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; } main { max-width: 680px; padding: 16px 24px; }</style></head>
+<body>
+<!-- Like a chat app with a ticking "Working for 1m 59s" timer: the message's
+     elements are rebuilt every 1.5 s with identical content, so every text
+     marker taken before a rebuild points at deleted nodes. Read it with
+     --slow so the walk crosses several rebuilds. -->
+<main>
+  <div id="msg">
+    <p><strong>What's left:</strong></p>
+    <ul>
+      <li><strong>The first item.</strong> I would do this next. It has a longer second sentence that keeps going.</li>
+      <li><strong>The second item.</strong> Small.</li>
+      <li><strong>The third item.</strong> Only needed if real pages show it.</li>
+    </ul>
+    <p>Shall I start the first one?</p>
+  </div>
+</main>
+<script>
+const msg = document.getElementById('msg');
+const html = msg.innerHTML;
+setInterval(() => { msg.innerHTML = html; }, 1500);
+</script>
+</body>
+</html>
