@@ -20,6 +20,16 @@ final class ModifierHotkey {
     init(keyCodes: Set<UInt16> = [59, 62], flag: NSEvent.ModifierFlags = .control) {
         self.keyCodes = keyCodes
         self.flag = flag
+        start()
+    }
+
+    /// (Re)install the event monitors. Global monitors installed before the
+    /// app was granted Accessibility never receive key events, so this is
+    /// called again once the grant arrives.
+    func start() {
+        monitors.forEach(NSEvent.removeMonitor)
+        monitors = []
+        isDown = false
         // Mouse and scroll events matter too: ⌃-click is a right-click and
         // ⌃-scroll is zoom. Neither should start reading.
         let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
