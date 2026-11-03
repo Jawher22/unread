@@ -21,6 +21,12 @@ swift build -c release                # Swift 6.2 toolchain; macOS 15+, Apple Si
 ./.build/release/Unread --extract     # print sentences + bounds Unread would read from the front window
 ```
 
+```bash
+scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Applications); logs: ~/Library/Logs/Unread/unread.log
+```
+
+- The bundle is signed with the first "Apple Development" identity so the Accessibility grant survives rebuilds. Dev modes work from the bundle too: `build/Unread.app/Contents/MacOS/Unread --extract`.
+
 - The first clean build compiles FluidAudio (2–15 min depending on cache). After that, rebuilds take seconds.
 - Never copy `.build` between folders: Swift's precompiled headers bake in absolute paths and the build fails.
 - The first launch of a new binary spends ~13 s preparing the CoreML models. After that, load is ~0.8 s.

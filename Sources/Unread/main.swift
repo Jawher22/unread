@@ -3,6 +3,18 @@ import AppKit
 setvbuf(stdout, nil, _IOLBF, 0)
 let args = CommandLine.arguments
 
+// Launched as Unread.app (Finder, login item), stdout goes nowhere. Keep the
+// [unread] log lines in ~/Library/Logs/Unread/unread.log instead.
+let devMode = args.contains { $0.hasPrefix("--") }
+if !devMode, isatty(STDOUT_FILENO) == 0, Bundle.main.bundleIdentifier != nil {
+    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Unread")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let log = dir.appendingPathComponent("unread.log").path
+    if freopen(log, "a", stdout) != nil { setvbuf(stdout, nil, _IOLBF, 0) }
+    _ = freopen(log, "a", stderr)
+    print("[unread] --- launched \(Date())")
+}
+
 if args.contains("--bench") {
     // Silent: time model load and per-sentence synthesis, no audio output.
     let sentences = [

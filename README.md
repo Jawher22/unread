@@ -40,11 +40,15 @@ Measured on an M-series MacBook: 80–250 ms to synthesize a sentence, ~25 ms to
 ## Build and run
 
 ```bash
-swift build -c release        # first build compiles FluidAudio: ~15 min
-./.build/release/Unread
+scripts/bundle.sh --install   # builds, signs and installs ~/Applications/Unread.app
+open ~/Applications/Unread.app
 ```
 
-Run it from a terminal that has Accessibility permission (System Settings → Privacy & Security → Accessibility), or grant it when prompted.
+The first build compiles FluidAudio (~15 min). On first launch, grant Accessibility when prompted (System Settings → Privacy & Security → Accessibility); Unread picks the grant up without a relaunch. It turns on **Launch at Login** the first time it runs; toggle it from the menu. Logs go to `~/Library/Logs/Unread/unread.log`.
+
+The script signs with your first "Apple Development" identity (or `$UNREAD_SIGN_IDENTITY`). A stable identity means the Accessibility grant survives rebuilds; without one it falls back to ad-hoc signing and you'll re-grant after every build.
+
+For quick iteration you can also run the bare binary from a terminal that has Accessibility permission: `swift build -c release && ./.build/release/Unread`.
 
 Developer tools:
 
@@ -74,7 +78,7 @@ Text comes from the macOS Accessibility tree, not screenshots. Web content is re
 - In Chromium-based apps the highlight is sometimes block-level instead of sentence-level.
 - Native text views don't auto-scroll yet.
 - PDFs, EPUBs and apps that don't expose text (Kindle, canvas apps) aren't supported yet.
-- Runs as a bare executable, not yet a signed `.app` bundle.
+- Signed for local use only; not notarized yet.
 
 ## Roadmap
 
@@ -83,7 +87,7 @@ Text comes from the macOS Accessibility tree, not screenshots. Web content is re
 - Faster first audio (synthesize the opening clause first)
 - More voices (Pocket TTS, voice cloning), better French
 - PDF and EPUB, OCR fallback
-- Signed `.app`, Homebrew cask
+- Notarized release, Homebrew cask
 
 ## Credits
 

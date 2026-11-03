@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import ServiceManagement
 
 /// The interaction:
 ///   hold ⌃ Control → the paragraph under the pointer lights up
@@ -15,6 +16,9 @@ final class AppController: NSObject {
     private let hotkey = ModifierHotkey()
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
+    private var accessibilityItem: NSMenuItem!
+    private var loginItem: NSMenuItem?
+    private var trustTimer: Timer?
 
     private var session: ReadingSession?
     private var ready = false
@@ -48,7 +52,72 @@ final class AppController: NSObject {
 
         let trusted = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         print("[unread] accessibility trusted: \(trusted)")
+        if !trusted { waitForAccessibility() }
+        configureLoginItemOnFirstRun()
         loadModels()
+    }
+
+    // MARK: Permissions
+
+    /// The key monitors are dead until Accessibility is granted. Poll for the
+    /// grant and bring them up as soon as it lands, so no relaunch is needed.
+    private func waitForAccessibility() {
+        accessibilityItem.isHidden = false
+        trustTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, AXIsProcessTrusted() else { return }
+                self.trustTimer?.invalidate()
+                self.trustTimer = nil
+                self.accessibilityItem.isHidden = true
+                self.hotkey.start()
+                if let front = NSWorkspace.shared.frontmostApplication { AX.enableTree(for: front.processIdentifier) }
+                print("[unread] accessibility granted")
+            }
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    // MARK: Launch at login
+
+    /// Only meaningful when running as Unread.app (not the bare dev binary).
+    private var isBundled: Bool { Bundle.main.bundleIdentifier != nil }
+
+    /// The first time the app runs as a bundle, turn launch-at-login on: it's
+    /// a background utility, it should just be there. The menu toggle wins after that.
+    private func configureLoginItemOnFirstRun() {
+        let key = "loginItemConfigured"
+        guard isBundled, !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        setLaunchAtLogin(true)
+    }
+
+    private func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            print("[unread] launch at login \(on ? "register" : "unregister") failed: \(error)")
+        }
+        updateLoginItem()
+    }
+
+    private func updateLoginItem() {
+        guard let loginItem else { return }
+        switch SMAppService.mainApp.status {
+        case .enabled: loginItem.state = .on; loginItem.title = "Launch at Login"
+        case .requiresApproval: loginItem.state = .mixed; loginItem.title = "Launch at Login (approve in System Settings)"
+        default: loginItem.state = .off; loginItem.title = "Launch at Login"
+        }
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        switch SMAppService.mainApp.status {
+        case .enabled: setLaunchAtLogin(false)
+        case .requiresApproval: SMAppService.openSystemSettingsLoginItems()
+        default: setLaunchAtLogin(true)
+        }
     }
 
     // MARK: Models
@@ -181,6 +250,10 @@ final class AppController: NSObject {
         statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+        accessibilityItem = NSMenuItem(title: "Grant Accessibility Access…", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        accessibilityItem.target = self
+        accessibilityItem.isHidden = true
+        menu.addItem(accessibilityItem)
         menu.addItem(.separator())
 
         let speedItem = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
@@ -207,6 +280,13 @@ final class AppController: NSObject {
         menu.addItem(voiceItem)
 
         menu.addItem(.separator())
+        if isBundled {
+            let item = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+            loginItem = item
+            updateLoginItem()
+        }
         let quit = NSMenuItem(title: "Quit Unread", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
