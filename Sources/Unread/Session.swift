@@ -1,15 +1,19 @@
 import AppKit
 import NaturalLanguage
 
-/// A first sentence already extracted (and being synthesized) while the
-/// hotkey was held, so reading can start the moment it's released.
+/// The first sentence, extracted and synthesized while the hotkey was held,
+/// so reading can start the moment it's released.
 struct PrimedSentence {
-    let sentence: Sentence
-    /// The reading scope computed with it, so release doesn't pay for it again.
-    let scope: ReadingScope?
-    let extractMs: Double
-    /// Samples plus how long synthesis took.
-    let samples: Task<(samples: [Float]?, ms: Double), Never>
+    struct Prepared {
+        let sentence: Sentence
+        /// The reading scope computed with it, so release doesn't pay for it again.
+        let scope: ReadingScope?
+        let extractMs: Double
+        let samples: [Float]?
+        let synthMs: Double
+    }
+    /// Nil if there was nothing to read at the aimed paragraph.
+    let prepared: Task<Prepared?, Never>
 }
 
 /// Reads one document from a starting point to the end. Keeps a few
@@ -30,13 +34,18 @@ final class ReadingSession {
     private var cursor: AnyObject?
     /// Scheduled, not yet finished. `first` is the one being spoken.
     private var queued: [Sentence] = []
-    private var synthesizing = false
+    /// Extracting or synthesizing the next sentence (one at a time).
+    private var producing = false
     private var cancelled = false
     private var spokeAnything = false
     private let debugSession = ProcessInfo.processInfo.environment["UNREAD_DEBUG_OVERLAY"] != nil
     private var following = true
     private var followGraceUntil = Date.distantPast
     private var refresh: Timer?
+    /// A 10 Hz refresh is in flight on the AX worker; skip ticks until it's back.
+    private var refreshing = false
+    /// Newer highlight requests win over older ones still in flight.
+    private var highlightToken = 0
     private let startedAt: Date
     /// Filled in as the first sentence goes through the pipeline, written
     /// once at first audio, then nil.
@@ -44,6 +53,7 @@ final class ReadingSession {
     private var primed: PrimedSentence?
     /// The article / main area this reading stays in, and what it skips (#10).
     private var scope: ReadingScope?
+    private var scopeResolved = false
     /// The last sentence extracted, to find our place again if the page
     /// rebuilds its elements under us.
     private var lastExtracted: Sentence?
@@ -62,7 +72,6 @@ final class ReadingSession {
         self.startedAt = startedAt
         self.timing = timing
         self.primed = primed
-        self.scope = primed.map { $0.scope } ?? document.scope(from: start)
     }
 
     func start() {
@@ -90,53 +99,69 @@ final class ReadingSession {
     }
 
     // MARK: Pipeline
+    //
+    // Extraction and highlight measuring run on the AX worker (#12); this
+    // class stays on the main actor and only ever touches results.
 
-    /// Start from the sentence synthesized during the hold. If synthesis is
+    /// Start from the sentence prepared during the hold. If synthesis is
     /// still running, wait for it rather than queueing a second job behind it.
     private func consume(_ p: PrimedSentence) {
         primed = nil
-        cursor = p.sentence.next
-        lastExtracted = p.sentence
-        synthesizing = true
-        _ = language.language(for: p.sentence.text) // keep language stickiness in step
-        timing?.extractMs = p.extractMs
-        timing?.chars = p.sentence.text.count
+        producing = true
         Task { [weak self] in
-            let (samples, ms) = await p.samples.value
-            self?.enqueue(p.sentence, samples: samples, synthMs: ms)
+            let prepared = await p.prepared.value
+            guard let self, !self.cancelled else { return }
+            self.producing = false
+            guard let prepared else { self.fill(); return } // nothing prepared: start the normal way
+            self.scope = prepared.scope
+            self.scopeResolved = true
+            self.cursor = prepared.sentence.next
+            self.lastExtracted = prepared.sentence
+            _ = self.language.language(for: prepared.sentence.text) // keep language stickiness in step
+            self.timing?.extractMs = prepared.extractMs
+            self.timing?.chars = prepared.sentence.text.count
+            self.enqueue(prepared.sentence, samples: prepared.samples, synthMs: prepared.synthMs)
         }
     }
 
     private func fill() {
-        guard !cancelled, !synthesizing, queued.count < lookahead else { return }
-        let extractStart = Date()
+        guard !cancelled, !producing, queued.count < lookahead else { return }
         guard let position = cursor else { if queued.isEmpty { finish() }; return }
-        var found = document.sentence(from: position, in: scope)
-        if found == nil, let last = lastExtracted { found = document.sentence(after: last, scope: &scope) }
-        guard let sentence = found else {
-            cursor = nil
-            if queued.isEmpty { finish() }
-            return
-        }
-        lastExtracted = sentence
-        if timing != nil, timing?.extractMs == nil {
-            timing?.extractMs = LatencyLog.ms(since: extractStart)
-            timing?.chars = sentence.text.count
-        }
-        cursor = sentence.next
-        synthesizing = true
-        let lang = language.language(for: sentence.text)
-        let speed = self.speed
-        let voice = self.voice
+        producing = true
+        let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
         Task { [weak self] in
+            let extractStart = Date()
+            let (found, newScope) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?) in
+                var sc = needScope ? doc.scope(from: position) : scopeNow
+                var s = doc.sentence(from: position, in: sc)
+                if s == nil, let last { s = doc.sentence(after: last, scope: &sc) } // page re-rendered?
+                return (s, sc)
+            }
+            guard let self, !self.cancelled else { return }
+            self.scope = newScope
+            self.scopeResolved = true
+            guard let sentence = found else {
+                self.producing = false
+                self.cursor = nil
+                if self.queued.isEmpty { self.finish() }
+                return
+            }
+            self.lastExtracted = sentence
+            self.cursor = sentence.next
+            if self.timing != nil, self.timing?.extractMs == nil {
+                self.timing?.extractMs = LatencyLog.ms(since: extractStart)
+                self.timing?.chars = sentence.text.count
+            }
+            let lang = self.language.language(for: sentence.text)
             let synthStart = Date()
-            let samples = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
-            self?.enqueue(sentence, samples: samples, synthMs: LatencyLog.ms(since: synthStart))
+            let samples = try? await self.voice.synthesize(sentence.text, language: lang, speed: self.speed)
+            guard !self.cancelled else { return }
+            self.producing = false
+            self.enqueue(sentence, samples: samples, synthMs: LatencyLog.ms(since: synthStart))
         }
     }
 
     private func enqueue(_ sentence: Sentence, samples: [Float]?, synthMs: Double) {
-        synthesizing = false
         guard !cancelled else { return }
         guard let samples, !samples.isEmpty else { fill(); return }
         queued.append(sentence)
@@ -164,7 +189,7 @@ final class ReadingSession {
         queued.removeFirst()
         if queued.isEmpty {
             overlay.hide()
-            if cursor == nil, !synthesizing { finish() }
+            if cursor == nil, !producing { finish() }
         } else {
             showCurrent(scroll: true)
         }
@@ -183,46 +208,87 @@ final class ReadingSession {
 
     // MARK: Highlight
 
+    /// One highlight measurement, done on the AX worker.
+    private struct Measured {
+        var lines: [CGRect] = []
+        var visible: CGRect?
+        var relocated: Sentence?
+        var triedRelocate = false
+        var scrolled = false
+        var diagnosis: String?
+    }
+
+    private func measure(_ sentence: Sentence, relocate: Bool, scrollIfNeeded: Bool) async -> Measured {
+        let doc = document
+        return await AXWorker.shared.run {
+            var m = Measured()
+            var current = sentence
+            m.lines = doc.lines(of: current)
+            // The page may have rebuilt its elements under us: find it again.
+            if m.lines.isEmpty, relocate {
+                m.triedRelocate = true
+                if let fresh = doc.relocate(current) { m.relocated = fresh; current = fresh; m.lines = doc.lines(of: fresh) }
+            }
+            m.visible = doc.visibleRect()
+            if scrollIfNeeded, let v = m.visible, let u = Self.union(m.lines), !v.contains(u) {
+                doc.scrollIntoView(current)
+                m.scrolled = true
+                let moved = doc.lines(of: current)
+                if !moved.isEmpty { m.lines = moved }
+            }
+            if m.lines.isEmpty { m.diagnosis = doc.linesDiagnosis(of: current) }
+            return m
+        }
+    }
+
     private func showCurrent(scroll: Bool) {
         guard !suspendHighlight, let current = queued.first else {
             if suspendHighlight { print("[highlight] skipped: suspended while aiming") }
             return
         }
-        var lines = document.lines(of: current)
-        if lines.isEmpty, let fresh = document.relocate(current) {
-            queued[0] = fresh
-            lines = document.lines(of: fresh)
-            print("[highlight] \(current.text.prefix(40).debugDescription): page re-rendered, found it again")
+        highlightToken += 1
+        let token = highlightToken
+        let scrollIfNeeded = scroll && following
+        Task { [weak self] in
+            guard let m = await self?.measure(current, relocate: true, scrollIfNeeded: scrollIfNeeded), let self else { return }
+            guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
+                  self.queued.first?.range === current.range else { return }
+            let label = current.text.prefix(40).debugDescription
+            if let fresh = m.relocated {
+                self.queued[0] = fresh
+                print("[highlight] \(label): page re-rendered, found it again")
+            }
+            if m.scrolled { self.followGraceUntil = Date().addingTimeInterval(0.8) }
+            guard let bounds = Self.union(m.lines), let visible = m.visible else {
+                print("[highlight] \(label) → no box: \(m.diagnosis ?? "")")
+                self.overlay.hide()
+                return
+            }
+            if !visible.intersects(bounds) { print("[highlight] \(label) → off screen \(bounds), visible \(visible), following: \(self.following)") }
+            else { print("[highlight] \(label) → \(m.lines.count) line(s)") }
+            self.show(m.lines, in: visible)
         }
-        let label = current.text.prefix(40).debugDescription
-        guard let bounds = union(lines), let visible = document.visibleRect() else {
-            print("[highlight] \(label) → no box: \(document.linesDiagnosis(of: current))")
-            overlay.hide(); return
-        }
-        if !visible.intersects(bounds) { print("[highlight] \(label) → off screen \(bounds), visible \(visible), following: \(following)") }
-        else { print("[highlight] \(label) → \(lines.count) line(s)") }
-        if scroll, following, !visible.contains(bounds) {
-            document.scrollIntoView(current)
-            followGraceUntil = Date().addingTimeInterval(0.8)
-            let moved = document.lines(of: current)
-            if !moved.isEmpty { lines = moved }
-        }
-        show(lines, in: visible)
     }
 
     private func refreshHighlight() {
-        guard !suspendHighlight, var current = queued.first else { return }
-        var lines = document.lines(of: current)
-        // The page may have rebuilt its elements mid-sentence; look again, but not 10× a second.
-        if lines.isEmpty, Date().timeIntervalSince(lastRelocateAttempt) > 0.5 {
-            lastRelocateAttempt = Date()
-            if let fresh = document.relocate(current) { queued[0] = fresh; current = fresh; lines = document.lines(of: fresh) }
+        guard !suspendHighlight, !refreshing, let current = queued.first else { return }
+        refreshing = true
+        let token = highlightToken
+        // Relocating walks the tree; not more than twice a second.
+        let mayRelocate = Date().timeIntervalSince(lastRelocateAttempt) > 0.5
+        Task { [weak self] in
+            guard let m = await self?.measure(current, relocate: mayRelocate, scrollIfNeeded: false), let self else { return }
+            self.refreshing = false
+            if m.triedRelocate { self.lastRelocateAttempt = Date() }
+            guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
+                  self.queued.first?.range === current.range else { return }
+            if let fresh = m.relocated { self.queued[0] = fresh }
+            guard let bounds = Self.union(m.lines), let visible = m.visible else { return }
+            // If the user scrolled the sentence away, stop dragging the page
+            // back; resume following once it's on screen again.
+            if Date() > self.followGraceUntil { self.following = visible.intersects(bounds) }
+            self.show(m.lines, in: visible)
         }
-        guard let bounds = union(lines), let visible = document.visibleRect() else { return }
-        // If the user scrolled the sentence away, stop dragging the page
-        // back; resume following once it's on screen again.
-        if Date() > followGraceUntil { following = visible.intersects(bounds) }
-        show(lines, in: visible)
     }
 
     /// Draw the sentence's lines, clipped to the visible part of the document.
@@ -231,5 +297,5 @@ final class ReadingSession {
         if shown.isEmpty { overlay.hide() } else { overlay.show(shown, style: .reading) }
     }
 
-    private func union(_ lines: [CGRect]) -> CGRect? { lines.dropFirst().reduce(lines.first) { $0?.union($1) } }
+    nonisolated private static func union(_ lines: [CGRect]) -> CGRect? { lines.dropFirst().reduce(lines.first) { $0?.union($1) } }
 }
