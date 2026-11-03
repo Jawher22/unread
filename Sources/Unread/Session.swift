@@ -1,6 +1,15 @@
 import AppKit
 import NaturalLanguage
 
+/// A first sentence already extracted (and being synthesized) while the
+/// hotkey was held, so reading can start the moment it's released.
+struct PrimedSentence {
+    let sentence: Sentence
+    let extractMs: Double
+    /// Samples plus how long synthesis took.
+    let samples: Task<(samples: [Float]?, ms: Double), Never>
+}
+
 /// Reads one document from a starting point to the end. Keeps a few
 /// sentences synthesized ahead of the one playing, and keeps the highlight
 /// glued to the sentence on screen as the user scrolls.
@@ -29,11 +38,12 @@ final class ReadingSession {
     /// Filled in as the first sentence goes through the pipeline, written
     /// once at first audio, then nil.
     private var timing: LatencyRecord?
+    private var primed: PrimedSentence?
     private(set) var suspendHighlight = false
 
     var isPaused: Bool { player.isPaused }
 
-    init(document: ReadableDocument, start: AnyObject, speed: Float, voice: Voice, player: Player, overlay: Overlay, startedAt: Date, timing: LatencyRecord? = nil) {
+    init(document: ReadableDocument, start: AnyObject, speed: Float, voice: Voice, player: Player, overlay: Overlay, startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
         self.document = document
         self.cursor = start
         self.speed = speed
@@ -42,10 +52,11 @@ final class ReadingSession {
         self.overlay = overlay
         self.startedAt = startedAt
         self.timing = timing
+        self.primed = primed
     }
 
     func start() {
-        fill()
+        if let primed { consume(primed) } else { fill() }
         refresh = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshHighlight() }
         }
@@ -69,6 +80,21 @@ final class ReadingSession {
     }
 
     // MARK: Pipeline
+
+    /// Start from the sentence synthesized during the hold. If synthesis is
+    /// still running, wait for it rather than queueing a second job behind it.
+    private func consume(_ p: PrimedSentence) {
+        primed = nil
+        cursor = p.sentence.next
+        synthesizing = true
+        _ = language.language(for: p.sentence.text) // keep language stickiness in step
+        timing?.extractMs = p.extractMs
+        timing?.chars = p.sentence.text.count
+        Task { [weak self] in
+            let (samples, ms) = await p.samples.value
+            self?.enqueue(p.sentence, samples: samples, synthMs: ms)
+        }
+    }
 
     private func fill() {
         guard !cancelled, !synthesizing, queued.count < lookahead else { return }
