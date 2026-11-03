@@ -239,9 +239,11 @@ final class AppController: NSObject {
         s.start()
     }
 
+    /// Manual stop (double-tap). The chime confirms it, same as reaching the end.
     private func stopReading() {
         session?.stop()
         session = nil
+        player.chime()
         setStatus("Hold ⌃ and point to read")
     }
 

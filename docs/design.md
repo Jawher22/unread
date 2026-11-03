@@ -61,7 +61,7 @@ Chosen: **Kokoro-82M via [FluidAudio](https://github.com/FluidInference/FluidAud
 | Tap ⌃ while idle | Nothing (an aborted chord or stray tap must never start speaking) |
 | Double-tap ⌃ while idle | Read from the first visible paragraph ("continue from where I am") |
 | Tap ⌃ while reading | Pause / resume |
-| Double-tap ⌃ while reading | Stop |
+| Double-tap ⌃ while reading | Stop, with the chime |
 | Reaching the end of the content | Soft chime, then stop |
 | Hold + point while reading | Jump there. Seeking is pointing |
 

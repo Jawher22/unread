@@ -114,8 +114,9 @@ final class ReadingSession {
         fill()
     }
 
-    /// Natural end only (not stop or jump): a soft chime says "that's all",
-    /// so a quiet room doesn't read as "did it stall?".
+    /// Natural end: a soft chime says "that's all", so a quiet room doesn't
+    /// read as "did it stall?". (A manual stop chimes too, from the app; a
+    /// jump doesn't, because reading carries on.)
     private func finish() {
         guard !cancelled else { return }
         stop()
