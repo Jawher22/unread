@@ -1,0 +1,8 @@
+<!doctype html>
+<!-- A chat whose last reply ends in short bullets, then the composer. WebKit gives the empty text area its placeholder ("Ask anything") as text; that must not count as text after the reply, or the bullets are dropped. All text original. -->
+<nav><a href="#">Threads</a> <a href="#">Settings</a></nav>
+<main>
+<div><h3>You</h3><p>Can you fix the flaky test and tell me what changed?</p></div>
+<div><h3>Assistant</h3><p>I found the cause of the flaky test. It read the clock twice and compared the two readings.</p><p>Here is what changed:</p><ul><li>Read the clock once per check</li><li>Add a test for the midnight case</li><li>Remove the retry wrapper</li></ul></div>
+<form><textarea placeholder="Ask anything"></textarea><button>Send</button></form>
+</main></body></html>

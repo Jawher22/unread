@@ -846,7 +846,10 @@ final class WebDocument: ReadableDocument {
         func search(_ e: AXUIElement) -> TextUnit? {
             guard chromeKind(e) == nil else { return nil }
             let role = roles(e).role
-            if role == kAXImageRole { return nil }
+            // A text area is an input (a chat's composer), not more of the page,
+            // though WebKit gives an empty one its placeholder as text. It stays
+            // readable elsewhere: rich editors are text areas.
+            if role == kAXImageRole || role == kAXTextAreaRole { return nil }
             if let role, [kAXHeadingRole, "AXTable"].contains(role) { moreText = true; return nil }
             if role == kAXListRole {
                 let list = TextUnit(block: e, members: [e], first: -1), t = text(of: list)
