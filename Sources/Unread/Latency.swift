@@ -13,7 +13,8 @@ struct LatencyRecord: Codable {
     var lookupMs: Double?
     /// Extracting the first sentence (AX text walk).
     var extractMs: Double?
-    /// Synthesizing the sentence that became first audio.
+    /// Synthesizing what became first audio: the first sentence, or its
+    /// opening clause when it was split.
     var synthMs: Double?
     /// Release → first buffer scheduled on the player.
     var firstAudioMs: Double?
@@ -22,6 +23,10 @@ struct LatencyRecord: Codable {
     var outputLatencyMs: Double?
     /// Length of the first sentence, in characters.
     var chars: Int?
+    /// Length of the text synthesized first (the opening clause and a few
+    /// words of lookahead), when the sentence was split so the voice could
+    /// start on it while the rest was synthesized (#14).
+    var openingChars: Int?
     /// Whether first audio came from speculative synthesis during the hold (#5).
     var speculative: Bool?
 }
@@ -76,6 +81,12 @@ enum LatencyLog {
         if !spec.isEmpty {
             stage("  speculative hit", spec.filter { $0.speculative == true }.map(\.firstAudioMs))
             stage("  speculative miss", spec.filter { $0.speculative == false }.map(\.firstAudioMs))
+        }
+        // Splitting started being logged with `openingChars` (#14).
+        let sinceSplit = records.drop { $0.openingChars == nil }
+        if !sinceSplit.isEmpty {
+            stage("  first sentence split", sinceSplit.filter { $0.openingChars != nil }.map(\.firstAudioMs))
+            stage("  first sentence whole", sinceSplit.filter { $0.openingChars == nil }.map(\.firstAudioMs))
         }
         stage("lookup (double-tap)", records.map(\.lookupMs))
         stage("extract first sentence", records.map(\.extractMs))

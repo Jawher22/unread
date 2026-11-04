@@ -100,23 +100,38 @@ final class Player {
         if !engine.isRunning { try? engine.start() }
     }
 
-    /// Schedule one sentence and the pause after it. `consumed` fires when the
-    /// speech has been handed to the hardware (the pause is still ahead, so
-    /// there's ~120 ms to schedule the next sentence gaplessly); `played` when
-    /// the pause has been heard too.
+    /// What follows a piece of speech.
+    enum Ending {
+        /// The breath that closes a sentence; `played` fires once it's heard.
+        case sentence(played: @Sendable () -> Void)
+        /// More of the same sentence, after `pause`: the clause break the
+        /// piece ends with (#14).
+        case clause(pause: [Float])
+    }
+
+    /// Schedule one piece of speech and the pause after it. `consumed` fires
+    /// when the speech has been handed to the hardware (the pause is still
+    /// ahead, so there's time to schedule what follows gaplessly).
     ///
-    /// The session schedules one sentence at a time on purpose: a buffer
-    /// on the node can't be taken back, so audio waiting here couldn't follow a
+    /// The session schedules one piece at a time on purpose: a buffer on the
+    /// node can't be taken back, so audio waiting here couldn't follow a
     /// speed or voice change (#15).
     ///
     /// Returns where the speech starts on the player's timeline (see `position`).
     @discardableResult
-    func schedule(_ samples: [Float], consumed: @escaping @Sendable () -> Void, played: @escaping @Sendable () -> Void) -> Int {
+    func schedule(_ samples: [Float], ending: Ending, consumed: @escaping @Sendable () -> Void) -> Int {
         warm()
-        guard let speech = buffer(samples), let pause = buffer(gap) else { return queueEnd }
-        let start = claim(samples.count + gap.count)
+        guard let speech = buffer(samples) else { return queueEnd }
+        let (pause, played): ([Float], (@Sendable () -> Void)?)
+        switch ending {
+        case .sentence(let p): (pause, played) = (gap, p)
+        case .clause(let p): (pause, played) = (p, nil)
+        }
+        let start = claim(samples.count + pause.count)
         node.scheduleBuffer(speech, completionCallbackType: .dataConsumed) { _ in consumed() }
-        node.scheduleBuffer(pause, completionCallbackType: .dataPlayedBack) { _ in played() }
+        if let pause = buffer(pause) {
+            node.scheduleBuffer(pause, completionCallbackType: .dataPlayedBack) { _ in played?() }
+        }
         if !isPaused, !node.isPlaying { node.play() }
         return start
     }
@@ -188,5 +203,59 @@ final class Player {
         idleTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.engine.stop() }
         }
+    }
+}
+
+extension Speech {
+    /// Peak level below which a 10 ms window counts as quiet.
+    static let quietLevel: Float = 0.01
+    static let window = 240
+
+    /// Quiet samples at the start of the audio (Kokoro leads every chunk with ~0.3 s).
+    var leadingQuiet: Int { quietRuns(in: 0..<samples.count).first.map { $0.lowerBound == 0 ? $0.count : 0 } ?? 0 }
+    /// Quiet samples at the end of the audio (Kokoro ends every chunk with ~0.5 s).
+    var trailingQuiet: Int { quietRuns(in: 0..<samples.count).last.map { $0.upperBound == samples.count ? $0.count : 0 } ?? 0 }
+
+    /// The first `words` display words of this speech, cut where the voice
+    /// pauses before the next word: the speech, and that pause (#14). With
+    /// no pause there, it's cut at the quietest moment, with no pause.
+    func cut(beforeWord words: Int) -> (speech: Speech, pause: [Float]) {
+        let from = wordStarts.prefix(words).last { $0 != nil }.flatMap { $0 } ?? 0
+        // Word starts run a little behind the voice; look just past the next one.
+        let next = wordStarts.dropFirst(words).first { $0 != nil }.flatMap { $0 }.map { $0 + Self.window * 10 }
+        let range = from..<min(next ?? samples.count, samples.count)
+        let cut: Range<Int>
+        if let pause = quietRuns(in: range).max(by: { $0.count < $1.count }), pause.count >= Self.window * 2 {
+            cut = pause
+        } else {
+            let quietest = stride(from: range.lowerBound, to: range.upperBound, by: Self.window).min { a, b in
+                peak(a) < peak(b)
+            } ?? range.upperBound
+            cut = quietest..<quietest
+        }
+        return (Speech(samples: Array(samples[..<cut.lowerBound]), wordStarts: Array(wordStarts.prefix(words))), Array(samples[cut]))
+    }
+
+    /// The same speech without the quiet it starts with, but for the last
+    /// `keep` samples before the voice.
+    func trimmingLeadingQuiet(keep: Int) -> Speech {
+        let cut = max(leadingQuiet - keep, 0)
+        guard cut > 0 else { return self }
+        return Speech(samples: Array(samples[cut...]), wordStarts: wordStarts.map { $0.map { max($0 - cut, 0) } })
+    }
+
+    /// Stretches of quiet windows in `range`.
+    func quietRuns(in range: Range<Int>) -> [Range<Int>] {
+        var runs: [Range<Int>] = [], start: Int?
+        let end = min(range.upperBound, samples.count)
+        for w in stride(from: max(range.lowerBound, 0), to: end, by: Self.window) {
+            if peak(w) < Self.quietLevel { start = start ?? w } else if let s = start { runs.append(s..<w); start = nil }
+        }
+        if let s = start { runs.append(s..<end) }
+        return runs
+    }
+
+    private func peak(_ window: Int) -> Float {
+        samples[window..<min(window + Self.window, samples.count)].reduce(0) { max($0, abs($1)) }
     }
 }

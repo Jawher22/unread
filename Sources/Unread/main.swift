@@ -49,6 +49,7 @@ if args.contains("--bench") {
                 if run == 2 { print(String(format: "[%@] %5.0f ms for %.2fs audio (%.0fx realtime)  %@", lang.rawValue, ms, audio, audio * 1000 / ms, String(s.prefix(40)))) }
             }
         }
+        if args.contains("--split") { await benchSplit(voice) }
         done.signal()
     }
     done.wait()
@@ -309,8 +310,9 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                         return doc.sentence(from: start, in: scope).map { ($0, scope) }
                     }
                     guard let (first, scope) = extracted else { return nil }
-                    let speech = try? await voice.synthesize(first.text, language: .english, speed: 1.3)
-                    return .init(sentence: first, scope: scope, extractMs: 0, speech: speech, synthMs: 0)
+                    let opening = OpeningClause.of(first)
+                    let speech = try? await voice.synthesize(OpeningClause.text(of: first, saying: opening), language: .english, speed: 1.3)
+                    return .init(sentence: first, scope: scope, extractMs: 0, words: opening, speech: speech, synthMs: 0)
                 })
             }
             let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,

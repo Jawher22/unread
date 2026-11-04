@@ -254,10 +254,11 @@ final class AppController: NSObject {
             }
             guard let (sentence, scope, extractMs) = extracted else { spec?.done = true; return nil }
             let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
-            let t = Date()
-            let speech = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
+            let t = Date(), opening = OpeningClause.of(sentence)
+            let speech = try? await voice.synthesize(OpeningClause.text(of: sentence, saying: opening), language: lang, speed: speed)
             spec?.done = true
-            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, speech: speech, synthMs: LatencyLog.ms(since: t))
+            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, words: opening,
+                                           speech: speech, synthMs: LatencyLog.ms(since: t))
         }
         spec.primed = PrimedSentence(prepared: task)
     }

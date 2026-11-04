@@ -200,6 +200,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - Four pages are now exact in both engines (Anthropic, Cloudflare, Willison, Wikipedia: every expected sentence, nothing else). What's left is data tables read cell by cell (Dan Luu, OpenAI; #26), and WebKit reading OpenAI's "• Claim:" items with the bullet Chromium leaves out.
 - Walk times (whole page, a fresh host per run, mean of two): every page is as fast or faster, mostly because reading now ends at the article's end. Wikipedia, Chromium: 5.8 s → 1.6 s; WebKit: 2.0 s → 1.3 s. Per sentence, Chromium is faster everywhere (the inline test in `block(containing:)` is memoized now); WebKit is within 1 ms except Wikipedia (16 → 20 ms: more lookahead per heading). The first sentence costs the same (8–16 ms); the second pays the one-time search for the first paragraph (+30 to +110 ms), while the first is playing. Long-lived hidden WebKit hosts get throttled (80 ms per sentence instead of 15), so time against fresh ones.
 
+**Long first sentences (#14, 2026-11-04),** `--bench --split`. Synthesis takes ~40 ms + 1.45 ms per character (57 ms for 14 characters, 248 ms for 149, 474 ms for 293). Splitting the first sentence at a clause break cuts what first audio waits for from 248–296 ms to 104–195 ms in English and from 185–238 ms to 97–123 ms in French. The rest takes 140–220 ms to synthesize, while the opening plays for 2.9–6.7 s. Kokoro pads every chunk with ~0.3 s of quiet before the voice and ~0.5 s after. Joined as is, that is a 715–890 ms hole where a whole sentence pauses 210–520 ms. A clause synthesized alone ends with a falling, sentence-final pitch. Synthesized with the next 3 words, which are then cut off at the voice's own pause, it ends as inside the whole sentence, and the join pauses 100–460 ms.
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -225,7 +227,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
    - The skipping matters more than the ending: junk *inside* the article (captions, "Share", related-article cards, handles, timestamps) is what hurts read-along.
 9. **Move AX work off the main thread.** The 30 Hz aim loop, the 10 Hz highlight refresh and `walk()` (two AX calls per word) stall the hotkey and overlay on slow Chromium pages.
 10. **Auto-scroll in native text views.**
-11. **Faster first audio for long first sentences** (synthesize the opening clause separately) if step 3 isn't enough.
+11. **Faster first audio for long first sentences** (synthesize the opening clause separately) if step 3 isn't enough. Done (#14): see §7.
 12. **Apply speed and voice changes immediately:** drop and re-synthesize the look-ahead queue.
 13. **Highlight quality: follow the voice word by word** (#20, moved up from Phase 3 on 2026-11-04). Mark the spoken word inside the sentence highlight. Time it with Kokoro's `predictedDurations` (both engines already return them from `synthesizeDetailed`), map onto the word boxes `walk()` and `lines(of:)` already measure, and drive it from the player's sample clock. Chromium browsers without text positions keep the paragraph fallback.
 
