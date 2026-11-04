@@ -334,7 +334,7 @@ if args.contains("--extract") {
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
     //   --word-boxes                  also print each word's box (#20)
-    //   --from-text "…"               start at the first sentence containing this text (like pointing there)
+    //   --from-text "…"               point at the first visible text containing this, and start at the sentence holding it
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
     //   --wait S                      keep looking for up to S seconds (a host that just launched; Chromium building its tree)
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
@@ -346,11 +346,24 @@ if args.contains("--extract") {
         let t = Date()
         func open() -> ReadableDocument? { pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument() }
         func findStart(in doc: ReadableDocument) -> AnyObject? {
-            var pos = fromStart || value(after: "--from-text") != nil ? doc.documentStart() : doc.firstVisible()
-            if let needle = value(after: "--from-text") {
-                while let p = pos, let s = doc.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+            guard let needle = value(after: "--from-text") else { return fromStart ? doc.documentStart() : doc.firstVisible() }
+            func search(from start: AnyObject?) -> AnyObject? {
+                var pos = start
+                while let p = pos, let s = doc.sentence(from: p) { if s.text.contains(needle) { return p }; pos = s.next }
+                return nil
             }
-            return pos
+            // Point at the first visible text holding the needle, as the user would; a walk from the top
+            // can end before reaching it (WebKit's walk ends at some line breaks). Text below the fold falls back to the walk.
+            func pointed() -> AnyObject? {
+                guard let visible = doc.visibleRect(),
+                      let leaf = AX.firstInOrder(in: doc.element, maxNodes: 50_000, { e in
+                          AX.role(e) == kAXStaticTextRole && ((AX.attr(e, kAXValueAttribute) as? String)?.contains(needle) ?? false)
+                              && AX.frame(e).map { $0.width > 2 && $0.height > 2 && visible.intersects($0) } == true
+                      }),
+                      let f = AX.frame(leaf) else { return nil }
+                return doc.paragraph(at: CGPoint(x: f.minX + 2, y: f.minY + min(f.height / 2, 8)))?.start
+            }
+            return search(from: pointed()) ?? search(from: doc.documentStart())
         }
         // Polled in one process so the tree is switched on once, as in the app: a new process would set the flag again and restart Chromium's build.
         // Not before the app shows a window (a user only points at one): Chromium ignores the flag set earlier, and AX.enableTree won't set it twice.

@@ -1,0 +1,11 @@
+# Real pages for scoring extraction. Only this list is committed: the snapshots and their
+# expected files hold third-party text and live in fixtures/corpus/ (gitignored).
+# scripts/save-corpus.sh saves them; scripts/score-corpus.sh scores them. See fixtures/README.md.
+#
+# name           url                                                                          start: reading begins at the first sentence containing this (as if the user pointed there)
+anthropic-agents https://www.anthropic.com/engineering/building-effective-agents              Building effective agents
+openai-hallucinate https://openai.com/index/why-language-models-hallucinate/                Why language models hallucinate
+cloudflare-pingora https://blog.cloudflare.com/how-we-built-pingora-the-proxy-that-connects-cloudflare-to-the-internet/  How we built Pingora
+willison-trifecta https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/                 The lethal trifecta
+danluu-web-bloat https://danluu.com/web-bloat/                                                How web bloat impacts
+wikipedia-screen-reader https://en.wikipedia.org/wiki/Screen_reader                           Screen reader
