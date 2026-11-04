@@ -370,7 +370,11 @@ if args.contains("--extract") {
         }
         // Polled in one process so the tree is switched on once, as in the app: a new process would set the flag again and restart Chromium's build.
         // Not before the app shows a window (a user only points at one): Chromium ignores the flag set earlier, and AX.enableTree won't set it twice.
-        func showsWindow() -> Bool { pid.map { (AX.attr(AXUIElementCreateApplication($0), kAXWindowsAttribute) as? [AXUIElement])?.isEmpty == false } ?? true }
+        // A main window counts too: a window on another Space isn't in AXWindows (TextEdit opened with `open -g`).
+        func showsWindow() -> Bool {
+            pid.map { let app = AXUIElementCreateApplication($0)
+                return (AX.attr(app, kAXWindowsAttribute) as? [AXUIElement])?.isEmpty == false || AX.attr(app, kAXMainWindowAttribute) != nil } ?? true
+        }
         func readable(_ doc: ReadableDocument) -> Bool { findStart(in: doc).flatMap { doc.sentence(from: $0) } != nil }
         var found = showsWindow() ? open() : nil
         while !(found.map(readable) ?? false), Date().timeIntervalSince(t) < wait {
