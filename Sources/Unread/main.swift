@@ -336,23 +336,35 @@ if args.contains("--extract") {
     //   --word-boxes                  also print each word's box (#20)
     //   --from-text "…"               start at the first sentence containing this text (like pointing there)
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
+    //   --wait S                      keep looking for up to S seconds (a host that just launched; Chromium building its tree)
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
     let pid = value(after: "--pid").flatMap { pid_t($0) }
     let fromStart = args.contains("--from-start")
     let limit = value(after: "--limit").flatMap { Int($0) } ?? (fromStart ? 500 : 12)
+    let wait = value(after: "--wait").flatMap { TimeInterval($0) } ?? 0
     MainActor.assumeIsolated {
         let t = Date()
-        let found = pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument()
-        guard let doc = found else { print("no document in \(pid.map { "pid \($0)" } ?? "front window")"); exit(1) }
-        print("doc: \(type(of: doc)) found in \(Int(Date().timeIntervalSince(t) * 1000)) ms, visible: \(doc.visibleRect().map { "\($0)" } ?? "nil")")
-        let slow = args.contains("--slow")
-        func findStart() -> AnyObject? {
+        func open() -> ReadableDocument? { pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument() }
+        func findStart(in doc: ReadableDocument) -> AnyObject? {
             var pos = fromStart || value(after: "--from-text") != nil ? doc.documentStart() : doc.firstVisible()
             if let needle = value(after: "--from-text") {
                 while let p = pos, let s = doc.sentence(from: p), !s.text.contains(needle) { pos = s.next }
             }
             return pos
         }
+        // Polled in one process so the tree is switched on once, as in the app: a new process would set the flag again and restart Chromium's build.
+        // Not before the app shows a window (a user only points at one): Chromium ignores the flag set earlier, and AX.enableTree won't set it twice.
+        func showsWindow() -> Bool { pid.map { (AX.attr(AXUIElementCreateApplication($0), kAXWindowsAttribute) as? [AXUIElement])?.isEmpty == false } ?? true }
+        func readable(_ doc: ReadableDocument) -> Bool { findStart(in: doc).flatMap { doc.sentence(from: $0) } != nil }
+        var found = showsWindow() ? open() : nil
+        while !(found.map(readable) ?? false), Date().timeIntervalSince(t) < wait {
+            Thread.sleep(forTimeInterval: 0.1)
+            found = showsWindow() ? open() : nil
+        }
+        guard let doc = found else { print("no document in \(pid.map { "pid \($0)" } ?? "front window")"); exit(1) }
+        print("doc: \(type(of: doc)) found in \(Int(Date().timeIntervalSince(t) * 1000)) ms, visible: \(doc.visibleRect().map { "\($0)" } ?? "nil")")
+        let slow = args.contains("--slow")
+        func findStart() -> AnyObject? { findStart(in: doc) }
         var pos = findStart()
         if pos == nil { print("nothing to read"); exit(1) }
         var scope = pos.flatMap { doc.scope(from: $0) }

@@ -50,7 +50,7 @@ The first build compiles FluidAudio (~15 min). On first launch, grant Accessibil
 
 The script signs with your first "Apple Development" identity (or `$UNREAD_SIGN_IDENTITY`). A stable identity means the Accessibility grant survives rebuilds; without one it falls back to ad-hoc signing and you'll re-grant after every build.
 
-For quick iteration you can also run the bare binary from a terminal that has Accessibility permission: `swift build -c release && ./.build/release/Unread`.
+For quick iteration you can also run the bare binary from a terminal that has Accessibility permission: `scripts/build.sh && ./.build/release/Unread`.
 
 Developer tools:
 

@@ -16,7 +16,7 @@ BUNDLE_ID="com.jawher22.unread"
 VERSION="0.1.0"
 APP="build/Unread.app"
 
-swift build -c release
+scripts/build.sh
 BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
 rm -rf "$APP"
