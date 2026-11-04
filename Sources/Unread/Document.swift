@@ -103,6 +103,17 @@ enum SpeechText {
     private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|citation needed|edit)\]"#, options: .caseInsensitive)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
 
+    /// Citation markers blanked out, same length: the sentence tokenizer split
+    /// "…disability.[3] Screen…" inside the marker, leaving "[" in one sentence
+    /// and "3]" in the next. Offsets don't move, so a walk still lines up.
+    static func blankingCitations(_ s: String) -> String {
+        let ns = NSMutableString(string: s)
+        for m in citation.matches(in: s, range: NSRange(location: 0, length: ns.length)).reversed() {
+            ns.replaceCharacters(in: m.range, with: String(repeating: " ", count: m.range.length))
+        }
+        return ns as String
+    }
+
     /// Make a raw on-screen string speakable, or nil if there's nothing to say.
     static func clean(_ raw: String) -> String? {
         var s = raw.replacingOccurrences(of: "\u{00AD}", with: "") // soft hyphens
@@ -192,6 +203,8 @@ final class WebDocument: ReadableDocument {
     private var parentMemo: [AXKey: AXUIElement?] = [:]
     private var chromeMemo: [AXKey: String?] = [:]
     private var linkRowMemo: [AXKey: Bool] = [:]
+    private var inlineGroupMemo: [AXKey: Bool] = [:]
+    private var childrenMemo: [AXKey: [AXUIElement]] = [:]
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
         if let last = lastParagraph, last.bounds.contains(point) { return last }
@@ -250,7 +263,7 @@ final class WebDocument: ReadableDocument {
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
         for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
-            guard let (chunkEnd, blockBreaks) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
+            guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
             let chunk = string(chunkRange)
             let chunkNS = chunk as NSString
             guard chunkNS.length > 0, !chunk.trimmingCharacters(in: Self.blank).isEmpty else {
@@ -267,27 +280,55 @@ final class WebDocument: ReadableDocument {
             // buttons, images). Alone, "￼" would come back as a sentence too.
             let lead = chunkNS.rangeOfCharacter(from: Self.blank.inverted).location
             let tokenizer = NLTokenizer(unit: .sentence)
-            tokenizer.string = chunk
-            let from = String.Index(utf16Offset: lead, in: chunk)
-            let first = tokenizer.tokens(for: from..<chunk.endIndex).first.map { NSRange($0, in: chunk) }
-                ?? NSRange(location: lead, length: chunkNS.length - lead)
+            let tokenized = SpeechText.blankingCitations(chunk)
+            tokenizer.string = tokenized
+            let from = String.Index(utf16Offset: lead, in: tokenized)
+            let tokens = tokenizer.tokens(for: from..<tokenized.endIndex).map { NSRange($0, in: tokenized) }
             // Chromium joins separate blocks with no separator ("TitleBody…"),
             // so a block boundary always ends the sentence.
-            let length = min(NSMaxRange(first), blockBreaks.first { $0 > first.location } ?? .max)
-            // The on-screen range must end on the sentence's last visible
-            // character: not short of its final "." and never into the next word.
-            var visibleEnd = length
-            while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
-                  Self.blank.contains(c) { visibleEnd -= 1 }
-            // End on the last visible character, even when the sentence runs to
-            // the chunk's end: trailing "￼" (an icon button) would otherwise
-            // make the sentence count as part of that button.
-            let sentenceEnd = visibleEnd >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+            let blockEnd = blockBreaks.first { $0 > (tokens.first?.location ?? lead) } ?? .max
+            // Where a sentence made of tokens 0…last ends: its length, its last
+            // visible character, and the marker there.
+            func ending(through last: Int) -> (length: Int, visibleEnd: Int, marker: AnyObject) {
+                let length = min(tokens.isEmpty ? chunkNS.length : NSMaxRange(tokens[last]), blockEnd)
+                // The on-screen range must end on the sentence's last visible
+                // character: not short of its final "." and never into the next word.
+                var visibleEnd = length
+                while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
+                      Self.blank.contains(c) { visibleEnd -= 1 }
+                // End on the last visible character, even when the sentence runs to
+                // the chunk's end: trailing "￼" (an icon button) would otherwise
+                // make the sentence count as part of that button.
+                let marker = visibleEnd >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+                return (length, visibleEnd, marker)
+            }
+            var (length, visibleEnd, sentenceEnd) = ending(through: 0)
+            // WebKit puts a numbered item's marker in the text ("1. Carry…") and
+            // the tokenizer returns "1." as a sentence. One character step covers
+            // the marker and the next letter, so the walk overshot its end and the
+            // item lost its first letter. A fragment with nothing to say whose end
+            // can't be reached joins the next sentence of its block, unspoken.
+            var spoken = 0
+            while spoken + 1 < tokens.count, tokens[spoken + 1].location < blockEnd,
+                  SpeechText.clean(chunkNS.substring(with: NSRange(location: tokens[spoken].location, length: length - tokens[spoken].location))) == nil,
+                  (range(cursor, sentenceEnd).map { (string($0) as NSString).length } ?? 0) > visibleEnd {
+                spoken += 1
+                (length, visibleEnd, sentenceEnd) = ending(through: spoken)
+            }
             if debugWalk {
                 let got = range(cursor, sentenceEnd).map(string) ?? "?"
-                print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(first) len=\(length) range→\(got.debugDescription)")
+                print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) lostSpaces=\(lostSpaces) first=\(tokens.first.map { "\($0)" } ?? "-") joined=\(spoken) len=\(length) range→\(got.debugDescription)")
             }
-            if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(chunkNS.substring(to: length)) {
+            // What to say: from the first token with something to say, with the
+            // spaces Chromium lost put back.
+            var said = ""
+            var at = spoken > 0 ? tokens[spoken].location : 0
+            for gap in lostSpaces where gap > at && gap < length {
+                said += chunkNS.substring(with: NSRange(location: at, length: gap - at)) + " "
+                at = gap
+            }
+            said += chunkNS.substring(with: NSRange(location: at, length: length - at))
+            if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(said) {
                 guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd) }
                 switch verdict(text: text, endingAt: sentenceEnd, in: scope) {
                 case .read: return Sentence(text: text, range: r, next: sentenceEnd)
@@ -425,7 +466,7 @@ final class WebDocument: ReadableDocument {
             if let kind = chromeKind(e) { return .skip(kind) }
         }
         if SpeechText.isTimestamp(text) { return .skip("timestamp") }
-        if let block = Self.block(containing: leaf), isLinkRow(block) { return .skip("links") }
+        if let container = block(containing: leaf), isLinkRow(container) { return .skip("links") }
         return .read
     }
 
@@ -512,15 +553,30 @@ final class WebDocument: ReadableDocument {
     /// When a step crosses an embedded object ("￼"), it may stall at the next
     /// one (WebKit moves past one icon button at a time and then stops), so
     /// jump to the next text leaf in document order instead.
+    ///
+    /// A "next" marker can lie behind `m`: from the empty line between two
+    /// `<br>`s, WebKit's character step returns the start of the paragraph
+    /// before them, and the walk went round that paragraph until it gave up.
     private func step(past m: AnyObject) -> AnyObject? {
         var stepped: AnyObject?
         for name in ["AXNextTextMarkerForTextMarker", "AXNextWordEndTextMarkerForTextMarker", "AXNextParagraphEndTextMarkerForTextMarker"] {
-            if let n = p(name, m), !CFEqual(n, m), let r = range(m, n), (string(r) as NSString).length > 0 { stepped = n; break }
+            if let n = p(name, m), isAfter(n, m) { stepped = n; break }
         }
         // Only an embedded object stalls the step; plain whitespace and line
         // breaks are ordinary separators (and block-break detection relies on them).
         if let n = stepped, let r = range(m, n), !string(r).contains("\u{FFFC}") { return n }
-        return leafStart(after: m) ?? stepped
+        // Chromium lists a table's cells again under its AXColumns, so the
+        // next leaf in tree order after the last cell is the first cell.
+        if let leaf = leafStart(after: m), isAfter(leaf, m) { return leaf }
+        return stepped
+    }
+
+    /// Is `b` past `a`, with text between them? Ranges are built from
+    /// unordered markers, so a marker that went backwards reads like one that
+    /// went forwards; the ordered range's start tells them apart.
+    private func isAfter(_ b: AnyObject, _ a: AnyObject) -> Bool {
+        guard !CFEqual(a, b), let r = range(a, b), (string(r) as NSString).length > 0 else { return false }
+        return !CFEqual(start(of: r), b)
     }
 
     /// The start of the first text leaf after the element holding `m`, in
@@ -549,13 +605,22 @@ final class WebDocument: ReadableDocument {
     /// A ~600 character window of text starting exactly at `cursor` (so no
     /// character is ever lost), extended paragraph by paragraph. Chromium
     /// reports every wrapped line as a "paragraph", so sentences are cut from
-    /// the window, not per paragraph. Returns the window's end and the UTF-16
-    /// offsets where one block element ends and a different one begins.
-    private func chunk(from cursor: AnyObject) -> (AnyObject, [Int])? {
+    /// the window, not per paragraph. Returns the window's end, the UTF-16
+    /// offsets where one block element ends and a different one begins, and
+    /// those where the window's text lost a space (`lostSpace`).
+    ///
+    /// Twelve paragraphs are usually plenty, but Chromium's "paragraphs" can
+    /// be single text runs ("ChatGPT itself", " (", "April 2023", "), "…), and
+    /// in link-dense prose twelve of them ended the window, and the sentence,
+    /// mid-sentence. Past twelve, keep going only while the first sentence is
+    /// unfinished: going on regardless made a Wikipedia walk four times slower.
+    private func chunk(from cursor: AnyObject) -> (end: AnyObject, breaks: [Int], lostSpaces: [Int])? {
         var probe = cursor
         var chunkEnd: AnyObject?
-        var breaks: [Int] = []
-        for _ in 0..<12 {
+        var breaks: [Int] = [], lostSpaces: [Int] = []
+        var text = ""
+        for i in 0..<64 {
+            if i >= 12, Self.holdsFirstSentence(text, breaks: breaks) { break }
             guard let para = p("AXParagraphTextMarkerRangeForTextMarker", probe) else { break }
             var paraEnd = end(of: para)
             if CFEqual(paraEnd, probe), let n = step(past: paraEnd),
@@ -563,13 +628,54 @@ final class WebDocument: ReadableDocument {
                 paraEnd = end(of: nextPara) // probe sat on a boundary; take the following paragraph
             }
             chunkEnd = paraEnd
-            let length = range(cursor, paraEnd).map { (string($0) as NSString).length } ?? 0
+            text = range(cursor, paraEnd).map(string) ?? ""
+            let length = (text as NSString).length
             if length >= 600 { break }
             guard let n = step(past: paraEnd), !CFEqual(n, probe) else { break }
             if !sameBlock(paraEnd, n) { breaks.append(length) }
+            else if let last = text.unicodeScalars.last, !Self.blank.contains(last), lostSpace(between: paraEnd, and: n) { lostSpaces.append(length) }
             probe = n
         }
-        return chunkEnd.map { ($0, breaks) }
+        return chunkEnd.map { ($0, breaks, lostSpaces) }
+    }
+
+    /// Does the window already hold its first sentence's end: a block break
+    /// after its first visible character, or the start of a second sentence
+    /// (with a letter in it: "…disability.[3" isn't one yet)?
+    private static func holdsFirstSentence(_ text: String, breaks: [Int]) -> Bool {
+        let ns = text as NSString
+        let lead = ns.rangeOfCharacter(from: blank.inverted).location
+        guard lead != NSNotFound else { return false }
+        if breaks.contains(where: { $0 > lead }) { return true }
+        let tokenizer = NLTokenizer(unit: .sentence)
+        let tokenized = SpeechText.blankingCitations(text)
+        tokenizer.string = tokenized
+        let tokens = tokenizer.tokens(for: String.Index(utf16Offset: lead, in: tokenized)..<tokenized.endIndex)
+        return tokens.count >= 2 && tokenized[tokens[1]].unicodeScalars.contains(where: CharacterSet.letters.contains)
+    }
+
+    /// Chromium drops the space at a line wrap that falls where one element
+    /// ends and the next begins: "half past seven" + " every weekday…" reads
+    /// "sevenevery". Its text leaves still hold the space, so ask them.
+    /// `b` is one step past the line's end `a`, so the text between them is
+    /// the next line's first character.
+    private func lostSpace(between a: AnyObject, and b: AnyObject) -> Bool {
+        guard let first = range(a, b).map(string)?.unicodeScalars.first, !Self.blank.contains(first),
+              let before = leaf(endingAt: a).flatMap(valued), let after = leaf(endingAt: b).flatMap(valued),
+              !CFEqual(before.element, after.element) else { return false }
+        return before.value.last?.isWhitespace == true || after.value.first?.isWhitespace == true
+    }
+
+    /// The text element and its value, past Chromium's per-line text boxes
+    /// (also AXStaticText, but with no value).
+    private func valued(_ leaf: AXUIElement) -> (element: AXUIElement, value: String)? {
+        var cur: AXUIElement? = leaf
+        for _ in 0..<3 {
+            guard let c = cur, AX.role(c) == kAXStaticTextRole else { return nil }
+            if let v = AX.attr(c, kAXValueAttribute) as? String, !v.isEmpty { return (c, v) }
+            cur = AX.parent(c)
+        }
+        return nil
     }
 
     /// Same block element? Both engines expose inline markup the same way:
@@ -581,7 +687,7 @@ final class WebDocument: ReadableDocument {
         guard let ea = AX.element(p("AXUIElementForTextMarker", a)),
               let eb = AX.element(p("AXUIElementForTextMarker", b)) else { return false }
         if CFEqual(ea, eb) { return true }
-        guard let blockA = Self.block(containing: ea), let blockB = Self.block(containing: eb) else { return false }
+        guard let blockA = block(containing: ea), let blockB = block(containing: eb) else { return false }
         return CFEqual(blockA, blockB)
     }
 
@@ -595,11 +701,60 @@ final class WebDocument: ReadableDocument {
         return sub.hasSuffix("StyleGroup") && sub != "AXPreformattedStyleGroup" // <pre> is a block
     }
 
-    static func block(containing e: AXUIElement) -> AXUIElement? {
+    /// Chromium exposes a `<b>`, `<abbr>` or `<span>` that has an id
+    /// (Wikipedia's do) as a plain group in the text flow, where WebKit folds
+    /// it into the text. Judged a block, it cut "A" / "screen reader" / "is a
+    /// form of…". A plain group of inline content is inline when it sits in
+    /// the flow: inside a link or style group (a citation's "[1]"), or with
+    /// inline neighbours, at least one of them text. A `<p>` holds only text
+    /// too, but its neighbours are blocks (bare text beside one, like a
+    /// visually hidden span, is on one side at most). An empty group is
+    /// Chromium's `<br>`, a line break.
+    private func isInlineGroup(_ e: AXUIElement) -> Bool {
+        guard Self.isPlainGroup(e) else { return false }
+        let key = AXKey(element: e)
+        if let known = inlineGroupMemo[key] { return known }
+        func isText(_ x: AXUIElement) -> Bool {
+            AX.role(x) == kAXStaticTextRole && !(((AX.attr(x, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: Self.blank).isEmpty)
+        }
+        var inline = false
+        if Self.holdsOnlyInline(e), let parent = AX.parent(e) {
+            if Self.isInline(parent) {
+                inline = true
+            } else {
+                let siblings = children(of: parent)
+                if let i = siblings.firstIndex(where: { CFEqual($0, e) }) {
+                    let neighbours = [i > 0 ? siblings[i - 1] : nil, i + 1 < siblings.count ? siblings[i + 1] : nil].compactMap { $0 }
+                    inline = neighbours.contains(where: isText) && neighbours.allSatisfy(Self.isInline)
+                }
+            }
+        }
+        inlineGroupMemo[key] = inline
+        return inline
+    }
+
+    private static func isPlainGroup(_ e: AXUIElement) -> Bool { AX.role(e) == kAXGroupRole && AX.subrole(e) == nil }
+
+    /// Text, links and style groups only, or plain groups of those (a few levels).
+    private static func holdsOnlyInline(_ e: AXUIElement, depth: Int = 0) -> Bool {
+        let kids = AX.children(e)
+        return !kids.isEmpty && depth < 3 && kids.allSatisfy { isInline($0) || (isPlainGroup($0) && holdsOnlyInline($0, depth: depth + 1)) }
+    }
+
+    /// A container's children, listed once per document (an article can have hundreds).
+    private func children(of e: AXUIElement) -> [AXUIElement] {
+        let key = AXKey(element: e)
+        if let known = childrenMemo[key] { return known }
+        let kids = AX.children(e)
+        childrenMemo[key] = kids
+        return kids
+    }
+
+    func block(containing e: AXUIElement) -> AXUIElement? {
         var cur: AXUIElement? = e
         for _ in 0..<8 {
             guard let c = cur else { return nil }
-            if !isInline(c) { return c }
+            if !Self.isInline(c), !isInlineGroup(c) { return c }
             cur = AX.parent(c)
         }
         return nil
@@ -671,7 +826,13 @@ final class WebDocument: ReadableDocument {
         probeTextGeometry(near: sentence.range)
         if noTextGeometry { return elementFrames(of: sentence.range) }
         let words = wordBoxes(in: sentence.range)
-        guard let lineHeight = words.map(\.rect.height).sorted().dropFirst(words.count / 2).first else {
+        // Words that start on a leaf boundary all get the same enclosing
+        // block's box from Chromium; in link-dense text that's most of them,
+        // and the median "line" became the block. No two real words share a box.
+        let shared = Dictionary(grouping: words, by: { "\($0.rect)" }).filter { $0.value.count > 1 }
+        let own = words.filter { shared["\($0.rect)"] == nil }
+        let measured = own.isEmpty ? words : own
+        guard let lineHeight = measured.map(\.rect.height).sorted().dropFirst(measured.count / 2).first else {
             if let whole = rect(sentence.range) { return plausible([whole]) }
             // No text positions at all, yet the text has a frame: a Chromium
             // browser without inline text boxes (Aside, Chrome without
@@ -771,7 +932,7 @@ final class WebDocument: ReadableDocument {
         var frames: [CGRect] = []
         for m in [firstWord, end(of: range)] {
             guard let leaf = leaf(endingAt: m) else { continue }
-            let box = Self.block(containing: leaf).flatMap(AX.frame) ?? AX.frame(leaf)
+            let box = block(containing: leaf).flatMap(AX.frame) ?? AX.frame(leaf)
             guard let f = box, f.width >= 4, f.height >= 4, !frames.contains(f) else { continue }
             frames.append(f)
         }

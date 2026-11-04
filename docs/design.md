@@ -154,16 +154,16 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Word highlight (#20, 2026-11-04):** on the fixture pages every spoken word gets a box in both engines (98% of display words; the rest are list bullets). In `--simulate` the mark moves 0–20 ms after each word's due time (one 50 Hz tick). Synthesis time is unchanged (`--bench`: 31–35× real time).
 
-**Real-page corpus (#8, 2026-11-04),** `scripts/score-corpus.sh` on six saved pages (Anthropic, OpenAI, Cloudflare, Simon Willison, Dan Luu, Wikipedia), 706 expected sentences, reading from the title:
+**Real-page corpus (#8, 2026-11-04),** `scripts/score-corpus.sh` on six saved pages (Anthropic, OpenAI, Cloudflare, Simon Willison, Dan Luu, Wikipedia), 706 expected sentences, reading from the title. First run, then after the walk fixes for #49, #50 and #51:
 
-| Engine | Precision | Recall | Bounds |
-| --- | --- | --- | --- |
-| WebKit | 77.9% | 54.4% | 99.8% |
-| Chromium | 70.5% | 93.9% | 86.9% |
+| Engine | Precision | Recall | Bounds | After: precision | Recall | Bounds |
+| --- | --- | --- | --- | --- | --- | --- |
+| WebKit | 77.9% | 54.4% | 99.8% | 77.2% | 93.8% | 99.9% |
+| Chromium | 70.5% | 93.9% | 86.9% | 79.1% | 97.5% | 91.1% |
 
-- WebKit's recall is low because its walk ends at the first `<br>` that follows a sentence end: after 3 sentences on Anthropic, 35 on OpenAI, 6 on Wikipedia. No synthetic page has a `<br>`.
+- WebKit's low first recall was its walk ending at a `<br>` after a sentence end (#49): a "next" marker went backwards.
 - Junk that gets read (precision) is mostly outside the structural rules: figure captions not in a `<figure>`, metadata labels ("Published", "Team"), permalink "#" and "[edit]" links, tag rows, newsletter boxes and "more articles" lists after the article's last paragraph, data tables, Wikipedia's reference list.
-- Chromium splits sentences at inline links and wrapped lines on Wikipedia and Simon Willison's blog, and drops the space at some inline boundaries ("static typingwhen").
+- Chromium used to cut sentences at inline `<b id>`/`<abbr id>`/citations and in link-dense prose, drop the space at some wraps ("static typingwhen"), and lose the start of the sentence after a table (#51).
 - Full list per page and sentence: PR #46.
 
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.

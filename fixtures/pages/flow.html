@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Inline flow</title>
+<style>
+body { font: 15px/1.5 Menlo, monospace; margin: 0; }
+main { max-width: 640px; margin: 24px auto; }
+.narrow { width: 36ch; }
+.wrap-link { width: 28ch; }
+td, th { padding: 2px 8px; vertical-align: top; }
+td p, th p { margin: 0; }
+</style></head>
+<body>
+<!-- Inline flow that Chromium used to break: a line that wraps right after
+     </strong> or </a> (the space was lost), a link that wraps inside itself,
+     <b> and <abbr> with an id (Chromium exposes them as plain groups, like
+     Wikipedia's) and a citation marker built the same way, a sentence of more than twelve text runs (the window ended
+     mid-sentence), and a small table (Chromium lists its cells again under
+     its columns), then an icon, then a paragraph that must keep its start. Whether
+     tables are read at all is #26; the cells below are what Unread reads
+     today. Text is original; the widths are in ch of a monospace font so the
+     wraps land in the same place in both engines. -->
+<main>
+  <article>
+    <h1>The island ferry</h1>
+    <p class="narrow">The ferry leaves at <strong>half past seven</strong> every weekday morning.</p>
+    <p class="narrow">Bicycles ride free with <a href="#">a day pass</a> bought before boarding.</p>
+    <p class="wrap-link">Tickets are sold by <a href="#">Harbour Lines</a> at the pier office.</p>
+    <p>We stopped at <a href="#">Ardmore</a>, <a href="#">Port Ellen</a>, <a href="#">Bowmore</a>, <a href="#">Port Askaig</a>, <a href="#">Craighouse</a>, <a href="#">Tayvallich</a> and <a href="#">Crinan</a> before turning home.</p>
+    <p>A <b id="term">tide table</b> lists the <abbr id="hw" title="high water">HW</abbr> times for each day.<sup id="cite-1"><a href="#"><span id="open-1">[</span>1<span id="close-1">]</span></a></sup> Spring tides come twice a month.</p>
+    <table>
+      <tbody>
+        <tr><th><p><b>Crossing</b></p></th><th><p><b>Summer</b></p></th></tr>
+        <tr><td><p>Departures each day</p></td><td><p>12</p></td></tr>
+        <tr><td><p>Minutes at sea</p></td><td><p>40</p></td></tr>
+      </tbody>
+    </table>
+    <p></p>
+    <div><div><svg width="16" height="16" viewBox="0 0 16 16" role="img" aria-label="Anchor"><circle cx="8" cy="8" r="6"/></svg><p><span>In bad weather, the last crossing of the day is cancelled first.</span></p></div></div>
+    <p>Check the board at the pier before you travel.</p>
+  </article>
+</main>
+</body>
+</html>
