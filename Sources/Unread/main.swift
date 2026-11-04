@@ -215,13 +215,16 @@ if args.contains("--axtree"), let i = args.firstIndex(of: "--axtree"), args.indi
         guard let window = AX.element(AX.attr(axApp, kAXFocusedWindowAttribute)) ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute))
                 ?? (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first,
               let root = AX.find(in: window, { _, role in role == "AXWebArea" }) else { print("no web area"); exit(1) }
+        let frames = args.contains("--frames")
         func dump(_ e: AXUIElement, _ depth: Int) {
-            guard depth < 14 else { return }
+            guard depth < 40 else { return }
             let role = AX.role(e) ?? "?"
             let sub = (AX.attr(e, kAXSubroleAttribute) as? String).map { "/\($0)" } ?? ""
             let text = ((AX.attr(e, kAXValueAttribute) as? String) ?? (AX.attr(e, kAXTitleAttribute) as? String) ?? "")
                 .replacingOccurrences(of: "\n", with: "⏎").prefix(50)
-            print(String(repeating: "  ", count: depth) + role + sub + (text.isEmpty ? "" : "  \"\(text)\""))
+            let box = frames ? AX.frame(e).map { "  [\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))]" } ?? "" : ""
+            let desc = frames ? (AX.attr(e, kAXRoleDescriptionAttribute) as? String).map { "  <\($0)>" } ?? "" : ""
+            print(String(repeating: "  ", count: depth) + role + sub + (text.isEmpty ? "" : "  \"\(text)\"") + box + desc)
             AX.children(e).forEach { dump($0, depth + 1) }
         }
         dump(root, 0)
