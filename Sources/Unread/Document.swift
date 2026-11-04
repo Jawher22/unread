@@ -12,7 +12,7 @@ struct Sentence {
 }
 
 /// Something on screen we can read aloud, regardless of which app owns it.
-/// Positions are opaque: a text marker for web content, a UTF-16 index for
+/// Positions are opaque: a text marker for web content, a `NativeRange` for
 /// native text views.
 protocol ReadableDocument: AnyObject {
     var element: AXUIElement { get }
@@ -62,8 +62,8 @@ extension ReadableDocument {
         return sentence(from: next, in: scope)
     }
 
-    /// Opaque start position of a sentence's range (web only; native ranges
-    /// are indices and never go stale).
+    /// Opaque start position of a sentence's range (web only; a native range
+    /// doubles as its own start).
     func startOf(_ s: Sentence) -> AnyObject {
         CFGetTypeID(s.range) == AXTextMarkerRangeGetTypeID() ? AXTextMarkerRangeCopyStartMarker(s.range as! AXTextMarkerRange) : s.range
     }
@@ -1384,19 +1384,70 @@ final class WebDocument: ReadableDocument {
 
 // MARK: - Native text views (TextEdit, Notes, Mail, most Cocoa apps)
 
+/// A character range in a native text view, as of one reading of its text
+/// (`version`). Positions are empty ranges. If the text is edited while we
+/// read, `NativeDocument` carries older ranges forward to the current text.
+final class NativeRange: NSObject {
+    let range: NSRange
+    let version: Int
+    init(_ range: NSRange, version: Int) {
+        self.range = range
+        self.version = version
+    }
+}
+
 final class NativeDocument: ReadableDocument {
     let element: AXUIElement
-    private let text: NSString
-    private let sentences: [NSRange]
+    private var text: NSString
+    private var sentences: [NSRange]
+    /// One edit per re-read of the text: `edits[v]` turns version v into v + 1.
+    private var edits: [(start: Int, oldEnd: Int, delta: Int)] = []
+    private var version: Int { edits.count }
 
     init?(element: AXUIElement) {
         guard let value = AX.attr(element, kAXValueAttribute) as? String, value.count > 1 else { return nil }
         self.element = element
         self.text = value as NSString
+        sentences = Self.sentences(in: value)
+    }
+
+    private static func sentences(in value: String) -> [NSRange] {
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = value
-        sentences = tokenizer.tokens(for: value.startIndex..<value.endIndex).map { NSRange($0, in: value) }
+        return tokenizer.tokens(for: value.startIndex..<value.endIndex).map { NSRange($0, in: value) }
     }
+
+    /// Indices are taken from a snapshot of the text, so re-read it if its
+    /// length changed (the user typed, or the app synced). One cheap call.
+    private func refreshIfEdited() {
+        guard let count = (AX.attr(element, kAXNumberOfCharactersAttribute) as? NSNumber)?.intValue, count != text.length,
+              let value = AX.attr(element, kAXValueAttribute) as? String else { return }
+        let new = value as NSString
+        var prefix = 0
+        let shorter = min(text.length, new.length)
+        while prefix < shorter, text.character(at: prefix) == new.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        while suffix < shorter - prefix, text.character(at: text.length - 1 - suffix) == new.character(at: new.length - 1 - suffix) { suffix += 1 }
+        edits.append((prefix, text.length - suffix, new.length - text.length))
+        text = new
+        sentences = Self.sentences(in: value)
+    }
+
+    /// `r` in the current text: shifted past edits before it, shrunk to what's left of it if it was edited.
+    private func current(_ r: NativeRange) -> NSRange {
+        var start = r.range.location, end = NSMaxRange(r.range)
+        for e in edits[r.version...] {
+            // Text typed exactly at a range's start goes before it; at its end, after it.
+            start = start >= e.oldEnd ? start + e.delta : min(start, e.start)
+            end = end <= e.start ? end : max(end, e.oldEnd) + e.delta
+        }
+        start = min(start, text.length)
+        return NSRange(location: start, length: max(0, min(end, text.length) - start))
+    }
+
+    private func range(_ position: AnyObject) -> NSRange { current(position as! NativeRange) }
+    private func handle(_ r: NSRange) -> NativeRange { NativeRange(r, version: version) }
+    private func position(_ i: Int) -> NativeRange { handle(NSRange(location: i, length: 0)) }
 
     private func index(at point: CGPoint) -> Int? {
         guard let v = AX.param(element, kAXRangeForPositionParameterizedAttribute, AX.pointValue(point)) else { return nil }
@@ -1410,31 +1461,34 @@ final class NativeDocument: ReadableDocument {
     }
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
+        refreshIfEdited()
         guard let i = index(at: point), i < text.length else { return nil }
         let para = text.paragraphRange(for: NSRange(location: i, length: 0))
         guard SpeechText.clean(text.substring(with: para)) != nil, let b = bounds(para) else { return nil }
-        return (para.location as NSNumber, b)
+        return (position(para.location), b)
     }
 
-    func documentStart() -> AnyObject? { 0 as NSNumber }
+    func documentStart() -> AnyObject? { position(0) }
 
     func firstVisible() -> AnyObject? {
-        guard let v = AX.attr(element, kAXVisibleCharacterRangeAttribute) else { return 0 as NSNumber }
+        refreshIfEdited()
+        guard let v = AX.attr(element, kAXVisibleCharacterRangeAttribute) else { return position(0) }
         var r = CFRange()
         AXValueGetValue(v as! AXValue, .cfRange, &r)
         let s = sentences.first { NSMaxRange($0) > r.location }
-        return (s?.location ?? r.location) as NSNumber
+        return position(s?.location ?? r.location)
     }
 
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
-        let start = (position as! NSNumber).intValue
+        refreshIfEdited()
+        let start = range(position).location
         guard var i = sentences.firstIndex(where: { NSMaxRange($0) > start }) else { return nil }
         while i < sentences.count {
             var r = sentences[i]
             if r.location < start { r = NSRange(location: start, length: NSMaxRange(r) - start) }
-            let next: AnyObject? = i + 1 < sentences.count ? sentences[i + 1].location as NSNumber : nil
+            let next: AnyObject? = i + 1 < sentences.count ? self.position(sentences[i + 1].location) : nil
             if let t = SpeechText.clean(text.substring(with: r)) {
-                return Sentence(text: t, range: NSValue(range: r), next: next)
+                return Sentence(text: t, range: handle(r), next: next)
             }
             i += 1
         }
@@ -1443,7 +1497,8 @@ final class NativeDocument: ReadableDocument {
 
     /// One box per line, from the text view's own line ranges.
     func lines(of sentence: Sentence) -> [CGRect] {
-        let r = (sentence.range as! NSValue).rangeValue
+        refreshIfEdited()
+        let r = range(sentence.range)
         guard r.length > 0, let firstLine = line(at: r.location), let lastLine = line(at: NSMaxRange(r) - 1), lastLine >= firstLine,
               lastLine - firstLine < 200 else { return bounds(r).map { [$0] } ?? [] }
         return (firstLine...lastLine).compactMap { l in
@@ -1455,8 +1510,8 @@ final class NativeDocument: ReadableDocument {
 
     /// One box per whitespace-separated word of the sentence's on-screen text.
     func words(of sentence: Sentence) -> [CGRect?] {
-        let r = (sentence.range as! NSValue).rangeValue
-        guard r.length > 0, NSMaxRange(r) <= text.length else { return [] }
+        let r = range(sentence.range)
+        guard r.length > 0 else { return [] }
         let raw = text.substring(with: r) as NSString
         var pieces: [(text: String, rect: CGRect)] = []
         let separators = CharacterSet.whitespacesAndNewlines
@@ -1491,9 +1546,20 @@ final class NativeDocument: ReadableDocument {
         return r
     }
 
+    /// Setting the visible range is NSTextView's "scroll this range to
+    /// visible": it leaves the selection, the caret and focus alone, unlike
+    /// moving the caret (#13). Scrolling down, AppKit puts the range near the
+    /// middle, so what was just read stays on screen above it. A range taller
+    /// than the view lands with its start below the view, so for a sentence
+    /// that tall only its first line is asked for.
     func scrollIntoView(_ sentence: Sentence) {
-        // Native text views only scroll by moving the caret, which would
-        // hijack the user's selection. Leave it for now.
+        var r = range(sentence.range)
+        guard r.length > 0 else { return }
+        if let view = visibleRect(), let box = bounds(r), box.height > view.height * 0.8,
+           let first = line(at: r.location), let lr = range(ofLine: first) {
+            r = NSIntersectionRange(lr, r)
+        }
+        AXUIElementSetAttributeValue(element, kAXVisibleCharacterRangeAttribute as CFString, AX.rangeValue(r))
     }
 }
 

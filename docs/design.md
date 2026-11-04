@@ -145,7 +145,21 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Native text views (`NativeDocument`):**
 - `AXValue`, `AXRangeForPosition`, `AXBoundsForRange`, `AXVisibleCharacterRange`, with sentences from `NLTokenizer`.
-- No auto-scroll yet: the only scroll mechanism is moving the caret, which would hijack the user's selection.
+- **Auto-scroll (#13, 2026-11-04): set `AXVisibleCharacterRange`.** NSTextView treats it as "scroll this range to visible": the view scrolls, and the selection, the caret and focus stay as they were. Measured with `scripts/native-scroll-probe.swift` against the native fixture host and a TextEdit document opened in the background (a range two thirds of the way down a 2,865-character text, scrolled from the top, selection set to 10+5 first):
+
+  | Mechanism | Scrolls the range into view | Selection and caret | Focus, front app |
+  | --- | --- | --- | --- |
+  | **Set `AXVisibleCharacterRange` on the text area** | **yes** (3 ms) | **untouched** | **untouched** |
+  | Set the vertical `AXScrollBar`'s `AXValue` (0–1) | yes, but the fraction has to be computed from frames, and it clamps at the end | untouched | untouched |
+  | `AXScrollToVisible` on the text area | no: unsupported (−25205) | – | – |
+  | `AXScrollToShowDescendant` on the scroll area | no: unsupported (−25205) | – | – |
+  | `AXScrollDownByPage` on the scroll area (listed in its actions) | no: unsupported (−25205), and only by pages | – | – |
+  | Set the selection to the range | yes | moved to the range (the caret hijack) | untouched |
+  | Set the selection to the range, then restore it | no: restoring scrolls back to the old selection | restored | untouched |
+
+  AppKit places the range near the middle of the view when it scrolls down (0.45 of the view's height in the host, 0.46 in TextEdit) and nearer the top (0.20–0.29) when it scrolls up, so what was just read stays on screen, and an already visible range doesn't move. A range taller than the view lands with its start below the view (1.1–1.4 of its height), so for a sentence taller than 80% of the view only its first line is asked for. "Follow, but don't fight" is the session's, shared with the web path: it scrolls only while the user is following and the sentence isn't fully on screen.
+- **Text edited while reading:** positions are `NativeRange`s, a character range tagged with the version of the text it came from. Each call that reads or measures first compares `AXNumberOfCharacters` with the snapshot (one cheap call); if it changed, `AXValue` is re-read, the edit is found as the common prefix and suffix of the two texts, and older ranges are shifted past it. An edit that keeps the length the same (replacing a word with one as long) isn't noticed. In the native host, typing a paragraph at the top in the middle of a reading moved every following highlight down by exactly the new text's height.
+- An app's windows on another Space aren't in `AXWindows` (a TextEdit document opened with `open -g`), but `AXMainWindow` still returns them, and they read and scroll the same.
 
 ## 7. Measurements (M-series MacBook, macOS 27)
 
@@ -200,7 +214,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 3. **Synthesize while the key is held.** The aim target is already known during the hold, so synthesize its first sentence speculatively and throw it away if the pointer moves. Log key-up → first audio (p50/p95) to a local file.
 4. **Use it for at least 3 days** on real reading and keep a friction log. Re-rank everything below from that log.
 
-**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, #11 text layer, per-line highlight, fixture hosts, #8 corpus and scorer)
+**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, #11 text layer, per-line highlight, fixture hosts, #8 corpus and scorer, #13 native auto-scroll)
 5. **Chromium bounds.** Fix the missing bounds (9/12 in T3 Code) and the block-level ones: per-line ranges, a union of word ranges (`walk()` already visits every word), or `AXBoundsForRange` on the static text.
 6. **Inline code must not split sentences.** Revisit `sameBlock` for code, links and emphasis.
 7. **Fixture corpus + scorer.** Saved real pages (Anthropic and OpenAI engineering posts, other technical blogs, a T3 Code LLM response, Wikipedia, a TextEdit doc). For each, list the expected sentences and score `--extract` against them, so heuristics stop silently regressing.

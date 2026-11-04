@@ -1,13 +1,15 @@
 #!/bin/bash
-# Show what Unread would read from a local HTML page, in both engines.
+# Show what Unread would read from a local fixture page.
 #
 #   scripts/extract-fixture.sh fixtures/pages/inline.html [--limit N]
 #   scripts/extract-fixture.sh fixtures/corpus/<page>.html [--raw DIR]
+#   scripts/extract-fixture.sh fixtures/pages/notes.txt          (or .rtf)
 #
-# Opens the page in two throwaway windows, invisible and click-through: a WKWebView
-# host (what Safari exposes) and an Electron host (what Chrome, Dia and
-# Electron apps expose). Runs `Unread --extract --pid … --from-start` against
-# both at once, then closes them. Needs the terminal to have Accessibility
+# Opens the page in throwaway windows, invisible and click-through: an HTML page in a
+# WKWebView host (what Safari exposes) and an Electron host (what Chrome, Dia and
+# Electron apps expose), a .txt or .rtf file in an NSTextView host (what TextEdit and
+# other Cocoa apps expose). Runs `Unread --extract --pid … --from-start` against
+# each at once, then closes them. Needs the terminal to have Accessibility
 # permission. Uses the existing release build; scripts/test.sh rebuilds first.
 #
 # If <page>.expected.txt exists (one sentence per line), each engine's text is
@@ -27,13 +29,22 @@ CORPUS=0; [[ "$PAGE" == *fixtures/corpus/* ]] && CORPUS=1
 (( CORPUS )) && EXTRA+=(--limit 5000) # whole articles; a flag given above comes first and wins
 ELECTRON=fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
 
-[[ -x build/fixture-host-webkit && build/fixture-host-webkit -nt fixtures/hosts/webkit/main.swift ]] || {
-    mkdir -p build && swiftc -O fixtures/hosts/webkit/main.swift -o build/fixture-host-webkit; }
-[[ -x "$ELECTRON" ]] || {
-    echo "Electron host not installed: (cd fixtures/hosts/electron && npm install)" >&2; exit 1; }
+case "$PAGE" in
+    *.txt | *.rtf) ENGINES=(Native) ;;
+    *) ENGINES=(WebKit Chromium) ;;
+esac
+host() { # name: build the Swift host if it's missing or older than its source
+    [[ -x build/fixture-host-$1 && build/fixture-host-$1 -nt fixtures/hosts/$1/main.swift ]] || {
+        mkdir -p build && swiftc -O fixtures/hosts/$1/main.swift -o build/fixture-host-$1; }
+}
+if [[ ${ENGINES[0]} == Native ]]; then host native; else
+    host webkit
+    [[ -x "$ELECTRON" ]] || {
+        echo "Electron host not installed: (cd fixtures/hosts/electron && npm install)" >&2; exit 1; }
+fi
 [[ -x .build/release/Unread ]] || scripts/build.sh
 
-EXPECTED="${PAGE%.html}.expected.txt"
+EXPECTED="${PAGE%.*}.expected.txt"
 if [[ -f "$EXPECTED" ]]; then
     START=$(sed -n 's/^# start: //p' "$EXPECTED")
     [[ -n "$START" ]] && EXTRA+=(--from-text "$START")
@@ -42,11 +53,21 @@ if [[ -f "$EXPECTED" ]]; then
 fi
 
 OUT=$(mktemp -d)
-build/fixture-host-webkit --hidden "$PAGE" >"$OUT/webkit.log" 2>&1 & WK=$!
-# Shells inside Electron apps (VS Code, T3 Code…) export ELECTRON_RUN_AS_NODE, which would run Electron as plain Node.
-# The binary is launched directly (not through node_modules/.bin) so $! is the window's process.
-env -u ELECTRON_RUN_AS_NODE "$ELECTRON" fixtures/hosts/electron --hidden --profile "$OUT/profile" "$PAGE" >"$OUT/electron.log" 2>&1 & EL=$!
-trap '{ kill $WK $EL; wait $WK $EL; } 2>/dev/null; rm -rf "$OUT"' EXIT
+HOSTS=()
+# || true: a host killed here exits 143, and under set -e that would become the script's status.
+trap '{ kill ${HOSTS[@]+"${HOSTS[@]}"}; wait ${HOSTS[@]+"${HOSTS[@]}"}; } 2>/dev/null || true; rm -rf "$OUT"' EXIT
+launch() { # engine: start its host on the page, logging to $OUT/<engine>.log
+    # exec, so $! is the host's own process (the one to read), not a subshell.
+    case $1 in
+        WebKit) exec build/fixture-host-webkit --hidden "$PAGE" ;;
+        # Shells inside Electron apps (VS Code, T3 Code…) export ELECTRON_RUN_AS_NODE, which would run Electron as plain Node.
+        # The binary is launched directly (not through node_modules/.bin) so $! is the window's process.
+        Chromium) exec env -u ELECTRON_RUN_AS_NODE "$ELECTRON" fixtures/hosts/electron --hidden --profile "$OUT/profile" "$PAGE" ;;
+        Native) exec build/fixture-host-native --hidden "$PAGE" ;;
+    esac >"$OUT/$1.log" 2>&1 &
+    HOSTS+=($!)
+}
+for e in "${ENGINES[@]}"; do launch "$e"; done
 
 check() { # output file
     [[ -f "$EXPECTED" ]] || return 0
@@ -72,10 +93,12 @@ extract() { # name, pid, host log
 loaded() { # host log: wait up to 10 s for the host to say its page is up
     for _ in $(seq 1 200); do grep -q '^loaded$' "$1" && return; sleep 0.05; done
 }
-{ loaded "$OUT/webkit.log"; extract WebKit "$WK" "$OUT/webkit.log"; } >"$OUT/WebKit.report" & A=$!
-{ loaded "$OUT/electron.log"; extract Chromium "$EL" "$OUT/electron.log"; } >"$OUT/Chromium.report" & B=$!
+RUNS=()
+for i in "${!ENGINES[@]}"; do
+    e=${ENGINES[$i]}
+    { loaded "$OUT/$e.log"; extract "$e" "${HOSTS[$i]}" "$OUT/$e.log"; } >"$OUT/$e.report" & RUNS+=($!)
+done
 FAILED=0
-wait $A || FAILED=1
-wait $B || FAILED=1
-cat "$OUT/WebKit.report" "$OUT/Chromium.report"
+for r in "${RUNS[@]}"; do wait "$r" || FAILED=1; done
+for e in "${ENGINES[@]}"; do cat "$OUT/$e.report"; done
 exit $FAILED
