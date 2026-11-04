@@ -116,6 +116,16 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Reading scope (#10, 2026-11-03):** both engines expose page structure with the same roles/subroles: `AXLandmarkBanner` / `Navigation` / `Main` / `Complementary` / `ContentInfo` / `Region`, `AXDocumentArticle`, `AXSectionHeader`, `AXTimeGroup`. A `<pre>` is `AXPreformattedStyleGroup` in WebKit but a plain group around an `AXCodeStyleGroup` in Chromium. A figure is a small group holding an `AXImage` and the caption group. Visually hidden text: Chromium gives the text a ~1 px frame, WebKit gives its container 1 px (or, if the container isn't exposed, wraps the text one word per line into a ~40 px column). Chromium clips element frames to the nearest scrolling container (in T3 Code, the chat's own scroller), so text out of view is full width but 0–1 px tall; only narrow (~1 px wide) frames mean hidden. T3 Code's chat has no articles; messages sit in `AXLandmarkMain`, tool rows are `AXButton`s, speaker labels are headings (the assistant's is hidden), timestamps are bare text.
 
+**Text layer (#11, 2026-11-05),** from the real-page corpus. Most junk the structural rules missed has no role at all, so it's judged by its text, Readability-style, over the AX subtree Unread already walks (never by fetching the page):
+- *The unit is the block, not the sentence.* A sentence is judged by the block its last leaf is in: a paragraph, heading, list item or cell. WebKit drops plain `<div>`s, so on Cloudflare the byline links, the tag row and the paragraphs are all children of the `<article>`, and on simonwillison.net every block of the page, sidebar included, is a child of the web area. Where a block holds blocks *and* inline content, the unit is the run of inline siblings between two blocks. Each unit is measured once: words, link density (citation markers aren't links), sentence ends (".", "?", "!", ":", ";" before a space), whether it ends like a sentence, and its frame's x-range (Chromium clips frames to scroll containers vertically, never horizontally).
+- *Main text* starts at the first paragraph at or after the start: a block that reads as a sentence, isn't a heading, list item or cell, and isn't in the article's `<header>`, a `<figure>` or a form (Chromium shows a `<form>` as a plain group; the text field beside the text gives it away). Its x-range is the article's column.
+- *Before it* (the title is the start), only headings, list items and sentences are read: bylines, "12 MINUTE READ", "Published / Team / Topics", "Listen to article 7:53", Wikipedia's tagline and its notice box (sentences, but more than half links) are skipped. The article's `<header>` is skipped whole except its headings ("This post is also available in…" is a sentence).
+- *After it,* a block that isn't a sentence, or sits outside the column, ends the reading when no paragraph follows in scope (or a list that reads as prose: footnotes, with seven words or more per sentence and few links; a reference list is fragments like "Coast Press." and linked titles). That's the first tag row, "Discuss online", "Announcement contributors", "Keep reading", "More recent articles", the sidebar column of a page with no landmarks, "See also". If no text at all follows, the block is the article's last line and is read (a chat's last message, "All tests pass"). The lookahead passes over chrome, headings and tables whole and stops at the next paragraph, so mid-article it costs a few calls; only hits are memoized (a chat grows).
+- *Furniture:* a heading speaks its own leaves' text, without a symbol-only link ("#"), so WebKit's hidden "Copy link" tooltip (rendered, `aria-hidden`, in the range string but in no leaf) and Wikipedia's "edit" beside the heading go; a sentence of only a heading row's links is skipped. A short line ending in a separator and links ("How web bloat impacts users with slow connections | Patreon") drops the separator and links. The spoken text, the highlight and the scope verdict all use what's left.
+- *Link rows* (#52) are short, at least 60% links, and don't end like a sentence; a list item that is one link ("• The Claude Agent SDK;", "• AT-SPI") is content.
+- *Hidden link hints:* "(opens in a new window)" is clipped with `clip-path`, and its text frame is full size in both engines, so geometry can't tell. It's removed by its idiom, like citation markers ("[who?]" now too).
+- *Figures:* both engines give a `<figure>` the role description "figure" (localized by the browser; English and French say "figure"). Chromium drops a decorative `alt=""` image, so Anthropic's captions came without an image beside them; a caption in a figure that isn't a sentence is skipped.
+
 **Resulting algorithm (`WebDocument`), common subset only:**
 
 1. Hit-test the element under the point → descend to the text leaf under it → the start of its text range → the paragraph start.
@@ -124,7 +134,7 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 4. `NLTokenizer` finds the first sentence, starting from the first visible character. A block break always ends it.
 5. Step word by word (`AXNextWordEnd…`), never past the sentence's last visible character, then by characters for trailing punctuation. That range is the sentence.
 6. Bounds: the union of the sentence's word boxes (implausible ones re-measured or dropped), cached per sentence; the 10 Hz refresh re-measures one word and shifts the cached box.
-7. Scope: reading stays in the nearest article, else main area, around the start, and ends (with the chime) when a sentence falls outside it. Page chrome inside is skipped (landmarks, controls, code blocks, captions, hidden text, timestamps, short link rows), except a chrome container the user started in. Per-element answers are memoized per document (~30 ms per sentence on T3 Code).
+7. Scope: reading stays in the nearest article, else main area, around the start, and ends (with the chime) when a sentence falls outside it. Page chrome inside is skipped (landmarks, controls, code blocks, captions, hidden text, timestamps, short link rows), except a chrome container the user started in. Per-element answers are memoized per document (~30 ms per sentence on T3 Code). Then the text layer (#11, above): metadata before the article's first paragraph is skipped, the first non-sentence block after its last paragraph ends the reading, and headings and title lines lose their furniture.
 8. First visible paragraph when nothing is pointed at: `AXStartTextMarkerForBounds`, or else scan the viewport downward from 12% of its height (to skip toolbars).
 
 **Word highlight (#20, 2026-11-04):**
@@ -166,6 +176,16 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - Chromium used to cut sentences at inline `<b id>`/`<abbr id>`/citations and in link-dense prose, drop the space at some wraps ("static typingwhen"), and lose the start of the sentence after a table (#51).
 - Full list per page and sentence: PR #46.
 
+**After the text layer (#11, #52, 2026-11-05):**
+
+| Engine | Precision | Recall | Bounds |
+| --- | --- | --- | --- |
+| WebKit | 91.8% | 99.3% | 100.0% |
+| Chromium | 92.4% | 100.0% | 93.6% |
+
+- Four pages are now exact in both engines (Anthropic, Cloudflare, Willison, Wikipedia: every expected sentence, nothing else). What's left is data tables read cell by cell (Dan Luu, OpenAI; #26), and WebKit reading OpenAI's "• Claim:" items with the bullet Chromium leaves out.
+- Walk times (whole page, a fresh host per run, mean of two): every page is as fast or faster, mostly because reading now ends at the article's end. Wikipedia, Chromium: 5.8 s → 1.6 s; WebKit: 2.0 s → 1.3 s. Per sentence, Chromium is faster everywhere (the inline test in `block(containing:)` is memoized now); WebKit is within 1 ms except Wikipedia (16 → 20 ms: more lookahead per heading). The first sentence costs the same (8–16 ms); the second pays the one-time search for the first paragraph (+30 to +110 ms), while the first is playing. Long-lived hidden WebKit hosts get throttled (80 ms per sentence instead of 15), so time against fresh ones.
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -180,13 +200,13 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 3. **Synthesize while the key is held.** The aim target is already known during the hold, so synthesize its first sentence speculatively and throw it away if the pointer moves. Log key-up → first audio (p50/p95) to a local file.
 4. **Use it for at least 3 days** on real reading and keep a friction log. Re-rank everything below from that log.
 
-**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, per-line highlight, fixture hosts, #8 corpus and scorer)
+**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, #11 text layer, per-line highlight, fixture hosts, #8 corpus and scorer)
 5. **Chromium bounds.** Fix the missing bounds (9/12 in T3 Code) and the block-level ones: per-line ranges, a union of word ranges (`walk()` already visits every word), or `AXBoundsForRange` on the static text.
 6. **Inline code must not split sentences.** Revisit `sameBlock` for code, links and emphasis.
 7. **Fixture corpus + scorer.** Saved real pages (Anthropic and OpenAI engineering posts, other technical blogs, a T3 Code LLM response, Wikipedia, a TextEdit doc). For each, list the expected sentences and score `--extract` against them, so heuristics stop silently regressing.
 8. **Reading scope ("skip junk, know the end").** Layered:
    - *Structural:* scope reading to the nearest article / main landmark around the start point. Skip navigation, sidebars, footers, banners, buttons and link-dense lines. Every role used must be confirmed in both WebKit and Chromium before relying on it.
-   - *Heuristic:* text and link density (Readability-style) over the AX subtree, for poorly marked-up pages.
+   - *Heuristic (done, #11):* text and link density (Readability-style) over the AX subtree, for poorly marked-up pages.
    - *Model (optional, later):* Apple's on-device Foundation Models to classify a block as content or chrome. It runs during look-ahead, so it stays off the first-audio path. Needs Apple Intelligence and macOS 26+, so it can only be an enhancement.
    - The skipping matters more than the ending: junk *inside* the article (captions, "Share", related-article cards, handles, timestamps) is what hurts read-along.
 9. **Move AX work off the main thread.** The 30 Hz aim loop, the 10 Hz highlight refresh and `walk()` (two AX calls per word) stall the hotkey and overlay on slow Chromium pages.
