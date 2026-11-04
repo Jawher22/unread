@@ -9,11 +9,63 @@ struct PrimedSentence {
         /// The reading scope computed with it, so release doesn't pay for it again.
         let scope: ReadingScope?
         let extractMs: Double
+        /// The display words `speech` says: the whole sentence, or the
+        /// opening clause of a long one (#14).
+        let words: Range<Int>
         let speech: Speech?
         let synthMs: Double
     }
     /// Nil if there was nothing to read at the aimed paragraph.
     let prepared: Task<Prepared?, Never>
+}
+
+/// Where to cut a reading's first sentence so the voice starts on its
+/// opening clause while the rest is synthesized (#14). Kokoro doesn't
+/// stream, so time to first audio grows with the length of what it's given.
+enum OpeningClause {
+    /// Split only if the rest is at least this long: synthesis takes
+    /// ~40 ms + 1.45 ms per character (`--bench --split`), so this saves 90 ms or more.
+    static let minRestChars = 60
+    /// The opening clause is this many words, as close to `target` as the
+    /// sentence's clause breaks allow.
+    static let words = 4...14, target = 9
+
+    /// The display words to synthesize first: the opening clause of a long
+    /// sentence, or all of it.
+    static func of(_ sentence: Sentence) -> Range<Int> {
+        let all = sentence.words
+        let cuts = words.filter { k in
+            k < all.count && endsClause(all[k - 1]) && sentence.text(of: k..<all.count).count >= minRestChars
+        }
+        return cuts.min { abs($0 - target) < abs($1 - target) }.map { 0..<$0 } ?? all.indices
+    }
+
+    /// The opening clause is synthesized with this many of the following
+    /// words, which are cut off: said alone, a clause ends falling like a
+    /// sentence; with words after it, it ends as a comma does (`--bench --split`).
+    static let lookahead = 3
+    /// Quiet kept before the rest's voice, so its onset isn't clipped.
+    static let onset = 0.05
+
+    /// The text to synthesize for `words` of `sentence`: with the lookahead
+    /// when more of the sentence follows.
+    static func text(of sentence: Sentence, saying words: Range<Int>) -> String {
+        sentence.text(of: words.lowerBound..<min(words.upperBound + lookahead, sentence.words.count))
+    }
+
+    /// A word a clause ends with: a trailing comma, semicolon, colon or dash
+    /// (past closing quotes and brackets), or a dash on its own.
+    static func endsClause(_ word: Substring) -> Bool {
+        guard let last = word.last(where: { !"\"'”’»)]".contains($0) }) else { return false }
+        return ",;:—–".contains(last) || word == "-"
+    }
+}
+
+extension Sentence {
+    /// The text of some of its display words.
+    func text(of words: Range<Int>) -> String {
+        words == self.words.indices ? text : self.words[words].joined(separator: " ")
+    }
 }
 
 /// Reads one document from a starting point to the end. Keeps a few
@@ -34,29 +86,42 @@ final class ReadingSession {
 
     private var cursor: AnyObject?
     /// On the player, not yet finished. `first` is the one being spoken; at
-    /// most one more is scheduled, in the current one's closing pause.
+    /// most one more piece is scheduled, in the current one's closing pause.
     private var queued: [Playing] = []
     private struct Playing {
         var sentence: Sentence
         /// Where its speech starts on the player's timeline.
         let start: Int
-        /// When each display word starts, in samples from `start`.
-        let wordStarts: [Int?]
+        /// The last piece of it scheduled (it's re-measured, so this is its identity).
+        var lastSeq: Int
+        /// When each display word starts, in samples from `start`. A split
+        /// sentence's later words are filled in when the rest is scheduled.
+        var wordStarts: [Int?]
     }
     /// Synthesized, waiting for the player. Can still be thrown away.
     private var ready: [Ready] = []
-    /// Sentences to synthesize again after a speed or voice change, before
-    /// extracting new ones.
-    private var redo: [Pending] = []
+    /// Pieces to synthesize before extracting new sentences: the rest of a
+    /// split first sentence, and audio thrown away by a speed or voice change.
+    private var backlog: [Pending] = []
     /// Bumped by a speed or voice change; audio from an older generation is redone.
     private var generation = 0
-    /// Sentences are numbered as they're extracted and played strictly in order.
+    /// Pieces are numbered as they're extracted and played strictly in order.
     private var nextSeq = 0
     private var nextToPlay = 0
-    /// The player has consumed everything handed to it and can take the next sentence.
+    /// The player has consumed everything handed to it and can take the next piece.
     private var playerWantsMore = true
 
-    private struct Pending { let sentence: Sentence; let language: NLLanguage; let seq: Int }
+    /// A sentence, or part of it, synthesized as one piece: a long first
+    /// sentence is said as its opening clause and then the rest (#14).
+    private struct Pending {
+        let sentence: Sentence
+        let language: NLLanguage
+        let seq: Int
+        /// The display words this piece says.
+        let words: Range<Int>
+        var text: String { OpeningClause.text(of: sentence, saying: words) }
+        var endsSentence: Bool { words.upperBound == sentence.words.count }
+    }
     private struct Ready { let pending: Pending; let speech: Speech; let speed: Float }
     /// Extracting or synthesizing the next sentence (one at a time).
     private var producing = false
@@ -126,9 +191,9 @@ final class ReadingSession {
     /// A synthesis already running is redone when it finishes.
     func settingsChanged() {
         generation += 1
-        redo = (ready.map(\.pending) + redo).sorted { $0.seq < $1.seq }
+        backlog = (ready.map(\.pending) + backlog).sorted { $0.seq < $1.seq }
         ready = []
-        if debugSession { print("[session] settings changed; redoing \(redo.count) sentence(s)") }
+        if debugSession { print("[session] settings changed; \(backlog.count) piece(s) to synthesize") }
         fill()
     }
 
@@ -180,24 +245,23 @@ final class ReadingSession {
             self.lastExtracted = prepared.sentence
             let lang = self.language.language(for: prepared.sentence.text) // keep language stickiness in step
             self.timing?.extractMs = prepared.extractMs
-            self.timing?.chars = prepared.sentence.text.count
-            let pending = Pending(sentence: prepared.sentence, language: lang, seq: self.nextSeq)
-            self.nextSeq += 1
+            let pieces = self.pieces(of: prepared.sentence, language: lang, opening: prepared.words)
             if self.speed != self.primedSpeed {
                 // The speed changed during the hold: synthesize the first sentence again.
-                self.redo.append(pending)
+                self.backlog += pieces
                 self.fill()
                 return
             }
-            self.enqueue(pending, speech: prepared.speech, speed: self.speed, synthMs: prepared.synthMs)
+            self.backlog += pieces.dropFirst()
+            self.enqueue(pieces[0], speech: prepared.speech, speed: self.speed, synthMs: prepared.synthMs)
         }
     }
 
     private func fill() {
         guard !cancelled, !producing, ready.count + max(0, queued.count - 1) < lookahead else { return }
-        if !redo.isEmpty {
+        if !backlog.isEmpty {
             producing = true
-            synthesize(redo.removeFirst())
+            synthesize(backlog.removeFirst())
             return
         }
         guard let position = cursor else { if queued.isEmpty, ready.isEmpty { finish() }; return }
@@ -217,32 +281,49 @@ final class ReadingSession {
             guard let sentence = found else {
                 self.producing = false
                 self.cursor = nil
-                if self.queued.isEmpty, self.ready.isEmpty, self.redo.isEmpty { self.finish() }
+                if self.queued.isEmpty, self.ready.isEmpty, self.backlog.isEmpty { self.finish() }
                 return
             }
             self.lastExtracted = sentence
             self.cursor = sentence.next
             if self.timing != nil, self.timing?.extractMs == nil {
                 self.timing?.extractMs = LatencyLog.ms(since: extractStart)
-                self.timing?.chars = sentence.text.count
             }
-            let pending = Pending(sentence: sentence, language: self.language.language(for: sentence.text), seq: self.nextSeq)
-            self.nextSeq += 1
-            self.synthesize(pending)
+            // Only the first sentence is split: later ones are synthesized
+            // while earlier ones play.
+            let first = self.nextSeq == 0
+            let pieces = self.pieces(of: sentence, language: self.language.language(for: sentence.text),
+                                     opening: first ? OpeningClause.of(sentence) : sentence.words.indices)
+            self.backlog += pieces.dropFirst()
+            self.synthesize(pieces[0])
+        }
+    }
+
+    /// Number the pieces a sentence is said in: all of it, or `opening` and then the rest.
+    private func pieces(of sentence: Sentence, language: NLLanguage, opening: Range<Int>) -> [Pending] {
+        let all = sentence.words.indices
+        let parts = opening == all || opening.isEmpty ? [all] : [opening, opening.upperBound..<all.upperBound]
+        if nextSeq == 0, timing != nil {
+            timing?.chars = sentence.text.count
+            if parts.count > 1 { timing?.openingChars = OpeningClause.text(of: sentence, saying: opening).count }
+        }
+        return parts.map { words in
+            defer { nextSeq += 1 }
+            return Pending(sentence: sentence, language: language, seq: nextSeq, words: words)
         }
     }
 
     /// Synthesize at the current settings. If they change before it's done,
-    /// the sentence goes back into `redo` instead of playing.
+    /// the piece goes back into `backlog` instead of playing.
     private func synthesize(_ pending: Pending) {
         let generation = self.generation, speed = self.speed, voice = self.voice
         Task { [weak self] in
             let synthStart = Date()
-            let speech = try? await voice.synthesize(pending.sentence.text, language: pending.language, speed: speed)
+            let speech = try? await voice.synthesize(pending.text, language: pending.language, speed: speed)
             guard let self, !self.cancelled else { return }
             self.producing = false
             guard generation == self.generation else {
-                self.redo = (self.redo + [pending]).sorted { $0.seq < $1.seq }
+                self.backlog = (self.backlog + [pending]).sorted { $0.seq < $1.seq }
                 self.fill()
                 return
             }
@@ -260,27 +341,47 @@ final class ReadingSession {
         fill()
     }
 
-    /// Hand the next sentence to the player, if it's ready and the player has
+    /// Hand the next piece to the player, if it's ready and the player has
     /// consumed the previous one's speech (it's now in its closing pause).
     private func scheduleNext() {
         while !cancelled, playerWantsMore, let next = ready.first, next.pending.seq == nextToPlay {
             ready.removeFirst()
             nextToPlay += 1
-            let samples = next.speech.samples
-            guard !samples.isEmpty else { continue }
+            let piece = next.pending
+            let continues = piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1
+            // The rest of a split sentence follows the opening clause's pause without Kokoro's lead-in.
+            let speech = continues ? next.speech.trimmingLeadingQuiet(keep: Int(OpeningClause.onset * 24_000)) : next.speech
+            // Nothing to say: skip it, unless the sentence playing needs it to end.
+            guard !speech.samples.isEmpty || (continues && piece.endsSentence) else { continue }
             playerWantsMore = false
             spokeAnything = true
-            if debugSession {
-                print(String(format: "[session] playing #%d at %.2g× (%.1fs) %@", next.pending.seq, next.speed,
-                             Double(samples.count) / 24_000, next.pending.sentence.text.prefix(40).debugDescription))
+            let samples: [Float], ending: Player.Ending
+            if piece.endsSentence {
+                samples = speech.samples.isEmpty ? [0] : speech.samples
+                ending = .sentence(played: { [weak self] in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
+                })
+            } else {
+                // Cut off the lookahead. The clause's own pause gives the slack to schedule the rest gaplessly.
+                let (clause, pause) = speech.cut(beforeWord: piece.words.count)
+                samples = clause.samples
+                ending = .clause(pause: pause)
             }
-            let start = player.schedule(samples, consumed: { [weak self] in
+            if debugSession {
+                print(String(format: "[session] playing #%d at %.2g× (%.1fs) %@", piece.seq, next.speed,
+                             Double(samples.count) / 24_000, piece.text.prefix(40).debugDescription))
+            }
+            let start = player.schedule(samples, ending: ending, consumed: { [weak self] in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.speechConsumed() } }
-            }, played: { [weak self] in
-                DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
             })
-            queued.append(Playing(sentence: next.pending.sentence, start: start, wordStarts: next.speech.wordStarts))
-            if queued.count == 1 { showCurrent(scroll: true) }
+            // The rest of a split sentence joins the sentence already playing.
+            if !continues {
+                queued.append(Playing(sentence: piece.sentence, start: start, lastSeq: piece.seq, wordStarts: piece.sentence.words.map { _ in nil }))
+                if queued.count == 1 { showCurrent(scroll: true) }
+            }
+            let last = queued.count - 1, shift = start - queued[last].start
+            queued[last].lastSeq = piece.seq
+            for (word, s) in zip(piece.words, speech.wordStarts) { queued[last].wordStarts[word] = s.map { $0 + shift } }
             if var t = timing {
                 // Measured after scheduling: that's when the buffer is queued on a running engine.
                 t.firstAudioMs = LatencyLog.ms(since: startedAt)
@@ -310,7 +411,7 @@ final class ReadingSession {
         if let last = lastHead, let next = queued.first { entry = (next.sentence.range, last.box) }
         if queued.isEmpty {
             overlay.hide()
-            if cursor == nil, !producing, ready.isEmpty, redo.isEmpty { finish() }
+            if cursor == nil, !producing, ready.isEmpty, backlog.isEmpty { finish() }
         } else {
             showCurrent(scroll: true)
         }
