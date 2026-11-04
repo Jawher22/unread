@@ -164,7 +164,7 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - WebKit's recall is low because its walk ends at the first `<br>` that follows a sentence end: after 3 sentences on Anthropic, 35 on OpenAI, 6 on Wikipedia. No synthetic page has a `<br>`.
 - Junk that gets read (precision) is mostly outside the structural rules: figure captions not in a `<figure>`, metadata labels ("Published", "Team"), permalink "#" and "[edit]" links, tag rows, newsletter boxes and "more articles" lists after the article's last paragraph, data tables, Wikipedia's reference list.
 - Chromium splits sentences at inline links and wrapped lines on Wikipedia and Simon Willison's blog, and drops the space at some inline boundaries ("static typingwhen").
-- Full list per page and sentence: the PR that closes #8.
+- Full list per page and sentence: PR #46.
 
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
