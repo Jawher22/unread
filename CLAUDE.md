@@ -15,7 +15,7 @@ macOS menu-bar app that reads on-screen text aloud with an on-device natural voi
 ## Build, run, test
 
 ```bash
-swift build -c release                # Swift 6.2 toolchain; macOS 15+, Apple Silicon
+scripts/build.sh                      # release build; Swift 6.2 toolchain; macOS 15+, Apple Silicon. Not a bare `swift build` (see below)
 ./.build/release/Unread               # menu-bar app; needs Accessibility permission
 ./.build/release/Unread --bench       # silent: model load + synthesis timings
 ./.build/release/Unread --extract     # print sentences + bounds Unread would read from the front window
@@ -35,7 +35,8 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: 
 - Never copy `.build` between folders: Swift's precompiled headers bake in absolute paths and the build fails.
 - The first launch of a new binary spends ~13 s preparing the CoreML models. After that, load is ~0.8 s.
 - Models (~360 MB) are cached in `~/.cache/fluidaudio`.
-- `scripts/extract-fixture.sh fixtures/pages/<page>.html` checks extraction in both engines (WebKit and Electron windows that never take focus) against `<page>.expected.txt`. Run it before and after any change to `Document.swift`. See `fixtures/README.md`.
+- **Build with `scripts/build.sh`, never a bare `swift build -c release`.** SwiftPM 6.2 emits FluidAudio's trait defines in random Set order, so a bare build can recompile FluidAudio (~60 s) with nothing changed, and costs the next scripted build the same. The script sets `SWIFT_DETERMINISTIC_HASHING=1`.
+- `scripts/test.sh` builds, then checks every fixture page in both engines (WebKit and Electron windows that are invisible and click-through) against its `<page>.expected.txt`, all in parallel: ~20 s, or ~5 s with `--quick` (skips `rerender.html`, which pauses 1.6 s per sentence). Run it before and after any change to `Document.swift`. One page with full output: `scripts/extract-fixture.sh fixtures/pages/<page>.html`. See `fixtures/README.md`.
 - `--extract` and `--bench` are the safe ways to verify changes without hijacking the user's keyboard or playing audio. Ask before launching the full app or playing sound on the user's machine.
 
 ## Code map
@@ -65,7 +66,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: 
 - **Block breaks come from roles, not hop counts:** static text, links, list markers and `…StyleGroup` subroles (code, strong, emphasis) are inline; anything else is a block. Both engines expose the same structure.
 - **Reading scope (#10):** reading stays in the nearest `AXDocumentArticle`, else `AXLandmarkMain`, and skips chrome inside it: nav/banner/footer/complementary landmarks, controls (buttons…), code blocks (WebKit `AXPreformattedStyleGroup`; Chromium a group whose only child is `AXCodeStyleGroup`), figure captions, visually hidden text, timestamps, short link rows. A chrome container the user started in is read. Judge a sentence by the leaf one character *inside* its end (the end marker sits on a boundary), climbing past Chromium's per-line `AXStaticText` boxes.
 - **Chromium clips element frames to the nearest scrolling container** (T3 Code's chat, not just the viewport): text out of view comes back full width but 0–1 px tall. Never treat "flat" as hidden; visually hidden text is ~1 px *wide*. Text-marker bounds are not clipped. `fixtures/pages/scroller.html` guards this.
-- **Pages rebuild their elements under you** (T3 Code re-renders messages while an agent works). Stale markers read as `""`. `WebDocument.relocate` finds the sentence's text in the new tree and rebuilds fresh leaf-anchored markers; `sentence(after:scope:)` uses it to keep walking. `fixtures/pages/rerender.html` (run with `--slow`) guards this.
+- **Pages rebuild their elements under you** (T3 Code re-renders messages while an agent works). Stale markers read as `""`. `WebDocument.relocate` finds the sentence's text in the new tree and rebuilds fresh leaf-anchored markers; `sentence(after:scope:)` uses it to keep walking. `fixtures/pages/rerender.html` guards this.
 - **All Accessibility work runs on `AXWorker` (#12), never the main thread.** Documents are confined to that serial queue: create and call them inside `AXWorker.shared.run { }`; the main actor only touches results (sentences, rects). Dev modes in `main.swift` may call documents directly because they're single-threaded. `--simulate` prints a main-thread stall meter.
 - **The player gets one sentence at a time (#15):** a buffer on `AVAudioPlayerNode` can't be taken back. The next sentence is scheduled when the current one's speech is *consumed* (its 120 ms closing pause gives the slack for gapless playback); synthesized audio waits in the session, numbered, so a speed or voice change can redo it. `--simulate … --speed-change-at T` exercises this.
 - **WebKit exposes embedded objects as U+FFFC ("￼")** (icon buttons, images) and its character step **stalls at them**, one object at a time. Treat "￼" as blank when tokenizing and measuring, step past objects with `step(past:)` (falls back to the next text leaf in document order), and never let `walk` jump to the window's end. `fixtures/pages/icons.html` guards this (modelled on raphaelsalaja.com, where Safari skipped the first three paragraphs).

@@ -1,4 +1,5 @@
 # start: What's left
+# flags: --slow
 What's left:
 • The first item.
 I would do this next.
