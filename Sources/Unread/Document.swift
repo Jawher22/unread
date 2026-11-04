@@ -36,12 +36,17 @@ protocol ReadableDocument: AnyObject {
     func lines(of sentence: Sentence) -> [CGRect]
     /// Why the last `lines(of:)` came back the way it did (for the log).
     func linesDiagnosis(of sentence: Sentence) -> String
+    /// A box for each of the sentence's display words (`Sentence.words`), nil
+    /// where a word couldn't be measured. Empty if the app gives no word
+    /// positions. Measured right after `lines(of:)`, in the same layout.
+    func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
     func scrollIntoView(_ sentence: Sentence)
 }
 
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
+    func words(of sentence: Sentence) -> [CGRect?] { [] }
     func scope(from position: AnyObject) -> ReadingScope? { nil }
     func relocate(_ sentence: Sentence) -> Sentence? { nil }
     func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
@@ -631,8 +636,19 @@ final class WebDocument: ReadableDocument {
 
     /// Per-sentence word layout, so the 10 Hz highlight refresh costs one AX
     /// call instead of one per word: re-measure the anchor word, shift the lines.
-    private struct Layout { let range: AnyObject; let anchor: AnyObject; let anchorRect: CGRect; let lines: [CGRect] }
+    private struct Layout { let range: AnyObject; let anchor: AnyObject; let anchorRect: CGRect; let lines: [CGRect]; let words: [CGRect?] }
     private var layouts: [Layout] = []
+    /// How far the cached layout of the sentence measured last has moved (#20).
+    private var lastShift: (range: AnyObject, dx: CGFloat, dy: CGFloat)?
+
+    /// The words' boxes from the layout `lines(of:)` measured, moved as far
+    /// as its lines have moved since.
+    func words(of sentence: Sentence) -> [CGRect?] {
+        if layouts.first(where: { $0.range === sentence.range }) == nil { _ = lines(of: sentence) }
+        guard let layout = layouts.first(where: { $0.range === sentence.range }) else { return [] }
+        let shift = lastShift.flatMap { $0.range === sentence.range ? ($0.dx, $0.dy) : nil } ?? (0, 0)
+        return layout.words.map { $0?.offsetBy(dx: shift.0, dy: shift.1) }
+    }
 
     /// The sentence's line boxes, built from its words' boxes.
     ///
@@ -647,6 +663,7 @@ final class WebDocument: ReadableDocument {
         if let cached = layouts.first(where: { $0.range === sentence.range }) {
             if let now = rect(cached.anchor), abs(now.width - cached.anchorRect.width) < 1, abs(now.height - cached.anchorRect.height) < 1 {
                 let dx = now.minX - cached.anchorRect.minX, dy = now.minY - cached.anchorRect.minY
+                lastShift = (sentence.range, dx, dy)
                 return plausible(cached.lines.map { $0.offsetBy(dx: dx, dy: dy) })
             }
             layouts.removeAll { $0.range === sentence.range } // reflowed: measure again
@@ -684,7 +701,9 @@ final class WebDocument: ReadableDocument {
         // A caret-thin box (< 3 px) is a position on a line boundary, not a
         // glyph: WebKit can place a word's start at the end of the line above.
         let lines = Self.groupIntoLines(good.map(\.rect).filter { $0.width >= 3 })
-        layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: first.rect, lines: lines))
+        let wordRects = WordBoxes.assign(display: sentence.words, pieces: good.filter { $0.rect.width >= 3 }.map { (string($0.range), $0.rect) })
+        layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: first.rect, lines: lines, words: wordRects))
+        lastShift = (sentence.range, 0, 0)
         if layouts.count > 6 { layouts.removeFirst() }
         if debugWalk { print("    lines: \(good.count)/\(words.count) words kept, line \(Int(lineHeight)) → \(lines)") }
         return plausible(lines)
@@ -890,6 +909,25 @@ final class NativeDocument: ReadableDocument {
             let part = NSIntersectionRange(lr, r)
             return part.length > 0 ? bounds(part) : nil
         }
+    }
+
+    /// One box per whitespace-separated word of the sentence's on-screen text.
+    func words(of sentence: Sentence) -> [CGRect?] {
+        let r = (sentence.range as! NSValue).rangeValue
+        guard r.length > 0, NSMaxRange(r) <= text.length else { return [] }
+        let raw = text.substring(with: r) as NSString
+        var pieces: [(text: String, rect: CGRect)] = []
+        let separators = CharacterSet.whitespacesAndNewlines
+        var i = 0
+        while i < raw.length, pieces.count < 300 {
+            while i < raw.length, let u = Unicode.Scalar(raw.character(at: i)), separators.contains(u) { i += 1 }
+            let start = i
+            while i < raw.length, !(Unicode.Scalar(raw.character(at: i)).map(separators.contains) ?? false) { i += 1 }
+            guard i > start else { continue }
+            let word = NSRange(location: r.location + start, length: i - start)
+            if let b = bounds(word) { pieces.append((text.substring(with: word), b)) }
+        }
+        return WordBoxes.assign(display: sentence.words, pieces: pieces)
     }
 
     private func line(at index: Int) -> Int? {
