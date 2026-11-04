@@ -512,10 +512,16 @@ final class WebDocument: ReadableDocument {
     /// When a step crosses an embedded object ("￼"), it may stall at the next
     /// one (WebKit moves past one icon button at a time and then stops), so
     /// jump to the next text leaf in document order instead.
+    ///
+    /// A "next" marker can lie behind `m`: from the empty line between two
+    /// `<br>`s, WebKit's character step returns the start of the paragraph
+    /// before them, and the walk went round that paragraph until it gave up.
+    /// The range is unordered, so check which end it starts at.
     private func step(past m: AnyObject) -> AnyObject? {
         var stepped: AnyObject?
         for name in ["AXNextTextMarkerForTextMarker", "AXNextWordEndTextMarkerForTextMarker", "AXNextParagraphEndTextMarkerForTextMarker"] {
-            if let n = p(name, m), !CFEqual(n, m), let r = range(m, n), (string(r) as NSString).length > 0 { stepped = n; break }
+            if let n = p(name, m), !CFEqual(n, m), let r = range(m, n), (string(r) as NSString).length > 0,
+               !CFEqual(start(of: r), n) { stepped = n; break }
         }
         // Only an embedded object stalls the step; plain whitespace and line
         // breaks are ordinary separators (and block-break detection relies on them).
