@@ -269,25 +269,44 @@ final class WebDocument: ReadableDocument {
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = chunk
             let from = String.Index(utf16Offset: lead, in: chunk)
-            let first = tokenizer.tokens(for: from..<chunk.endIndex).first.map { NSRange($0, in: chunk) }
-                ?? NSRange(location: lead, length: chunkNS.length - lead)
+            let tokens = tokenizer.tokens(for: from..<chunk.endIndex).map { NSRange($0, in: chunk) }
             // Chromium joins separate blocks with no separator ("TitleBody…"),
             // so a block boundary always ends the sentence.
-            let length = min(NSMaxRange(first), blockBreaks.first { $0 > first.location } ?? .max)
-            // The on-screen range must end on the sentence's last visible
-            // character: not short of its final "." and never into the next word.
-            var visibleEnd = length
-            while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
-                  Self.blank.contains(c) { visibleEnd -= 1 }
-            // End on the last visible character, even when the sentence runs to
-            // the chunk's end: trailing "￼" (an icon button) would otherwise
-            // make the sentence count as part of that button.
-            let sentenceEnd = visibleEnd >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+            let blockEnd = blockBreaks.first { $0 > (tokens.first?.location ?? lead) } ?? .max
+            // Where a sentence made of tokens 0…last ends: its length, its last
+            // visible character, and the marker there.
+            func ending(through last: Int) -> (length: Int, visibleEnd: Int, marker: AnyObject) {
+                let length = min(tokens.isEmpty ? chunkNS.length : NSMaxRange(tokens[last]), blockEnd)
+                // The on-screen range must end on the sentence's last visible
+                // character: not short of its final "." and never into the next word.
+                var visibleEnd = length
+                while visibleEnd > lead, let c = UnicodeScalar(chunkNS.character(at: visibleEnd - 1)),
+                      Self.blank.contains(c) { visibleEnd -= 1 }
+                // End on the last visible character, even when the sentence runs to
+                // the chunk's end: trailing "￼" (an icon button) would otherwise
+                // make the sentence count as part of that button.
+                let marker = visibleEnd >= chunkNS.length ? chunkEnd : walk(from: cursor, utf16Length: visibleEnd, limit: chunkEnd)
+                return (length, visibleEnd, marker)
+            }
+            var (length, visibleEnd, sentenceEnd) = ending(through: 0)
+            // WebKit puts a numbered item's marker in the text ("1. Carry…") and
+            // the tokenizer returns "1." as a sentence. One character step covers
+            // the marker and the next letter, so the walk overshot its end and the
+            // item lost its first letter. A fragment with nothing to say whose end
+            // can't be reached joins the next sentence of its block, unspoken.
+            var spoken = 0
+            while spoken + 1 < tokens.count, tokens[spoken + 1].location < blockEnd,
+                  SpeechText.clean(chunkNS.substring(with: NSRange(location: tokens[spoken].location, length: length - tokens[spoken].location))) == nil,
+                  (range(cursor, sentenceEnd).map { (string($0) as NSString).length } ?? 0) > visibleEnd {
+                spoken += 1
+                (length, visibleEnd, sentenceEnd) = ending(through: spoken)
+            }
             if debugWalk {
                 let got = range(cursor, sentenceEnd).map(string) ?? "?"
-                print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(first) len=\(length) range→\(got.debugDescription)")
+                print("    chunk=\(chunk.prefix(120).debugDescription) breaks=\(blockBreaks) first=\(tokens.first.map { "\($0)" } ?? "-") joined=\(spoken) len=\(length) range→\(got.debugDescription)")
             }
-            if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(chunkNS.substring(to: length)) {
+            let speechStart = spoken > 0 ? tokens[spoken].location : 0
+            if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(chunkNS.substring(with: NSRange(location: speechStart, length: length - speechStart))) {
                 guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd) }
                 switch verdict(text: text, endingAt: sentenceEnd, in: scope) {
                 case .read: return Sentence(text: text, range: r, next: sentenceEnd)
