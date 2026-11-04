@@ -154,6 +154,18 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Word highlight (#20, 2026-11-04):** on the fixture pages every spoken word gets a box in both engines (98% of display words; the rest are list bullets). In `--simulate` the mark moves 0–20 ms after each word's due time (one 50 Hz tick). Synthesis time is unchanged (`--bench`: 31–35× real time).
 
+**Real-page corpus (#8, 2026-11-04),** `scripts/score-corpus.sh` on six saved pages (Anthropic, OpenAI, Cloudflare, Simon Willison, Dan Luu, Wikipedia), 706 expected sentences, reading from the title:
+
+| Engine | Precision | Recall | Bounds |
+| --- | --- | --- | --- |
+| WebKit | 77.9% | 54.4% | 99.8% |
+| Chromium | 70.5% | 93.9% | 86.9% |
+
+- WebKit's recall is low because its walk ends at the first `<br>` that follows a sentence end: after 3 sentences on Anthropic, 35 on OpenAI, 6 on Wikipedia. No synthetic page has a `<br>`.
+- Junk that gets read (precision) is mostly outside the structural rules: figure captions not in a `<figure>`, metadata labels ("Published", "Team"), permalink "#" and "[edit]" links, tag rows, newsletter boxes and "more articles" lists after the article's last paragraph, data tables, Wikipedia's reference list.
+- Chromium splits sentences at inline links and wrapped lines on Wikipedia and Simon Willison's blog, and drops the space at some inline boundaries ("static typingwhen").
+- Full list per page and sentence: PR #46.
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -168,7 +180,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 3. **Synthesize while the key is held.** The aim target is already known during the hold, so synthesize its first sentence speculatively and throw it away if the pointer moves. Log key-up → first audio (p50/p95) to a local file.
 4. **Use it for at least 3 days** on real reading and keep a friction log. Re-rank everything below from that log.
 
-**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, per-line highlight, fixture hosts)
+**Phase 1: read-along quality** (done so far: #7, #9, #10 structural layer, per-line highlight, fixture hosts, #8 corpus and scorer)
 5. **Chromium bounds.** Fix the missing bounds (9/12 in T3 Code) and the block-level ones: per-line ranges, a union of word ranges (`walk()` already visits every word), or `AXBoundsForRange` on the static text.
 6. **Inline code must not split sentences.** Revisit `sameBlock` for code, links and emphasis.
 7. **Fixture corpus + scorer.** Saved real pages (Anthropic and OpenAI engineering posts, other technical blogs, a T3 Code LLM response, Wikipedia, a TextEdit doc). For each, list the expected sentences and score `--extract` against them, so heuristics stop silently regressing.
