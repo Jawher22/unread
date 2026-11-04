@@ -585,11 +585,31 @@ final class WebDocument: ReadableDocument {
         // "See also" and the references. Unless nothing follows: then it's the
         // article's last line (a chat's "All tests pass"), and reading ends after it.
         if !t.reads || !t.within(main.column) {
-            let next = paragraph(after: unit, in: scope, column: main.column)
+            let next = paragraph(after: section(of: unit, kind: t.kind), in: scope, column: main.column)
             if next.paragraph == nil { return next.moreText ? .end : .read }
             if t.inFigure, !t.reads { return .skip("caption") }
         }
         return .read
+    }
+
+    /// Where the article's ending is judged from: a list item's list, a
+    /// heading's list right after it ("Key takeaways" and its bullets), or the
+    /// unit itself. Judged from the item, the list's own remaining bullets
+    /// looked like text after the article and ended the reading at its last
+    /// section.
+    private func section(of unit: TextUnit, kind: UnitText.Kind) -> TextUnit {
+        let chain = ancestry(of: unit.block)
+        switch kind {
+        case .listItem:
+            if let list = chain.dropFirst().first, roles(list).role == kAXListRole { return TextUnit(block: list, members: [list], first: -1) }
+        case .heading:
+            if unit.first < 0, let parent = chain.dropFirst().first, case let kids = children(of: parent),
+               let i = kids.firstIndex(where: { CFEqual($0, unit.block) }), i + 1 < kids.count, roles(kids[i + 1]).role == kAXListRole {
+                return TextUnit(block: kids[i + 1], members: [kids[i + 1]], first: -1)
+            }
+        default: break
+        }
+        return unit
     }
 
     /// `e`, its parent, … up to and including the web area (bounded, memoized).
