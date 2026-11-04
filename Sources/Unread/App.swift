@@ -255,9 +255,9 @@ final class AppController: NSObject {
             guard let (sentence, scope, extractMs) = extracted else { spec?.done = true; return nil }
             let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
             let t = Date()
-            let samples = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
+            let speech = try? await voice.synthesize(sentence.text, language: lang, speed: speed)
             spec?.done = true
-            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, samples: samples, synthMs: LatencyLog.ms(since: t))
+            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, speech: speech, synthMs: LatencyLog.ms(since: t))
         }
         spec.primed = PrimedSentence(prepared: task)
     }
@@ -404,6 +404,9 @@ final class AppController: NSObject {
         }
         voiceItem.submenu = voiceMenu
         menu.addItem(voiceItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
         if isBundled {
@@ -435,6 +438,8 @@ final class AppController: NSObject {
             session?.settingsChanged() // re-voice what's waiting behind the current sentence
         }
     }
+
+    @objc private func openSettings() { SettingsWindow.shared.show() }
 
     @objc private func quit() { NSApp.terminate(nil) }
 }

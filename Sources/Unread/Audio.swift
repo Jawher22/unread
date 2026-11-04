@@ -25,11 +25,22 @@ actor Voice {
 
     func setEnglishVoice(_ v: String) { englishVoice = v }
 
-    func synthesize(_ text: String, language: NLLanguage, speed: Float) async throws -> [Float] {
-        if language == .french, let french {
-            return try await french.synthesizeDetailed(text: text, voice: "ff_siwis", speed: speed).samples
-        }
-        return try await english.synthesizeDetailed(text: text, voice: englishVoice, speed: speed).samples
+    /// Audio for `text`, with when each of its words (split at spaces) starts.
+    func synthesize(_ text: String, language: NLLanguage, speed: Float) async throws -> Speech {
+        let r = language == .french && french != nil
+            ? try await french!.synthesizeDetailed(text: text, voice: "ff_siwis", speed: speed)
+            : try await english.synthesizeDetailed(text: text, voice: englishVoice, speed: speed)
+        let spoken = WordTiming.spokenWords(ids: r.inputIds, durations: r.predictedDurations, sampleCount: r.samples.count)
+        let display = text.split(separator: " ")
+        return Speech(samples: r.samples, wordStarts: WordTiming.starts(display: display, spoken: spoken, spokenText: r.normalizedText))
+    }
+
+    /// The voice's own view of a sentence, for `--words`.
+    func spokenWords(_ text: String, language: NLLanguage) async throws -> (normalized: String?, phonemes: String, words: [WordTiming.Spoken]) {
+        let r = language == .french && french != nil
+            ? try await french!.synthesizeDetailed(text: text, voice: "ff_siwis")
+            : try await english.synthesizeDetailed(text: text, voice: englishVoice)
+        return (r.normalizedText, r.phonemes, WordTiming.spokenWords(ids: r.inputIds, durations: r.predictedDurations, sampleCount: r.samples.count))
     }
 }
 
@@ -97,12 +108,46 @@ final class Player {
     /// The session schedules one sentence at a time on purpose: a buffer
     /// on the node can't be taken back, so audio waiting here couldn't follow a
     /// speed or voice change (#15).
-    func schedule(_ samples: [Float], consumed: @escaping @Sendable () -> Void, played: @escaping @Sendable () -> Void) {
+    ///
+    /// Returns where the speech starts on the player's timeline (see `position`).
+    @discardableResult
+    func schedule(_ samples: [Float], consumed: @escaping @Sendable () -> Void, played: @escaping @Sendable () -> Void) -> Int {
         warm()
-        guard let speech = buffer(samples), let pause = buffer(gap) else { return }
+        guard let speech = buffer(samples), let pause = buffer(gap) else { return queueEnd }
+        let start = claim(samples.count + gap.count)
         node.scheduleBuffer(speech, completionCallbackType: .dataConsumed) { _ in consumed() }
         node.scheduleBuffer(pause, completionCallbackType: .dataPlayedBack) { _ in played() }
         if !isPaused, !node.isPlaying { node.play() }
+        return start
+    }
+
+    /// Where the audio queued on the node ends, in samples on its timeline.
+    private var queueEnd = 0
+    /// The node reports no time while paused; where it stood when paused.
+    private var pausedAt: Int?
+
+    /// Buffers play back to back; one scheduled after the node ran dry starts
+    /// now. Reserve `count` samples from whichever is later.
+    @discardableResult
+    private func claim(_ count: Int) -> Int {
+        let start = max(queueEnd, renderedPosition ?? pausedAt ?? 0)
+        queueEnd = start + count
+        return start
+    }
+
+    /// The sample on the player's timeline being rendered now (24 kHz). The
+    /// timeline keeps running when the node runs out of audio, stops while
+    /// paused (and reports nil), and restarts at 0 after `stop`.
+    private var renderedPosition: Int? {
+        guard let t = node.lastRenderTime, let p = node.playerTime(forNodeTime: t) else { return nil }
+        return Int((Double(p.sampleTime) * 24_000 / p.sampleRate).rounded())
+    }
+
+    /// The sample being heard now, on the timeline `schedule` returns starts
+    /// on: what's rendered minus the output's latency (Bluetooth adds ~150 ms).
+    /// Nil while paused or stopped.
+    var position: Int? {
+        renderedPosition.map { $0 - Int(outputLatency * 24_000) }
     }
 
     /// The end-of-reading chime, through the same engine as speech so it
@@ -110,6 +155,7 @@ final class Player {
     func chime() {
         guard let chimeBuffer else { return }
         warm()
+        claim(Int(chimeBuffer.frameLength))
         node.scheduleBuffer(chimeBuffer)
         node.play()
         releaseDeviceLater()
@@ -125,12 +171,14 @@ final class Player {
     /// Output device latency, as the engine reports it (Bluetooth adds a lot).
     var outputLatency: TimeInterval { engine.outputNode.presentationLatency }
 
-    func pause() { isPaused = true; node.pause() }
-    func resume() { isPaused = false; warm(); node.play() }
+    func pause() { pausedAt = renderedPosition; isPaused = true; node.pause() }
+    func resume() { isPaused = false; warm(); node.play(); pausedAt = nil }
 
     func stop() {
         isPaused = false
-        node.stop()
+        node.stop() // also resets the timeline to 0
+        queueEnd = 0
+        pausedAt = nil
         releaseDeviceLater()
     }
 

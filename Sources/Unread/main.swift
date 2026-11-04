@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 setvbuf(stdout, nil, _IOLBF, 0)
 let args = CommandLine.arguments
@@ -42,7 +43,7 @@ if args.contains("--bench") {
             let lang = tracker.language(for: s)
             for run in 0..<3 {
                 let t0 = Date()
-                let samples = (try? await voice.synthesize(s, language: lang, speed: 1)) ?? []
+                let samples = (try? await voice.synthesize(s, language: lang, speed: 1))?.samples ?? []
                 let ms = Date().timeIntervalSince(t0) * 1000
                 let audio = Double(samples.count) / 24_000
                 if run == 2 { print(String(format: "[%@] %5.0f ms for %.2fs audio (%.0fx realtime)  %@", lang.rawValue, ms, audio, audio * 1000 / ms, String(s.prefix(40)))) }
@@ -52,6 +53,157 @@ if args.contains("--bench") {
     }
     done.wait()
     exit(0)
+}
+
+if let i = args.firstIndex(of: "--words") {
+    // Silent: when each word of a sentence starts (#20), as the voice times it.
+    // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.
+    let given = args[(i + 1)...].filter { !$0.hasPrefix("--") }
+    let sentences = given.isEmpty ? [
+        "The quick brown fox jumps over the lazy dog.",
+        "In 1859, Charles Darwin published On the Origin of Species — a book that changed how we understand life.",
+        "It costs $45.99 (about 40 €) per month, or 10% less if you pay yearly.",
+        "Use `fetch()` with well-known APIs, e.g. the U.S. Census API at 3:30 PM.",
+        "Le petit prince est un livre que tout le monde devrait lire au moins une fois dans sa vie.",
+    ] : Array(given)
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        let voice = Voice()
+        do { try await voice.prepareEnglish(); try await voice.prepareFrench() } catch { print("load failed: \(error)") }
+        let tracker = LanguageTracker()
+        for s in sentences {
+            let lang = tracker.language(for: s)
+            guard let raw = try? await voice.spokenWords(s, language: lang),
+                  let speech = try? await voice.synthesize(s, language: lang, speed: 1) else { print("synthesis failed"); continue }
+            let display = s.split(separator: " ")
+            let said = (raw.normalized ?? "").split(whereSeparator: \.isWhitespace).filter { !WordTiming.key($0).isEmpty }
+            let mode = said.count == raw.words.count ? "one to one" : "\(said.count) normalized words for \(raw.words.count) spoken"
+            print("\n[\(lang.rawValue)] \(s)")
+            print("  normalized: \(raw.normalized ?? "nil")")
+            print("  phonemes:   \(raw.phonemes)")
+            print("  \(display.count) display words, \(raw.words.count) spoken words, \(mode)")
+            // Phoneme groups as the voice spaced them, against their times (punctuation-only groups are dropped there too).
+            let groups = raw.phonemes.split(separator: " ").filter { $0.contains { !$0.isPunctuation } }
+            print("  spoken: " + zip(raw.words, groups.count == raw.words.count ? groups.map(String.init) : raw.words.map { _ in "?" })
+                .map { String(format: "%.2f %@", Double($0.0.samples.lowerBound) / 24_000, $0.1) }.joined(separator: " · "))
+            for (w, start) in zip(display, speech.wordStarts) {
+                print("    " + (start.map { String(format: "%6.2fs", Double($0) / 24_000) } ?? "     – ") + "  \(w)")
+            }
+            print(String(format: "    %6.2fs  (end)", Double(speech.samples.count) / 24_000))
+        }
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
+if let i = args.firstIndex(of: "--settings-snapshot"), args.indices.contains(i + 1) {
+    // Render the Settings window to a PNG, off-screen, after `seconds` of the
+    // demo playing: `--settings-snapshot out.png [seconds] [--dark]`.
+    // For checking the window's layout without screen recording.
+    let out = args[i + 1]
+    let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 1.5 : 1.5
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated {
+        HighlightDemoView.fixedTime = seconds
+        let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+        w.styleMask = [.titled, .closable]
+        w.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        w.orderFront(nil)
+        if args.contains("--dark") { w.appearance = NSAppearance(named: .darkAqua) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            let view = w.contentView!
+            let size = view.bounds.size
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+            print("wrote \(out) (\(Int(size.width))x\(Int(size.height)))")
+            exit(0)
+        }
+    }
+    app.run()
+}
+
+if let i = args.firstIndex(of: "--highlight-frames"), args.indices.contains(i + 1) {
+    // Draw the Settings demo frame by frame, off-screen, to review motion:
+    // `--highlight-frames out.png|out.gif [from] [to] [--style mark=tail,motion=continuous,lead=50]
+    //  [--dark] [--speed 1.3] [--fps 60] [--zoom x,y,w,h]`. A .png is a contact sheet; a .gif plays.
+    let out = args[i + 1]
+    func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
+    let numbers = args[(i + 2)...].prefix { Double($0) != nil }.compactMap(Double.init)
+    let from = numbers.first ?? 0, to = numbers.dropFirst().first ?? from + 1
+    let fps = value("--fps").flatMap(Double.init) ?? (out.hasSuffix(".gif") ? 50 : 30)
+    var style = HighlightStyle.standard
+    if let spec = value("--style") {
+        var dict = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(style))) as? [String: Any] ?? [:]
+        for pair in spec.split(separator: ",") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2 { dict[kv[0]] = Int(kv[1]).map { $0 as Any } ?? kv[1] }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let parsed = try? JSONDecoder().decode(HighlightStyle.self, from: data) else { print("bad --style \(spec)"); exit(2) }
+        style = parsed
+    }
+    let zoom = value("--zoom").map { $0.split(separator: ",").compactMap { Double($0) } }.flatMap { $0.count == 4 ? CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) : nil }
+    NSApplication.shared.setActivationPolicy(.accessory)
+    MainActor.assumeIsolated {
+        HighlightDemoView.fixedTime = from
+        let demo = HighlightDemoView()
+        demo.frame = NSRect(x: 0, y: 0, width: 600, height: 150)
+        let w = NSWindow(contentRect: demo.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.contentView = demo
+        w.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        w.orderFront(nil)
+        demo.dark = args.contains("--dark")
+        demo.speed = value("--speed").flatMap(Double.init) ?? 1.3
+        demo.style = style
+        demo.layoutSubtreeIfNeeded()
+        var frames: [(t: Double, image: CGImage)] = []
+        var t = 0.0
+        while t <= to + 1e-9 {
+            demo.render(at: t) // from 0, so every transition's state builds up as it would live
+            if t >= from - 1e-9 {
+                let rep = demo.bitmapImageRepForCachingDisplay(in: demo.bounds)!
+                demo.cacheDisplay(in: demo.bounds, to: rep)
+                var image = rep.cgImage!
+                if let zoom {
+                    let scale = CGFloat(image.width) / demo.bounds.width
+                    let crop = CGRect(x: zoom.minX * scale, y: zoom.minY * scale, width: zoom.width * scale, height: zoom.height * scale)
+                    image = image.cropping(to: crop) ?? image
+                }
+                frames.append((t, image))
+            }
+            t += 1 / fps
+        }
+        let url = URL(fileURLWithPath: out)
+        if out.hasSuffix(".gif") {
+            guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "com.compuserve.gif" as CFString, frames.count, nil) else { exit(1) }
+            CGImageDestinationSetProperties(dest, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+            for f in frames {
+                CGImageDestinationAddImage(dest, f.image, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 1 / fps]] as CFDictionary)
+            }
+            CGImageDestinationFinalize(dest)
+        } else {
+            // Contact sheet: frames top to bottom, each labelled with its time.
+            let fw = frames[0].image.width, fh = frames[0].image.height, label = 44
+            let ctx = CGContext(data: nil, width: fw + label, height: fh * frames.count, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fill(CGRect(x: 0, y: 0, width: fw + label, height: fh * frames.count))
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+            for (n, f) in frames.enumerated() {
+                let y = fh * (frames.count - 1 - n)
+                ctx.draw(f.image, in: CGRect(x: label, y: y, width: fw, height: fh))
+                (String(format: "%.2f", f.t) as NSString).draw(at: NSPoint(x: 3, y: y + fh / 2 - 7), withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)])
+            }
+            NSGraphicsContext.current = nil
+            let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
+            try? rep.representation(using: .png, properties: [:])?.write(to: url)
+        }
+        print("wrote \(out): \(frames.count) frames, \(String(format: "%.2f", from))–\(String(format: "%.2f", to)) s")
+        exit(0)
+    }
 }
 
 if args.contains("--axtree"), let i = args.firstIndex(of: "--axtree"), args.indices.contains(i + 1), let pid = pid_t(args[i + 1]) {
@@ -111,8 +263,8 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
 
 if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     // Read from a point exactly like a hold does, but muted, then quit:
-    // `--simulate 700,450 [seconds]`. With UNREAD_DEBUG_OVERLAY=1 it logs
-    // every highlight change. Draws the real highlight on screen.
+    // `--simulate 700,450 [seconds] [--pid N]`. With UNREAD_DEBUG_OVERLAY=1 it
+    // logs every highlight and word-mark change. Draws the real highlight on screen.
     let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
     let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 12 : 12
     let app = NSApplication.shared
@@ -132,7 +284,16 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms", worst, over16, over50)) }
         let overlay = Overlay(), player = Player(muted: true), voice = Voice()
         let point = CGPoint(x: xy[0], y: xy[1])
-        guard let doc = DocumentFinder.document(at: point), let para = doc.paragraph(at: point) else { print("nothing at point"); exit(1) }
+        // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows).
+        let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
+        let found: (ReadableDocument, AnyObject)?
+        if let pinned {
+            found = DocumentFinder.document(inApp: pinned).flatMap { d in d.documentStart().map { (d, $0) } }
+        } else {
+            found = DocumentFinder.document(at: point).flatMap { d in d.paragraph(at: point).map { (d, $0.start) } }
+        }
+        guard let (doc, startAt) = found else { print("nothing at point"); exit(1) }
+        let para = (start: startAt, ())
         Task { @MainActor in
             try? await voice.prepareEnglish()
             // --primed: start from a pre-synthesized first sentence, like a hold does (#5).
@@ -145,8 +306,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                         return doc.sentence(from: start, in: scope).map { ($0, scope) }
                     }
                     guard let (first, scope) = extracted else { return nil }
-                    let samples = try? await voice.synthesize(first.text, language: .english, speed: 1.3)
-                    return .init(sentence: first, scope: scope, extractMs: 0, samples: samples, synthMs: 0)
+                    let speech = try? await voice.synthesize(first.text, language: .english, speed: 1.3)
+                    return .init(sentence: first, scope: scope, extractMs: 0, speech: speech, synthMs: 0)
                 })
             }
             let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,
@@ -172,6 +333,7 @@ if args.contains("--extract") {
     //   --extract --pid N --from-start  any app's main window (no focus needed), whole document
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
+    //   --word-boxes                  also print each word's box (#20)
     //   --from-text "…"               start at the first sentence containing this text (like pointing there)
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
@@ -209,6 +371,15 @@ if args.contains("--extract") {
             last = s
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
             print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
+            if args.contains("--word-boxes") {
+                // Each display word with its box (#20); "?" where it has none.
+                _ = doc.lines(of: s)
+                let boxes = doc.words(of: s)
+                let shown = zip(s.words, boxes.isEmpty ? s.words.map { _ in nil } : boxes).map { w, b in
+                    b.map { "\(w)(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "\(w)?"
+                }
+                print("     words \(boxes.compactMap { $0 }.count)/\(s.words.count): " + shown.joined(separator: " "))
+            }
             if args.contains("--lines") {
                 print("     lines " + doc.lines(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" }.joined(separator: " "))
             }

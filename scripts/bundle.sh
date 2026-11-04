@@ -2,7 +2,7 @@
 # Build Unread.app: release build, bundle, sign.
 #
 #   scripts/bundle.sh             # → build/Unread.app
-#   scripts/bundle.sh --install   # …and copy it to ~/Applications
+#   scripts/bundle.sh --install   # …and copy it to ~/Applications, then restart it
 #
 # Signing: uses $UNREAD_SIGN_IDENTITY if set, otherwise the first
 # "Apple Development" identity in the keychain. macOS ties the Accessibility
@@ -59,10 +59,16 @@ echo "Built $APP ($VERSION, build $BUILD_NUMBER)"
 if [[ "${1:-}" == "--install" ]]; then
     DEST="$HOME/Applications/Unread.app"
     mkdir -p "$HOME/Applications"
+    # Quit the running copy so the new build is what's running afterwards.
     if pgrep -xq Unread; then
-        echo "note: Unread is running; quit and reopen it to use the new build"
+        pkill -x Unread || true
+        for _ in $(seq 1 50); do pgrep -xq Unread || break; sleep 0.1; done
+        pgrep -xq Unread && { pkill -9 -x Unread || true; sleep 0.3; }
     fi
     rm -rf "$DEST"
     ditto "$APP" "$DEST"
     echo "Installed $DEST"
+    open "$DEST"
+    for _ in $(seq 1 50); do pgrep -xq Unread && break; sleep 0.1; done
+    if pgrep -xq Unread; then echo "Restarted Unread (pid $(pgrep -x Unread | head -1))"; else echo "warning: Unread didn't start" >&2; exit 1; fi
 fi

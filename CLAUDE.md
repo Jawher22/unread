@@ -20,10 +20,13 @@ swift build -c release                # Swift 6.2 toolchain; macOS 15+, Apple Si
 ./.build/release/Unread --bench       # silent: model load + synthesis timings
 ./.build/release/Unread --extract     # print sentences + bounds Unread would read from the front window
 ./.build/release/Unread --stats       # p50/p95 latency from ~/Library/Logs/Unread/latency.jsonl
+./.build/release/Unread --words ["sentence"]  # silent: when each word starts, as the voice times it
+./.build/release/Unread --settings-snapshot out.png [seconds]  # render the Settings window off-screen (no screen recording needed)
+./.build/release/Unread --highlight-frames out.png|out.gif [from] [to] [--style mark=tail,motion=flow] [--zoom x,y,w,h]  # the demo frame by frame, to review motion
 ```
 
 ```bash
-scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Applications); logs: ~/Library/Logs/Unread/unread.log
+scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: copy to ~/Applications and restart it); logs: ~/Library/Logs/Unread/unread.log
 ```
 
 - The bundle is signed with the first "Apple Development" identity so the Accessibility grant survives rebuilds. Dev modes work from the bundle too: `build/Unread.app/Contents/MacOS/Unread --extract`.
@@ -37,7 +40,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 
 ## Code map
 
-`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers, `AXWorker` queue) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Overlay` (click-through highlight panels) · `Latency` (per-reading timing log + `--stats`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
+`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers, `AXWorker` queue) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Highlight` (highlight style settings, word-mark logic, the layer renderer shared by the overlay and the Settings demo) · `Overlay` (click-through panels, one per screen) · `Settings` (Settings window with a live highlight demo) · `Words` (word timing from Kokoro durations, word boxes) · `Latency` (per-reading timing log + `--stats`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
 
 ## Hard-won constraints (details in docs/design.md)
 
@@ -68,4 +71,6 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (and ~/Appli
 - **WebKit exposes embedded objects as U+FFFC ("￼")** (icon buttons, images) and its character step **stalls at them**, one object at a time. Treat "￼" as blank when tokenizing and measuring, step past objects with `step(past:)` (falls back to the next text leaf in document order), and never let `walk` jump to the window's end. `fixtures/pages/icons.html` guards this (modelled on raphaelsalaja.com, where Safari skipped the first three paragraphs).
 - **Chromium browsers may give no text positions** (Aside; likely Chrome/Arc/Dia unless VoiceOver is on). `AXManualAccessibility` is Electron-only (browsers answer −25205, unsupported); their tree is built without inline text boxes, so every text-range bounds query returns a zero-size box while element frames are right. `WebDocument.probeTextGeometry` detects this once per page and highlights whole text blocks instead (`elementFrames`). Only `AXEnhancedUserInterface` would turn on inline text boxes, and it's banned below; see the open decision in docs/design.md.
 - Enable Chromium's tree with `AXManualAccessibility` only. Never set `AXEnhancedUserInterface`: it breaks window animations.
+- **Word highlight (#20) needs two alignments.** The voice's words aren't the page's: acronyms are spelled out ("API" → 3 words), French merges phrases ("tout le monde" → 1), numbers expand ("$45.99" → 5). Kokoro token id 0 is BOS/EOS and 16 is the space in both vocabularies. Match `normalizedText` to spoken words by length, then display words to `normalizedText` by spelling (`WordTiming`). Check with `--words`.
+- **The mark follows `AVAudioPlayerNode`'s timeline, not a timer.** That timeline keeps running when the node runs dry, reports nil while paused, and restarts at 0 on `stop`; `Player.claim` accounts for all three. Subtract the output's presentation latency (Bluetooth). The mark is a pure function of that position (`WordMark.frame`), drawn every display frame; don't hand its motion to Core Animation's implicit animations.
 - Kokoro v3 (fast ANE path) supports English, Japanese and Mandarin only. French uses the legacy pipeline with a single voice, `ff_siwis`.
