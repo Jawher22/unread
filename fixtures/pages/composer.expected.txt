@@ -1,0 +1,7 @@
+# start: I found the cause
+I found the cause of the flaky test.
+It read the clock twice and compared the two readings.
+Here is what changed:
+• Read the clock once per check
+• Add a test for the midnight case
+• Remove the retry wrapper

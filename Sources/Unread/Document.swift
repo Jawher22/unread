@@ -80,12 +80,80 @@ extension ReadableDocument {
 /// it (navigation, buttons, code blocks, captions, hidden labels, timestamps,
 /// link rows) is skipped, except a chrome container the user started inside:
 /// pointing at something means "read this".
+///
+/// Inside it, the article's main text (#11) decides the rest: reading ends at
+/// the first block after the last paragraph that doesn't read as one, and
+/// metadata between the start and the first paragraph is skipped.
 final class ReadingScope {
     let container: AXUIElement?
     let pointedInto: AXUIElement?
-    init(container: AXUIElement?, pointedInto: AXUIElement?) {
+    /// The text leaf the reading started in: its block is always read.
+    let startLeaf: AXUIElement?
+    /// Its unit, and the first paragraph of main text at or after it, looked up on first use (AXWorker only).
+    var startUnit: TextUnit.Key?
+    var mainText: MainText?
+    var mainTextResolved = false
+    init(container: AXUIElement?, pointedInto: AXUIElement?, startLeaf: AXUIElement? = nil) {
         self.container = container
         self.pointedInto = pointedInto
+        self.startLeaf = startLeaf
+    }
+}
+
+/// What a page lays out as one block of text (#11): a paragraph, heading,
+/// list item or cell. Where an engine lists a container's inline children
+/// beside its blocks (WebKit drops plain `<div>`s, so a byline's links can sit
+/// next to the paragraphs), the run of inline siblings between two blocks.
+struct TextUnit {
+    let block: AXUIElement
+    /// `[block]`, or the run of `block`'s children starting at index `first`.
+    let members: [AXUIElement]
+    let first: Int
+    var key: Key { Key(block: AXKey(element: block), first: first) }
+    struct Key: Hashable { let block: AXKey; let first: Int }
+}
+
+/// The first paragraph of an article's main text: where metadata ends, and
+/// the column later paragraphs must share.
+struct MainText {
+    let start: AnyObject
+    let column: ClosedRange<CGFloat>?
+}
+
+/// A unit's text, measured the way Readability scores a paragraph (#11).
+struct UnitText {
+    enum Kind { case text, heading, listItem, cell }
+    let kind: Kind
+    let chars: Int, linkChars: Int, links: Int, words: Int
+    /// How many sentences end in it (".", "?", "!", ":", ";" before a space or the end).
+    let sentences: Int
+    /// The unit itself ends like a sentence.
+    let terminal: Bool
+    let frame: CGRect?
+    /// Inside the article's `<header>` (byline, read time, translations), a
+    /// `<figure>`, or a form (beside a text field: "We never share your address.").
+    let inHeader: Bool, inFigure: Bool, inForm: Bool
+    /// "6:03 PM", "Oct 2, 2026": a timestamp, skipped where it's read.
+    let isTimestamp: Bool
+
+    var linkDensity: Double { chars == 0 ? 0 : Double(linkChars) / Double(chars) }
+    /// Running text: a sentence of words, mostly not links.
+    var reads: Bool { sentences > 0 && words >= 2 && linkDensity < 0.5 }
+    /// Running prose, as a list of footnotes or steps can be: sentences of
+    /// seven words or more on average, few links. A reference list is
+    /// fragments ("Coast Press.", "Retrieved March 3, 2024.") and linked titles.
+    var isProse: Bool { reads && linkDensity < 0.25 && words >= 7 * sentences }
+    /// A paragraph of the article's body (a list item or heading never is).
+    var isParagraph: Bool { kind == .text && reads && !inHeader && !inFigure && !inForm }
+    /// Navigation: short, mostly links, no sentence (#52). A list item that is
+    /// one link ("• The Claude Agent SDK;", "• AT-SPI") is content, not a row.
+    var isLinkRow: Bool {
+        chars > 0 && chars < 200 && Double(linkChars) >= Double(chars) * 0.6 && !terminal && !(kind == .listItem && links == 1)
+    }
+    func within(_ column: ClosedRange<CGFloat>?) -> Bool {
+        guard let column, let f = frame, f.width > 0 else { return true }
+        let overlap = min(f.maxX, column.upperBound) - max(f.minX, column.lowerBound)
+        return overlap >= 0.6 * (column.upperBound - column.lowerBound)
     }
 }
 
@@ -100,8 +168,12 @@ enum SpeechText {
         return timestamp.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
     }
 
-    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|citation needed|edit)\]"#, options: .caseInsensitive)
+    /// "[12]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
+    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
+    /// Screen-reader-only link hints. Clipped to 1 px, but their text frame is
+    /// full size in both engines, so geometry can't tell; the idiom can.
+    private static let linkHint = try! NSRegularExpression(pattern: #"\((opens )?in (a )?new (window|tab)\)|\(external link\)"#, options: .caseInsensitive)
 
     /// Citation markers blanked out, same length: the sentence tokenizer split
     /// "…disability.[3] Screen…" inside the marker, leaving "[" in one sentence
@@ -118,7 +190,7 @@ enum SpeechText {
     static func clean(_ raw: String) -> String? {
         var s = raw.replacingOccurrences(of: "\u{00AD}", with: "") // soft hyphens
             .replacingOccurrences(of: "\u{FFFC}", with: " ") // embedded objects (images, icons)
-        for re in [citation, url] {
+        for re in [citation, url, linkHint] {
             s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
         }
         s = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
@@ -202,7 +274,13 @@ final class WebDocument: ReadableDocument {
     /// instead of dozens.
     private var parentMemo: [AXKey: AXUIElement?] = [:]
     private var chromeMemo: [AXKey: String?] = [:]
-    private var linkRowMemo: [AXKey: Bool] = [:]
+    private var flowsMemo: [AXKey: Bool] = [:]
+    private var roleMemo: [AXKey: (role: String?, subrole: String?)] = [:]
+    private var figureMemo: [AXKey: Bool] = [:]
+    private var piecesMemo: [TextUnit.Key: [Piece]] = [:]
+    private var unitTextMemo: [TextUnit.Key: UnitText] = [:]
+    private var nextParagraphMemo: [Lookahead: TextUnit] = [:]
+    private struct Lookahead: Hashable { let unit: TextUnit.Key; let container: AXKey?; let column: ClosedRange<CGFloat>? }
     private var inlineGroupMemo: [AXKey: Bool] = [:]
     private var childrenMemo: [AXKey: [AXUIElement]] = [:]
 
@@ -328,9 +406,24 @@ final class WebDocument: ReadableDocument {
                 at = gap
             }
             said += chunkNS.substring(with: NSRange(location: at, length: length - at))
-            if let r = range(cursor, sentenceEnd), let text = SpeechText.clean(said) {
+            if var r = range(cursor, sentenceEnd), var text = SpeechText.clean(said) {
                 guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd) }
-                switch verdict(text: text, endingAt: sentenceEnd, in: scope) {
+                // A heading's permalink or "edit" link, a title's site name:
+                // say, highlight and judge only what's left (WebKit's "Historyedit"
+                // ends in the link). The walk still goes on after the furniture.
+                var judgeAt = sentenceEnd, endLeaf = leaf(endingAt: sentenceEnd)
+                let own = endLeaf.flatMap { furnitureFree(text, leaf: $0) }
+                if let own, !own.isEmpty {
+                    let at = (chunkNS.substring(to: length) as NSString).range(of: own)
+                    if at.location != NSNotFound {
+                        let e = walk(from: cursor, utf16Length: NSMaxRange(at), limit: chunkEnd)
+                        if let narrowed = range(at.location == 0 ? cursor : advance(cursor, by: at.location), e) {
+                            r = narrowed; judgeAt = e; endLeaf = leaf(endingAt: e)
+                        }
+                    }
+                    text = own
+                }
+                switch own == "" ? .skip("furniture") : verdict(text: text, endingAt: judgeAt, leaf: endLeaf, in: scope) {
                 case .read: return Sentence(text: text, range: r, next: sentenceEnd)
                 case .end:
                     if debugWalk { print("    end of scope at \(text.prefix(40).debugDescription)") }
@@ -409,7 +502,7 @@ final class WebDocument: ReadableDocument {
         return m
     }
 
-    // MARK: Reading scope (#10)
+    // MARK: Reading scope (#10, #11)
 
     func scope(from position: AnyObject) -> ReadingScope? {
         // The position may sit on the boundary with the previous element, so
@@ -421,7 +514,7 @@ final class WebDocument: ReadableDocument {
         if debugWalk {
             print("    scope: \(container.map { AX.subrole($0) ?? "?" } ?? "whole document"), pointed into: \(pointedInto.map { Self.chromeKind($0) ?? "?" } ?? "nothing")")
         }
-        return ReadingScope(container: container, pointedInto: pointedInto)
+        return ReadingScope(container: container, pointedInto: pointedInto, startLeaf: leaf)
     }
 
     private enum Verdict { case read, skip(String), end }
@@ -444,8 +537,9 @@ final class WebDocument: ReadableDocument {
         return hit
     }
 
-    private func verdict(text: String, endingAt marker: AnyObject, in scope: ReadingScope) -> Verdict {
-        guard let leaf = leaf(endingAt: marker) else { return .read }
+    /// `leaf`: the text leaf the sentence ends in (`leaf(endingAt: marker)`).
+    private func verdict(text: String, endingAt marker: AnyObject, leaf: AXUIElement?, in scope: ReadingScope) -> Verdict {
+        guard let leaf else { return .read }
         let chain = ancestry(of: leaf)
         if let c = scope.container, !chain.contains(where: { CFEqual($0, c) }) { return .end }
         if let pointed = scope.pointedInto, chain.contains(where: { CFEqual($0, pointed) }) { return .read }
@@ -466,8 +560,56 @@ final class WebDocument: ReadableDocument {
             if let kind = chromeKind(e) { return .skip(kind) }
         }
         if SpeechText.isTimestamp(text) { return .skip("timestamp") }
-        if let container = block(containing: leaf), isLinkRow(container) { return .skip("links") }
+        guard let unit = unit(of: leaf) else { return .read }
+        let t = self.text(of: unit)
+        if t.isLinkRow { return .skip("links") }
+        // The text layer (#11), around the article's main text. Pointing means
+        // "read this", a page without a paragraph keeps the rules above, and
+        // tables are left as they are (#26).
+        if t.kind == .cell { return .read }
+        if scope.startUnit == nil, let start = scope.startLeaf { scope.startUnit = self.unit(of: start)?.key }
+        if scope.startUnit == unit.key { return .read }
+        guard let main = mainText(of: scope) else { return .read }
+        if t.isParagraph, t.within(main.column) { return .read }
+        // Between the start (the title) and the first paragraph: bylines, read
+        // times, label rows, topic links, notices. Headings, sentences and
+        // list items that aren't links stay (pointing at a heading above a
+        // list). From one character inside: Chromium joins blocks with no
+        // separator, so the end of a line can be the paragraph's start.
+        if t.kind != .heading, isAfter(main.start, p("AXPreviousTextMarkerForTextMarker", marker) ?? marker) {
+            let stays = !t.inHeader && (t.reads || (t.kind == .listItem && t.linkDensity < 0.6))
+            return stays ? .read : .skip("metadata")
+        }
+        // Past the last paragraph, the first block that isn't one ends the
+        // reading: tag rows, "Keep reading", sign-up boxes, a sidebar column,
+        // "See also" and the references. Unless nothing follows: then it's the
+        // article's last line (a chat's "All tests pass"), and reading ends after it.
+        if !t.reads || !t.within(main.column) {
+            let next = paragraph(after: section(of: unit, kind: t.kind), in: scope, column: main.column)
+            if next.paragraph == nil { return next.moreText ? .end : .read }
+            if t.inFigure, !t.reads { return .skip("caption") }
+        }
         return .read
+    }
+
+    /// Where the article's ending is judged from: a list item's list, a
+    /// heading's list right after it ("Key takeaways" and its bullets), or the
+    /// unit itself. Judged from the item, the list's own remaining bullets
+    /// looked like text after the article and ended the reading at its last
+    /// section.
+    private func section(of unit: TextUnit, kind: UnitText.Kind) -> TextUnit {
+        let chain = ancestry(of: unit.block)
+        switch kind {
+        case .listItem:
+            if let list = chain.dropFirst().first, roles(list).role == kAXListRole { return TextUnit(block: list, members: [list], first: -1) }
+        case .heading:
+            if unit.first < 0, let parent = chain.dropFirst().first, case let kids = children(of: parent),
+               let i = kids.firstIndex(where: { CFEqual($0, unit.block) }), i + 1 < kids.count, roles(kids[i + 1]).role == kAXListRole {
+                return TextUnit(block: kids[i + 1], members: [kids[i + 1]], first: -1)
+            }
+        default: break
+        }
+        return unit
     }
 
     /// `e`, its parent, … up to and including the web area (bounded, memoized).
@@ -489,14 +631,6 @@ final class WebDocument: ReadableDocument {
         let kind = Self.chromeKind(e)
         chromeMemo[key] = kind
         return kind
-    }
-
-    private func isLinkRow(_ block: AXUIElement) -> Bool {
-        let key = AXKey(element: block)
-        if let known = linkRowMemo[key] { return known }
-        let row = Self.isLinkRow(block)
-        linkRowMemo[key] = row
-        return row
     }
 
     private static let controlRoles: Set<String> = [
@@ -528,21 +662,268 @@ final class WebDocument: ReadableDocument {
         return nil
     }
 
-    /// A short block that is mostly links: share rows, tag lists, "related" lines.
-    static func isLinkRow(_ block: AXUIElement) -> Bool {
-        var total = 0, linked = 0
-        func visit(_ e: AXUIElement, inLink: Bool, depth: Int) {
-            guard depth < 6, total < 400 else { return }
+    // MARK: Text units (#11)
+
+    /// The unit `leaf`'s text belongs to: its block, or the run of inline
+    /// siblings around it where the block also holds blocks.
+    private func unit(of leaf: AXUIElement) -> TextUnit? {
+        guard let b = block(containing: leaf) else { return nil }
+        let kids = children(of: b)
+        if !isMixed(b) { return TextUnit(block: b, members: [b], first: -1) }
+        let chain = ancestry(of: leaf)
+        guard let i = chain.firstIndex(where: { CFEqual($0, b) }), i > 0,
+              let at = kids.firstIndex(where: { CFEqual($0, chain[i - 1]) }) else { return TextUnit(block: b, members: [b], first: -1) }
+        var lo = at, hi = at
+        while lo > 0, flows(kids[lo - 1]) { lo -= 1 }
+        while hi + 1 < kids.count, flows(kids[hi + 1]) { hi += 1 }
+        return TextUnit(block: b, members: Array(kids[lo...hi]), first: lo)
+    }
+
+    /// Role and subrole, asked once per element.
+    private func roles(_ e: AXUIElement) -> (role: String?, subrole: String?) {
+        let key = AXKey(element: e)
+        if let known = roleMemo[key] { return known }
+        let r = (AX.role(e), AX.subrole(e))
+        roleMemo[key] = r
+        return r
+    }
+
+    /// Inline content: text, links, style groups, inline plain groups.
+    private func flows(_ e: AXUIElement) -> Bool {
+        let key = AXKey(element: e)
+        if let known = flowsMemo[key] { return known }
+        let f = Self.isInline(e) || isInlineGroup(e)
+        flowsMemo[key] = f
+        return f
+    }
+
+    /// A block that holds blocks as well as inline content (WebKit's flattened `<div>`s).
+    private func isMixed(_ b: AXUIElement) -> Bool { !children(of: b).allSatisfy(flows) }
+
+    /// A unit's text, in order, each piece with the link it sits in.
+    private struct Piece { let text: String; let link: AXUIElement? }
+
+    private func pieces(of unit: TextUnit) -> [Piece] {
+        if let known = piecesMemo[unit.key] { return known }
+        var out: [Piece] = []
+        var budget = 600
+        func visit(_ e: AXUIElement, link: AXUIElement?, depth: Int) {
+            budget -= 1
+            guard depth < 10, budget > 0 else { return }
             let role = AX.role(e)
-            if role == kAXStaticTextRole {
-                let n = ((AX.attr(e, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: .whitespaces).count
-                total += n
-                if inLink { linked += n }
-            }
-            for c in AX.children(e) { visit(c, inLink: inLink || role == "AXLink", depth: depth + 1) }
+            // Chromium's static text has per-line text boxes as children; its value is the whole text.
+            if role == kAXStaticTextRole { out.append(Piece(text: (AX.attr(e, kAXValueAttribute) as? String) ?? "", link: link)); return }
+            if let role, Self.controlRoles.contains(role) { return }
+            for c in children(of: e) { visit(c, link: role == "AXLink" ? e : link, depth: depth + 1) }
         }
-        visit(block, inLink: false, depth: 0)
-        return total > 0 && total < 200 && Double(linked) >= Double(total) * 0.6
+        for m in unit.members { visit(m, link: nil, depth: 0) }
+        piecesMemo[unit.key] = out
+        return out
+    }
+
+    private static func isCitation(_ linkText: String) -> Bool {
+        let t = linkText.trimmingCharacters(in: blank)
+        guard !t.isEmpty, t.lowercased() != "edit" else { return false }
+        let bracketed = t.hasPrefix("[") ? t : "[" + t + "]"
+        return SpeechText.blankingCitations(bracketed).trimmingCharacters(in: blank).isEmpty
+    }
+
+    private static let sentenceEnd = try! NSRegularExpression(pattern: #"[\p{L}\p{N})\]"'”’][.!?…:;]+["'”’)\]]*(\s|$)"#)
+
+    private func text(of unit: TextUnit) -> UnitText {
+        if let known = unitTextMemo[unit.key] { return known }
+        let all = pieces(of: unit)
+        // A citation marker ("[19]", or "who?" between brackets outside the
+        // link) is a link, but not one a reader follows: leave it out.
+        var linkText: [AXKey: String] = [:]
+        for p in all { if let l = p.link { linkText[AXKey(element: l), default: ""] += p.text } }
+        let citations = Set(linkText.filter { Self.isCitation($0.value) }.keys)
+        let ps = all.filter { $0.link.map { !citations.contains(AXKey(element: $0)) } ?? true }
+        var chars = 0, linkChars = 0
+        for p in ps {
+            let n = p.text.trimmingCharacters(in: .whitespaces).count
+            chars += n
+            if p.link != nil { linkChars += n }
+        }
+        let links = Set(ps.compactMap { $0.link.map { AXKey(element: $0) } })
+        let joined = SpeechText.blankingCitations(ps.map(\.text).joined())
+        let words = joined.split(whereSeparator: \.isWhitespace).filter { $0.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) }.count
+        let ns = joined as NSString
+        let ends = Self.sentenceEnd.matches(in: joined, range: NSRange(location: 0, length: ns.length))
+        let trimmed = joined.trimmingCharacters(in: Self.blank)
+        let terminal = ends.contains { NSMaxRange($0.range) >= ns.length || ns.substring(from: NSMaxRange($0.range)).trimmingCharacters(in: Self.blank).isEmpty }
+            && !trimmed.isEmpty
+        let b = unit.block
+        let parentRole = ancestry(of: b).dropFirst().first.flatMap { roles($0).role }
+        let kind: UnitText.Kind = roles(b).role == kAXHeadingRole ? .heading
+            : parentRole == kAXListRole ? .listItem
+            : ancestry(of: b).prefix(4).contains(where: { ["AXCell", "AXRow", "AXTable"].contains(roles($0).role ?? "") }) ? .cell
+            : .text
+        var frame: CGRect?
+        for m in unit.members { if let f = AX.frame(m), f.width > 0 { frame = frame.map { $0.union(f) } ?? f } }
+        // The article's <header>, a <figure>.
+        var inHeader = false, inFigure = false
+        for e in ancestry(of: b).prefix(8) {
+            if roles(e).subrole == "AXSectionHeader" { inHeader = true }
+            if isFigure(e) { inFigure = true }
+        }
+        // A form is a plain group in Chromium; what gives it away is a text field (or a label holding one) beside the text.
+        var inForm = false
+        if let parent = ancestry(of: b).dropFirst().first, case let siblings = children(of: parent), siblings.count <= 8 {
+            let fields: Set<String> = ["AXTextField", "AXComboBox", "AXTextArea"]
+            inForm = siblings.contains { k in
+                fields.contains(roles(k).role ?? "") || (roles(k) == (kAXGroupRole, nil) && children(of: k).count <= 4 && children(of: k).contains { fields.contains(roles($0).role ?? "") })
+            }
+        }
+        let t = UnitText(kind: kind, chars: chars, linkChars: linkChars, links: links.count, words: words,
+                         sentences: ends.count, terminal: terminal, frame: frame, inHeader: inHeader, inFigure: inFigure, inForm: inForm,
+                         isTimestamp: SpeechText.isTimestamp(trimmed))
+        unitTextMemo[unit.key] = t
+        return t
+    }
+
+    /// A `<figure>`. Both engines expose it as a plain group whose role
+    /// description says "figure" (localized by the browser: English and
+    /// French say "figure"). Its image may not be there: Chromium drops a
+    /// decorative one (alt=""), leaving only the caption.
+    private func isFigure(_ e: AXUIElement) -> Bool {
+        let key = AXKey(element: e)
+        if let known = figureMemo[key] { return known }
+        let f = roles(e).role == kAXGroupRole && (AX.attr(e, kAXRoleDescriptionAttribute) as? String)?.lowercased() == "figure"
+        figureMemo[key] = f
+        return f
+    }
+
+    /// The article's first paragraph at or after where the reading started.
+    private func mainText(of scope: ReadingScope) -> MainText? {
+        if scope.mainTextResolved { return scope.mainText }
+        scope.mainTextResolved = true
+        guard let leaf = scope.startLeaf, let start = unit(of: leaf),
+              let first = text(of: start).isParagraph ? start : paragraph(after: start, in: scope, column: nil).paragraph,
+              let firstLeaf = AX.firstInOrder(in: first.members[0], maxNodes: 200, { x in
+                  AX.role(x) == kAXStaticTextRole && !(((AX.attr(x, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: Self.blank).isEmpty)
+              }),
+              let marker = leafStart(firstLeaf) else { return nil }
+        let f = text(of: first).frame
+        scope.mainText = MainText(start: marker, column: f.map { $0.minX...$0.maxX })
+        if debugWalk { print("    main text starts at \(pieces(of: first).map(\.text).joined().prefix(40).debugDescription), column \(f.map { "\($0.minX)…\($0.maxX)" } ?? "?")") }
+        return scope.mainText
+    }
+
+    /// The next paragraph of main text after `unit` in document order, inside
+    /// the scope, in the column. Chrome, tables and headings are passed over
+    /// whole, and lists unless they read as prose (footnotes, steps): only
+    /// paragraphs count as the article going on. `moreText`: anything else to
+    /// read comes after it.
+    private func paragraph(after unit: TextUnit, in scope: ReadingScope, column: ClosedRange<CGFloat>?) -> (paragraph: TextUnit?, moreText: Bool) {
+        let memoKey = Lookahead(unit: unit.key, container: scope.container.map { AXKey(element: $0) }, column: column)
+        if let known = nextParagraphMemo[memoKey] { return (known, true) }
+        var budget = 3000
+        var moreText = false
+        func isMain(_ u: TextUnit) -> Bool {
+            let t = text(of: u)
+            if t.words > 0, !t.isLinkRow, !t.isTimestamp { moreText = true }
+            return t.isParagraph && t.within(column)
+        }
+        func scan(_ kids: [AXUIElement], from: Int, in parent: AXUIElement) -> TextUnit? {
+            var i = from
+            while i < kids.count {
+                budget -= 1
+                guard budget > 0 else { return nil }
+                if flows(kids[i]) {
+                    var j = i
+                    while j + 1 < kids.count, flows(kids[j + 1]) { j += 1 }
+                    let run = TextUnit(block: parent, members: Array(kids[i...j]), first: i)
+                    if isMain(run) { return run }
+                    i = j + 1
+                } else {
+                    if let u = search(kids[i]) { return u }
+                    i += 1
+                }
+            }
+            return nil
+        }
+        func search(_ e: AXUIElement) -> TextUnit? {
+            guard chromeKind(e) == nil else { return nil }
+            let role = roles(e).role
+            // A text area is an input (a chat's composer), not more of the page,
+            // though WebKit gives an empty one its placeholder as text. It stays
+            // readable elsewhere: rich editors are text areas.
+            if role == kAXImageRole || role == kAXTextAreaRole { return nil }
+            if let role, [kAXHeadingRole, "AXTable"].contains(role) { moreText = true; return nil }
+            if role == kAXListRole {
+                let list = TextUnit(block: e, members: [e], first: -1), t = text(of: list)
+                moreText = moreText || t.words > 0
+                return t.isProse && t.within(column) ? list : nil
+            }
+            let kids = children(of: e)
+            if kids.isEmpty { return nil }
+            if !isMixed(e) { let u = TextUnit(block: e, members: [e], first: -1); return isMain(u) ? u : nil }
+            return scan(kids, from: 0, in: e)
+        }
+        var found: TextUnit?
+        var node = unit.block
+        if unit.first >= 0 { found = scan(children(of: unit.block), from: unit.first + unit.members.count, in: unit.block) }
+        while found == nil, budget > 0 {
+            if let c = scope.container, CFEqual(node, c) { break }
+            guard !CFEqual(node, element), let parent = ancestry(of: node).dropFirst().first else { break }
+            let kids = children(of: parent)
+            if let i = kids.firstIndex(where: { CFEqual($0, node) }) { found = scan(kids, from: i + 1, in: parent) }
+            node = parent
+        }
+        // Only a hit is remembered: a chat keeps growing below the last message.
+        if let found { nextParagraphMemo[memoKey] = found }
+        return (found, moreText || found != nil)
+    }
+
+    // MARK: Furniture (#11)
+
+    /// What a heading or a title line says without its furniture: a permalink
+    /// ("#", "¶"), an "edit" link beside the heading, a hidden "Copy link"
+    /// tooltip that only WebKit puts in the text, a site name after a
+    /// separator ("How web bloat impacts users | Patreon"). Nil if there's
+    /// nothing to take out, "" if the sentence is all furniture.
+    private func furnitureFree(_ text: String, leaf: AXUIElement) -> String? {
+        guard let unit = unit(of: leaf) else { return nil }
+        if let heading = heading(of: unit) {
+            let own = SpeechText.clean(pieces(of: TextUnit(block: heading, members: [heading], first: -1))
+                .filter { $0.link == nil || $0.text.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) }
+                .map(\.text).joined()) ?? ""
+            if own == text { return nil }
+            if !own.isEmpty, text.contains(own) { return own }
+            return ancestry(of: leaf).contains(where: { CFEqual($0, heading) }) ? nil : ""
+        }
+        let t = self.text(of: unit)
+        guard !t.terminal, t.words <= 24 else { return nil }
+        // Links at the end, after text that ends with a separator (WebKit may
+        // fold the separator into the title's text, Chromium keeps it apart).
+        let ps = pieces(of: unit)
+        guard let last = ps.lastIndex(where: { $0.link == nil && !$0.text.trimmingCharacters(in: Self.blank).isEmpty }),
+              ps[(last + 1)...].contains(where: { $0.link != nil }) else { return nil }
+        let head = ps[...last].map(\.text).joined().trimmingCharacters(in: Self.blank)
+        guard let sep = head.last, "|·•–—/".contains(sep),
+              let own = SpeechText.clean(String(head.dropLast())), own != text, text.contains(own) else { return nil }
+        return own
+    }
+
+    /// The heading a unit belongs to: the unit itself, or the one heading in
+    /// a small row beside its links ("History" and "edit" on Wikipedia). The
+    /// row's `<div>` may not be in the tree: then the links follow the heading.
+    private func heading(of unit: TextUnit) -> AXUIElement? {
+        if roles(unit.block).role == kAXHeadingRole { return unit.block }
+        if unit.first > 0, case let before = children(of: unit.block)[unit.first - 1], roles(before).role == kAXHeadingRole,
+           unit.members.allSatisfy({ ["AXLink", kAXStaticTextRole].contains(roles($0).role ?? "") }), text(of: unit).words <= 2 {
+            return before
+        }
+        guard roles(unit.block) == (kAXGroupRole, nil) else { return nil }
+        let kids = children(of: unit.block)
+        guard kids.count <= 6 else { return nil }
+        let headings = kids.filter { roles($0).role == kAXHeadingRole }
+        guard headings.count == 1,
+              kids.allSatisfy({ k in [kAXHeadingRole, "AXLink", kAXStaticTextRole, "AXButton"].contains(roles(k).role ?? "")
+                  || (roles(k) == (kAXGroupRole, nil) && children(of: k).allSatisfy { ["AXLink", kAXStaticTextRole].contains(roles($0).role ?? "") }) })
+        else { return nil }
+        return headings[0]
     }
 
     /// The next position after `m`. WebKit's character step returns nothing at
@@ -754,7 +1135,7 @@ final class WebDocument: ReadableDocument {
         var cur: AXUIElement? = e
         for _ in 0..<8 {
             guard let c = cur else { return nil }
-            if !Self.isInline(c), !isInlineGroup(c) { return c }
+            if !flows(c) { return c }
             cur = AX.parent(c)
         }
         return nil
