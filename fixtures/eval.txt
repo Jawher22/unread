@@ -1,0 +1,22 @@
+# Passages for judging the narrator's reading quality (#75). Read by scripts/eval.sh.
+# Corpus excerpts are cut from fixtures/corpus/<page>.expected.txt (third-party text, local only:
+# run scripts/save-corpus.sh first); "original" passages are committed in fixtures/eval-original/.
+# Lines: a range, or a single line; "|" starts a new paragraph. Assembled into fixtures/eval/passages/.
+#
+# id                 source                    lines
+agents-intro         anthropic-agents          5-8
+agents-when          anthropic-agents          18|19-21
+agents-frameworks    anthropic-agents          25|26|27|28|29|30
+pingora-why          cloudflare-pingora        13|14-16|17|18
+danluu-trip          danluu-web-bloat          3-6
+hallucinate-test     openai-hallucinate        18-21
+trifecta-list        willison-trifecta         5|6|7|8
+screen-reader-said   wikipedia-screen-reader   11|12-13
+dialogue             original
+questions            original
+good-news            original
+somber               original
+t3-answer            original
+long-sentence        original
+numbers              original
+wry                  original

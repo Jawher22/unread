@@ -1,0 +1,6 @@
+The crash comes from Sources/Unread/Session.swift, line 214, where the player is stopped twice.
+The fix is to check isPlaying before calling stop(), and to clear the queue in the same step.
+I also renamed max_retries to maxRetries in Config.swift, since the rest of the file uses camel case.
+
+Run scripts/test.sh to confirm.
+It should pass in about 20 seconds, with all 42 fixtures green.

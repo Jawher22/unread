@@ -83,6 +83,18 @@ if args.contains("--hear") {
     exit(0)
 }
 
+if args.contains("--eval") {
+    // Silent: the evaluation passages read as a reading says them, to WAVs (#75). Driven by scripts/eval.sh.
+    // `--eval PASSAGES --out DIR [--paragraph] [--temperature T] [--top-k K] [--repetition R] [--voice id]`
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        await benchEval(args)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if args.contains("--align") {
     // Silent: forced alignment of the narrator's word starts (#58).
     // `--align ["sentence"…]`, or `--align --check out.wav session.log`

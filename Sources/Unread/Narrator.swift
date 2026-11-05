@@ -111,11 +111,13 @@ actor Narrator {
 
     /// Loads the model, encodes each preset's clip (cached after the first time) and warms both languages.
     /// Loads the aligner alongside (~0.2 s; its first load downloads ~100 MB and compiles for about 50 s).
-    static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
+    /// `sampling`: the first codebook's draw (`--eval` sweeps it, #76).
+    static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames,
+                     sampling: QwenSampling = QwenSampling()) async throws -> Narrator {
         async let aligner = loadAligner()
         let narrator = try await withCheckedThrowingContinuation { done in
             DispatchQueue.global(qos: .userInitiated).async {
-                done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames) })
+                done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames, sampling: sampling) })
             }
         }
         let loaded = await aligner
@@ -130,13 +132,14 @@ actor Narrator {
         }
     }
 
-    private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int]) throws {
+    private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int], sampling: QwenSampling) throws {
         guard Self.isInstalled(at: models) else { throw Failure.modelMissing(models, revision: Self.modelRevision) }
         queue = DispatchSerialQueue(label: "unread.narrator", qos: .userInitiated)
         self.chunkFrames = chunkFrames
         let mappedBefore = Set(MappedFiles.regions().map(\.address))
         var t = Date()
         engine = try QwenANEEngine(modelsDirectory: models)
+        engine.options.sampling = sampling
         let engineTime = Date().timeIntervalSince(t)
         t = Date()
         var voices = ["en": try Self.clone(english, models: models)]

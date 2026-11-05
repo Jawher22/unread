@@ -1,0 +1,6 @@
+Why does a page that holds nothing but text need four megabytes of script?
+Who decided that a cookie banner should cover half the screen?
+And when did we agree that reading an article means closing three pop-ups first?
+None of these questions has a single villain.
+Each choice made sense to someone, on some deadline, for some metric.
+But add them up, and you get a web that is slower than the connection it runs on.

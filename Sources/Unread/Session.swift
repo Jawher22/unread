@@ -52,7 +52,11 @@ enum Pacing {
 
     /// The pause to put after `sentence`, in samples at 24 kHz.
     static func pause(after sentence: Sentence, speed: Float) -> Int {
-        let quiet = (sentence.endsBlock ? block : self.sentence) / Double(speed) - 2 * edge
+        pause(endsBlock: sentence.endsBlock, speed: speed)
+    }
+
+    static func pause(endsBlock: Bool, speed: Float) -> Int {
+        let quiet = (endsBlock ? block : self.sentence) / Double(speed) - 2 * edge
         return Int(max(quiet, minPause) * 24_000)
     }
 
