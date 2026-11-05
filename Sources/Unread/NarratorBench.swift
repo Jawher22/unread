@@ -275,7 +275,7 @@ func gpuTime() -> (clients: Int, ms: Double) {
     return (clients, nanoseconds / 1e6)
 }
 
-private func writeWAV(_ samples: [Float], rate: Double, to url: URL) throws {
+func writeWAV(_ samples: [Float], rate: Double, to url: URL) throws {
     let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: rate, AVNumberOfChannelsKey: 1,
                                    AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
     let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -306,7 +306,7 @@ func stretchCheck() -> Bool {
         return out + s.finish()
     }
     var ok = true
-    for rate in [0.9, 1.15, 1.3, 1.5, 1.75, 2.0] {
+    for rate in [0.9, 1.15, 1.2, 1.3, 1.5, 1.75, 2.0] {
         for (name, x) in inputs {
             let whole = stretch(x, rate, pieces: [x.count])
             let same = stretch(x, rate, pieces: [3840, 1920, 2880, 7680, 5]) == whole && (name == "voice" || stretch(x, rate, pieces: [1]) == whole)
@@ -324,7 +324,7 @@ func stretchCheck() -> Bool {
     return ok
 }
 
-private func readWAV(_ url: URL) throws -> [Float] {
+func readWAV(_ url: URL) throws -> [Float] {
     let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
     guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { return [] }
     try file.read(into: buffer)

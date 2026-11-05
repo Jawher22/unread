@@ -73,6 +73,18 @@ if args.contains("--narrate") {
     exit(0)
 }
 
+if args.contains("--pace") {
+    // Silent: each voice's natural pace, and the narrator cloned from a time-compressed clip.
+    // `--pace [--reference-stretch 1.15,1.25] [--out DIR] [--speeds 1.15,1.3]`
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        await benchPace(args)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if let i = args.firstIndex(of: "--words") {
     // Silent: when each word of a sentence starts (#20), as the voice times it.
     // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.
