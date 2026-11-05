@@ -32,7 +32,7 @@ struct PrimedSentence {
             if let narrator {
                 defer { settled() }
                 return Prepared(sentence: sentence, scope: scope, extractMs: extractMs, words: sentence.words.indices,
-                                take: .narrator(NarratorTake(narrator, text: sentence.text, language: lang)), synthMs: 0)
+                                take: .narrator(NarratorTake(narrator, text: sentence.text, words: sentence.words[...], language: lang)), synthMs: 0)
             }
             let opening = OpeningClause.of(sentence)
             let speech = try? await kokoro.synthesize(OpeningClause.text(of: sentence, saying: opening), language: lang, speed: speed)
@@ -429,7 +429,8 @@ final class ReadingSession {
                 backlog = (backlog + [pending]).sorted { $0.seq < $1.seq }
                 return
             }
-            enqueue(pending, take: .narrator(NarratorTake(narrator, text: pending.narrated, language: pending.language)), synthMs: 0)
+            enqueue(pending, take: .narrator(NarratorTake(narrator, text: pending.narrated, words: pending.sentence.words[pending.words],
+                                                         language: pending.language)), synthMs: 0)
             return
         }
         let generation = self.generation, speed = self.speed, kokoro = self.kokoro
@@ -456,7 +457,7 @@ final class ReadingSession {
         case .kokoro: if timing != nil, timing?.synthMs == nil { timing?.synthMs = synthMs }
         case .narrator(let t):
             t.onArrival = { [weak self, weak t] in if let self, let t { self.arrived(t) } }
-            if !t.isComplete { inFlight = t; producing = true }
+            if !t.streamed { inFlight = t; producing = true }
         }
         scheduleNext()
         fill()
@@ -469,9 +470,9 @@ final class ReadingSession {
             print(String(format: "[take] #%d (%d chars) %.0f ms: %d samples%@", piece?.seq ?? -1, piece?.text.count ?? 0,
                          Date().timeIntervalSince(take.started) * 1000, take.samples.count, take.isComplete ? " complete" : ""))
         }
-        if take.isComplete, take === inFlight { inFlight = nil; producing = false }
+        if take.streamed, take === inFlight { inFlight = nil; producing = false }
         if live?.take === take { feed() } else { scheduleNext() }
-        if take.isComplete { fill() }
+        if take.streamed { fill() }
     }
 
     /// Hand the next piece to the player, if it's ready and the player has
@@ -483,7 +484,7 @@ final class ReadingSession {
             switch next.take {
             case .kokoro(let speech, let s): (whole, speed) = (speech, s)
             case .narrator(let take) where take.isComplete:
-                (whole, speed) = (take.speech(words: piece.sentence.words[piece.words], speed: self.speed), self.speed)
+                (whole, speed) = (take.speech(speed: self.speed), self.speed)
             case .narrator(let take):
                 guard take.samples.count >= Narrator.prebuffer(characters: piece.narrated.count, speed: self.speed, pace: take.pace) else { return }
                 ready.removeFirst()
@@ -553,6 +554,7 @@ final class ReadingSession {
     }
 
     private func goLive(_ piece: Pending, _ take: NarratorTake) {
+        take.live = true
         playerWantsMore = false
         spokeAnything = true
         live = Live(pending: piece, take: take, speed: speed, stretch: speed == 1 ? nil : TimeStretch(rate: Double(speed)))
@@ -580,7 +582,12 @@ final class ReadingSession {
         let keep = out.count - (complete ? max(quiet - edge, 0) : quiet)
         var said = Array(out[..<keep])
         l.held = Array(out[keep...])
-        guard !said.isEmpty || complete else { live = l; return }
+        guard !said.isEmpty || complete else {
+            // Nothing new to play, but an alignment may have come in.
+            if !l.runs.isEmpty { retime(&l, index: queued.count - 1, end: max(predictedEnd(l), l.said)) }
+            live = l
+            return
+        }
         if said.isEmpty { said = [0] }
         let ending: Player.Ending = !complete ? .clause(pause: []) : piece.endsSentence ? sentenceEnding(piece, speed: l.speed) : .clause(pause: Pacing.edgeQuiet)
         let consumed: @Sendable () -> Void = complete ? consumedCallback() : { @Sendable in }
@@ -594,22 +601,30 @@ final class ReadingSession {
         if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }
         l.said += said.count
         let index = first ? place(piece, at: start, continues: piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1) : queued.count - 1
-        let predicted = l.voiced + Int(Double(piece.narrated.count) / l.take.pace / Double(l.speed) * 24_000)
-        let end = complete ? l.said - min(quiet, edge) : max(predicted, l.said)
-        let base = queued[index].start
-        // Words the mark has reached keep their start, so it never steps back as the estimate grows
-        // (the player reports no position while paused; the mark draws `lead` ahead).
-        if let p = player.position { l.reached = max(l.reached, p - base + HighlightSettings.shared.style.lead.rawValue * 24) }
-        for (word, s) in zip(piece.words, WordTiming.estimated(piece.sentence.words[piece.words], voiced: l.voiced..<max(l.voiced, end))) {
-            if let old = queued[index].wordStarts[word], old <= l.reached { continue }
-            queued[index].wordStarts[word] = s.map { l.timeline($0) - base }
-        }
+        retime(&l, index: index, end: complete ? l.said - min(quiet, edge) : max(predictedEnd(l), l.said))
         if first { firstAudio(said, voice: .narrator, synthMs: LatencyLog.ms(since: l.take.started)) }
         if complete {
             logScheduled(piece, from: l.runs[0].at, to: l.timeline(l.said), ending: ending)
             live = nil
         } else {
             live = l
+        }
+    }
+
+    /// Where a live piece's voice should end, from the voice's pace, until it has all arrived.
+    private func predictedEnd(_ l: Live) -> Int {
+        l.voiced + Int(Double(l.pending.narrated.count) / l.take.pace / Double(l.speed) * 24_000)
+    }
+
+    /// The live piece's word starts as the take now times them (aligned as far as it has been, #58).
+    /// Words the mark has reached keep their start, so it never steps back as the timing is revised
+    /// (the player reports no position while paused; the mark draws `lead` ahead).
+    private func retime(_ l: inout Live, index: Int, end: Int) {
+        let base = queued[index].start
+        if let p = player.position { l.reached = max(l.reached, p - base + HighlightSettings.shared.style.lead.rawValue * 24) }
+        for (word, s) in zip(l.pending.words, l.take.wordStarts(voiced: l.voiced..<max(l.voiced, end), speed: l.speed)) {
+            if let old = queued[index].wordStarts[word], old <= l.reached { continue }
+            queued[index].wordStarts[word] = s.map { l.timeline($0) - base }
         }
     }
 
@@ -651,7 +666,13 @@ final class ReadingSession {
 
     private func sentenceFinished() {
         guard !cancelled, !queued.isEmpty else { return }
-        if debugSession { print("[session] finished \(queued[0].sentence.text.prefix(40).debugDescription), \(queued.count - 1) queued") }
+        if debugSession {
+            let done = queued[0]
+            print("[session] finished \(done.sentence.text.prefix(40).debugDescription), \(queued.count - 1) queued")
+            // On the player's timeline, as `--record` writes it: `--align --check` compares them with the recording.
+            let starts = done.wordStarts.map { $0.map { String(format: "%.3f", Double(done.start + $0) / 24_000) } ?? "-" }
+            print("[timing] \(starts.joined(separator: ",")) | \(done.sentence.text)")
+        }
         queued.removeFirst()
         markedWord = nil // the next sentence's first word takes over the mark
         sentenceNumber += 1
