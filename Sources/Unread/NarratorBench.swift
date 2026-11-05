@@ -223,7 +223,7 @@ private func footprint() -> (now: Double, peak: Double) {
 }
 
 /// GPU clients this process opened and their accumulated GPU time, from the GPU driver's registry entries.
-private func gpuTime() -> (clients: Int, ms: Double) {
+func gpuTime() -> (clients: Int, ms: Double) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
     process.arguments = ["-r", "-c", "AGXDeviceUserClient", "-l"]

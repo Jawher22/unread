@@ -90,6 +90,19 @@ actor Narrator {
     static let framesPerCharacter = 1.5
     static let maxPartCharacters = 200
 
+    /// Characters a second at 1×, and seconds of synthesis per second of audio (`--narrate`, §7).
+    static let pace = 14.9, realTimeFactor = 0.75
+    /// Audio a streamed piece needs before it starts playing, in samples at 1×: 0.1 s of playback
+    /// at 1×, 0.2 s at 1.2×, 0.3 s at 1.4×, since sped up it drains faster than the chunks come;
+    /// and past ~1.3×, where playback outruns synthesis, enough that the stream ends just as
+    /// playback catches up. Replaying those 49 sentences' arrivals, none ran dry at 1.15–1.5×
+    /// (2 at 1×, by ≤ 7 ms), for a median 0.1–0.36 s more before first audio.
+    static func prebuffer(characters: Int, speed: Float) -> Int {
+        let speed = Double(speed), audio = Double(characters) / pace
+        let playback: Double = 0.1 + 0.5 * max(speed - 1, 0), catchUp: Double = audio * (realTimeFactor - 1 / speed)
+        return Int(max(playback * speed, catchUp) * Double(sampleRate))
+    }
+
     private let queue: DispatchSerialQueue
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let engine: QwenANEEngine
