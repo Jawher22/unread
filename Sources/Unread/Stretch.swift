@@ -32,7 +32,7 @@ struct TimeStretch {
         while emitted < total {
             let due = Int((Double(frameIndex * hop) * rate).rounded())
             // Below 1×, the frame continuing the previous one can reach past the search window.
-            guard due + Self.search + n <= input.count, (previous ?? 0) + hop + n <= input.count else { break }
+            guard due + Self.search + n <= input.count, previous.map({ $0 + hop + n <= input.count }) ?? true else { break }
             let lo = max(due - Self.search, 0)
             let from = previous.map { lo + bestMatch(continuing: $0 + hop, from: lo, count: due + Self.search - lo + 1) } ?? due
             let at = frameIndex * hop

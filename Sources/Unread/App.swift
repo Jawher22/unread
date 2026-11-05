@@ -32,7 +32,7 @@ final class AppController: NSObject {
     private var voiceChoice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init) ?? .kokoro
     private enum NarratorState { case unloaded, loading, ready(Narrator), failed }
     private var narratorState = NarratorState.unloaded
-    private var voiceMenu: NSMenu!
+    private var voiceChoiceMenu: NSMenu!
     private var narrator: Narrator? {
         guard voiceChoice == .narrator, case .ready(let n) = narratorState else { return nil }
         return n
@@ -228,7 +228,7 @@ final class AppController: NSObject {
     }
 
     private func beginAiming() {
-        session?.setHighlightSuspended(true)
+        session?.setAiming(true)
         aim()
         aimTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.aim() }
@@ -281,6 +281,7 @@ final class AppController: NSObject {
         if let s = speculation, s.matches(doc, start) || !s.done { return }
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
+        if narrator != nil { session?.yieldNarrator() }
         spec.primed = PrimedSentence.prepare(doc, from: start, kokoro: voice, narrator: narrator, speed: speed,
                                              settled: { [weak spec] in spec?.done = true })
     }
@@ -291,7 +292,7 @@ final class AppController: NSObject {
         aimToken += 1 // drop any lookup still in flight
         aimInFlight = false
         overlay.hide()
-        session?.setHighlightSuspended(false)
+        session?.setAiming(false)
     }
 
     private func keyUp(held: TimeInterval) {
@@ -300,6 +301,8 @@ final class AppController: NSObject {
         let spec = speculation
         speculation = nil
         steadyAim = nil
+        // Jumping: stop the reading before aiming ends, or it would start the narrator on its next sentence first.
+        if held >= holdThreshold, target != nil { session?.stop() }
         endAiming()
         let releasedAt = Date()
 
@@ -418,14 +421,14 @@ final class AppController: NSObject {
         menu.addItem(speedItem)
 
         let readerItem = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
-        voiceMenu = NSMenu()
+        voiceChoiceMenu = NSMenu()
         for choice in [VoiceChoice.kokoro, .narrator] {
             let item = NSMenuItem(title: "", action: #selector(pickVoiceChoice(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = choice.rawValue
-            voiceMenu.addItem(item)
+            voiceChoiceMenu.addItem(item)
         }
-        readerItem.submenu = voiceMenu
+        readerItem.submenu = voiceChoiceMenu
         menu.addItem(readerItem)
         updateVoiceMenu()
 
@@ -466,7 +469,7 @@ final class AppController: NSObject {
     }
 
     private func updateVoiceMenu() {
-        for item in voiceMenu.items {
+        for item in voiceChoiceMenu.items {
             let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
             item.state = choice == voiceChoice ? .on : .off
             switch (choice, narratorState) {
@@ -481,7 +484,7 @@ final class AppController: NSObject {
     @objc private func pickVoiceChoice(_ item: NSMenuItem) {
         voiceChoice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
         UserDefaults.standard.set(voiceChoice.rawValue, forKey: VoiceChoice.key)
-        if case .failed = narratorState { narratorState = .unloaded }
+        if voiceChoice == .narrator, case .failed = narratorState { narratorState = .unloaded }
         if ready { loadNarratorIfChosen() }
         updateVoiceMenu()
         session?.narrator = narrator

@@ -108,6 +108,7 @@ enum Pacing {
     }
 
     static var edgeSamples: Int { Int(edge * 24_000) }
+    static var edgeQuiet: [Float] { [Float](repeating: 0, count: edgeSamples) }
 }
 
 extension Sentence {
@@ -169,6 +170,9 @@ final class ReadingSession {
         /// The display words this piece says.
         let words: Range<Int>
         var text: String { OpeningClause.text(of: sentence, saying: words) }
+        /// What the narrator says: not Kokoro's lookahead words, since streamed audio is on
+        /// the player before it could be cut after them.
+        var narrated: String { sentence.text(of: words) }
         var endsSentence: Bool { words.upperBound == sentence.words.count }
     }
     private struct Ready { let pending: Pending; let take: Take }
@@ -187,6 +191,7 @@ final class ReadingSession {
         /// The player's timeline runs on when it runs dry, so a chunk that comes late starts later.
         var runs: [(said: Int, at: Int)] = []
         var voiced = 0
+        var reached = Int.min
 
         func timeline(_ s: Int) -> Int {
             let run = runs.last { $0.said <= s } ?? runs[0]
@@ -295,10 +300,20 @@ final class ReadingSession {
     }
 
     /// While the user is aiming at a new spot, the preview owns the overlay.
-    func setHighlightSuspended(_ suspended: Bool) {
-        suspendHighlight = suspended
-        if suspended { markedWord = nil; overlay.hideWord() } else { showCurrent(scroll: false) }
+    func setAiming(_ aiming: Bool) {
+        suspendHighlight = aiming
+        if aiming { markedWord = nil; overlay.hideWord() } else { yielding = false; showCurrent(scroll: false); fill() }
     }
+
+    /// The hold's speculation needs the narrator, which says one sentence at a time: stop the
+    /// sentence it's synthesizing ahead and start no other until the hold ends. A sentence
+    /// streaming into the player can't be stopped without cutting it.
+    func yieldNarrator() {
+        guard narrator != nil else { return }
+        yielding = true
+        if let t = inFlight, live?.take !== t { redo { if case .narrator(let r) = $0.take { r === t } else { false } } }
+    }
+    private var yielding = false
 
     // MARK: Pipeline
     //
@@ -405,9 +420,12 @@ final class ReadingSession {
     /// the piece goes back into `backlog` instead of playing.
     private func synthesize(_ pending: Pending) {
         if let narrator {
-            // Not Kokoro's lookahead words: streamed audio is on the player before it could be cut after them.
-            let text = pending.sentence.text(of: pending.words)
-            enqueue(pending, take: .narrator(NarratorTake(narrator, text: text, language: pending.language)), synthMs: 0)
+            guard !yielding else {
+                producing = false
+                backlog = (backlog + [pending]).sorted { $0.seq < $1.seq }
+                return
+            }
+            enqueue(pending, take: .narrator(NarratorTake(narrator, text: pending.narrated, language: pending.language)), synthMs: 0)
             return
         }
         let generation = self.generation, speed = self.speed, kokoro = self.kokoro
@@ -463,7 +481,7 @@ final class ReadingSession {
             case .narrator(let take) where take.isComplete:
                 (whole, speed) = (take.speech(words: piece.sentence.words[piece.words], speed: self.speed), self.speed)
             case .narrator(let take):
-                guard take.samples.count >= Narrator.prebuffer(characters: piece.text.count, speed: self.speed) else { return }
+                guard take.samples.count >= Narrator.prebuffer(characters: piece.narrated.count, speed: self.speed) else { return }
                 ready.removeFirst()
                 nextToPlay += 1
                 goLive(piece, take)
@@ -480,10 +498,11 @@ final class ReadingSession {
             playerWantsMore = false
             spokeAnything = true
             let samples: [Float], ending: Player.Ending
-            if piece.endsSentence {
-                let said = speech.trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
+            if piece.endsSentence || !next.take.isKokoro {
+                // The rest of a split sentence follows a narrator piece after `Pacing.edge`, scheduled during it.
+                let said = speech.trimmingTrailingQuiet(keep: piece.endsSentence ? Pacing.edgeSamples : 0).samples
                 samples = said.isEmpty ? [0] : said
-                ending = sentenceEnding(piece, speed: speed)
+                ending = piece.endsSentence ? sentenceEnding(piece, speed: speed) : .clause(pause: Pacing.edgeQuiet)
             } else {
                 // Cut off the lookahead. The clause's own pause gives the slack to schedule the rest gaplessly.
                 let (clause, pause) = speech.cut(beforeWord: piece.words.count)
@@ -553,13 +572,13 @@ final class ReadingSession {
         } else {
             out += arrived
         }
-        let quiet = Speech(samples: out).trailingQuiet
-        let keep = out.count - (complete ? max(quiet - Pacing.edgeSamples, 0) : quiet)
+        let quiet = Speech(samples: out).trailingQuiet, edge = piece.endsSentence ? Pacing.edgeSamples : 0
+        let keep = out.count - (complete ? max(quiet - edge, 0) : quiet)
         var said = Array(out[..<keep])
         l.held = Array(out[keep...])
         guard !said.isEmpty || complete else { live = l; return }
         if said.isEmpty { said = [0] }
-        let ending: Player.Ending = complete && piece.endsSentence ? sentenceEnding(piece, speed: l.speed) : .clause(pause: [])
+        let ending: Player.Ending = !complete ? .clause(pause: []) : piece.endsSentence ? sentenceEnding(piece, speed: l.speed) : .clause(pause: Pacing.edgeQuiet)
         let consumed: @Sendable () -> Void = complete ? consumedCallback() : { @Sendable in }
         let start = player.schedule(said, ending: ending, consumed: consumed)
         let first = l.runs.isEmpty
@@ -571,10 +590,14 @@ final class ReadingSession {
         if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }
         l.said += said.count
         let index = first ? place(piece, at: start, continues: piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1) : queued.count - 1
-        let predicted = l.voiced + Int(Double(piece.text.count) / Narrator.pace / Double(l.speed) * 24_000)
-        let end = complete ? l.said - min(quiet, Pacing.edgeSamples) : max(predicted, l.said)
+        let predicted = l.voiced + Int(Double(piece.narrated.count) / Narrator.pace / Double(l.speed) * 24_000)
+        let end = complete ? l.said - min(quiet, edge) : max(predicted, l.said)
         let base = queued[index].start
+        // Words the mark has reached keep their start, so it never steps back as the estimate grows
+        // (the player reports no position while paused; the mark draws `lead` ahead).
+        if let p = player.position { l.reached = max(l.reached, p - base + HighlightSettings.shared.style.lead.rawValue * 24) }
         for (word, s) in zip(piece.words, WordTiming.estimated(piece.sentence.words[piece.words], voiced: l.voiced..<max(l.voiced, end))) {
+            if let old = queued[index].wordStarts[word], old <= l.reached { continue }
             queued[index].wordStarts[word] = s.map { l.timeline($0) - base }
         }
         if first { firstAudio(said, voice: .narrator, synthMs: LatencyLog.ms(since: l.take.started)) }

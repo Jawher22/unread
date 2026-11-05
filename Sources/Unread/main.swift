@@ -294,16 +294,16 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     MainActor.assumeIsolated {
         // Main-thread stall meter (#12): a 10 ms timer; any late tick means the
         // main thread (overlay drawing, hotkey) was busy for that long.
-        var lastTick = Date(), worst = 0.0, over50 = 0, over16 = 0, measuring = false
+        var lastTick = Date(), worst = 0.0, worstAt = 0.0, over50 = 0, over16 = 0, measuring = false, measuredFrom = Date()
         Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
             let gap = Date().timeIntervalSince(lastTick) * 1000 - 10
             lastTick = Date()
             guard measuring else { return }
-            worst = max(worst, gap)
+            if gap > worst { worst = gap; worstAt = Date().timeIntervalSince(measuredFrom) }
             if gap > 16 { over16 += 1 }
             if gap > 50 { over50 += 1 }
         }
-        func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms", worst, over16, over50)) }
+        func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms; the worst %.1f s in", worst, over16, over50, worstAt)) }
         let overlay = Overlay(), player = Player(muted: true), voice = Voice()
         func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
         let speed = value(after: "--speed").flatMap(Float.init) ?? 1.3
@@ -356,21 +356,39 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             let s = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: reader, player: player,
                                    overlay: overlay, startedAt: Date(), primed: primed)
             s.onFinish = { print("[session] finished"); done() }
+            var reading = s
             measuring = true
             lastTick = Date()
+            measuredFrom = lastTick
             // --speed-change-at T: switch to 1.75× after T seconds (#15).
             if let j = args.firstIndex(of: "--speed-change-at"), args.indices.contains(j + 1), let at = Double(args[j + 1]) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); s.speed = 1.75 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); reading.speed = 1.75 }
             }
             if let at = switchAt, let loaded = narrator {
                 DispatchQueue.main.asyncAfter(deadline: .now() + at) {
-                    s.narrator = s.narrator == nil ? loaded : nil
-                    print("[simulate] voice → \(s.narrator == nil ? "kokoro" : "narrator")")
+                    reading.narrator = reading.narrator == nil ? loaded : nil
+                    print("[simulate] voice → \(reading.narrator == nil ? "kokoro" : "narrator")")
                 }
             }
             s.start()
-            _ = s // keep alive
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); done() }
+            // --jump-at T: after T seconds, hold to jump back to the start, released 0.4 s later, as
+            // the app does (the session yields the narrator to the hold's speculation).
+            if let at = value(after: "--jump-at").flatMap(Double.init) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                    s.setAiming(true)
+                    s.yieldNarrator()
+                    let primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: s.narrator, speed: speed)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        print("[simulate] jumped")
+                        s.stop()
+                        reading = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: s.narrator,
+                                                 player: player, overlay: overlay, startedAt: Date(), primed: primed)
+                        reading.onFinish = { print("[session] finished"); done() }
+                        reading.start()
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { reading.stop(); done() }
         }
     }
     app.run()
