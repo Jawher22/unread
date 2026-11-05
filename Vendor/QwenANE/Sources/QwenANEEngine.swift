@@ -214,6 +214,10 @@ public final class QwenANEEngine: @unchecked Sendable {
     /// Read at the start of each `render`; set between renders.
     public var options = Options()
 
+    /// Unread: called for every chunk the vocoder decodes, before the stream trims it, on the vocoder queue.
+    /// Set between renders; for measuring when the first chunk exists, silent or not.
+    public var onDecode: (() -> Void)?
+
     /// Loads host tables, the vocoder head and the compiled Core ML models (`.mlmodelc`).
     /// The vocoder loads first: the Core ML models before anything that maps big files.
     public init(modelsDirectory: URL) throws {
@@ -306,10 +310,12 @@ public final class QwenANEEngine: @unchecked Sendable {
         let overlapped = voc.overlap
         voc.resetStats()
         let trimmer = onAudio.map { _ in QwenStreamTrimmer(sampleRate: sampleRate) }
+        let decoded = onDecode
         voc.onChunk = onAudio.map { deliver in
-            { chunk in let out = trimmer!.push(chunk); if !out.isEmpty { deliver(out) } }
+            { chunk in decoded?(); let out = trimmer!.push(chunk); if !out.isEmpty { deliver(out) } }
         }
-        defer { voc.onChunk = nil }
+        voc.speechStarted = trimmer.map { t in { t.hasStarted } }
+        defer { voc.onChunk = nil; voc.speechStarted = nil }
         voc.begin(context: voice.referenceFrames, continuation: carried > 0 ? continuation?.codes : nil)
         let g: GenResult
         do {

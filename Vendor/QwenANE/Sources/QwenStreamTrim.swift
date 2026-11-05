@@ -23,7 +23,13 @@ public final class QwenStreamTrimmer {
     private let window: Int
     private let maxLeading: Int
     private let maxTrailing: Int
-    private var started = false
+    private var started = false {
+        didSet { startedLock.lock(); startedShared = started; startedLock.unlock() }
+    }
+    private let startedLock = NSLock()
+    private var startedShared = false
+    /// Unread: whether speech has started, readable from any thread (`push` runs on the vocoder queue).
+    public var hasStarted: Bool { startedLock.lock(); defer { startedLock.unlock() }; return startedShared }
     private var peakDB = -120.0
     private var held: [Float] = []
 

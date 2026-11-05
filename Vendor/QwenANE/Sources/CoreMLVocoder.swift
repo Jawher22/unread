@@ -4,7 +4,7 @@ import Foundation
 /// Split streaming vocoder (the "final gated path" of render_fast.py --vocoder ane):
 ///   head     codes -> hidden, Swift/Accelerate on the CPU, exact streaming (VocoderHead)
 ///   upF      Core ML fp32, CPU only: hidden window (1,1024,W) -> (1,1536,4W)   [W = 12 first chunk, 20 after]
-///   upMall   Core ML fp16, ANE (cpuAndNeuralEngine): (1,1536,4W) -> waveform (1,1,W*1920)
+///   upMall   Core ML fp16, CPU only (Unread: upstream runs it on the ANE): (1,1536,4W) -> waveform (1,1,W*1920)
 /// Both are fixed-shape multifunction models ("w12", "w20"). Core ML's CPU (BNNS) path traps on
 /// enumerated shapes, and the CPU is all the iOS Simulator has and what a device falls back to; an
 /// older enumerated-shape upMall (no functions) still loads, as one model serving both widths.
@@ -55,6 +55,9 @@ final class ANEVocoder {
     /// right after it is decoded, in order, on the vocoder queue (or inline when `overlap` is off). Set it
     /// between lines; it must not block. nil (the default) changes nothing about the returned audio.
     var onChunk: (([Float]) -> Void)?
+    /// Unread: while this returns false (the stream has heard no speech yet), every chunk is the schedule's
+    /// first size, so the chunk that holds the voice's onset is a short one. Nil: the schedule as given.
+    var speechStarted: (() -> Bool)?
 
     init(modelsDirectory: URL) throws {
         head = try VocoderHead(dir: modelsDirectory.appendingPathComponent("vochead").path)
@@ -72,10 +75,12 @@ final class ANEVocoder {
             upF12 = try load("upF_12", .cpuOnly); upF20 = try load("upF_20", .cpuOnly)
         }
         if Self.functions(of: dir.appendingPathComponent("upMall.mlmodelc")).isSuperset(of: ["w12", "w20"]) {
-            upMall12 = try load("upMall", .cpuAndNeuralEngine, function: "w12")
-            upMall20 = try load("upMall", .cpuAndNeuralEngine, function: "w20")
+            // Unread: on the CPU. On the Neural Engine each call waits behind the talker's (85-130 ms a chunk
+            // instead of 27), which delays first audio by ~100 ms and makes short chunks expensive.
+            upMall12 = try load("upMall", .cpuOnly, function: "w12")
+            upMall20 = try load("upMall", .cpuOnly, function: "w20")
         } else {
-            upMall12 = try load("upMall", .cpuAndNeuralEngine); upMall20 = upMall12
+            upMall12 = try load("upMall", .cpuOnly); upMall20 = upMall12
         }
         in12 = try MLMultiArray(shape: [1, 1024, 12], dataType: .float32)
         in20 = try MLMultiArray(shape: [1, 1024, 20], dataType: .float32)
@@ -196,7 +201,7 @@ final class ANEVocoder {
     private func submitPending() {
         let codes = pending
         pending.removeAll(keepingCapacity: true)
-        chunkIndex += 1
+        if speechStarted?() ?? true { chunkIndex += 1 }
         unprimedFirstChunk = false
         submit { [self] in try chunk(codes) }
     }
