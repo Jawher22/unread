@@ -2,7 +2,7 @@ import Foundation
 import NaturalLanguage
 import QwenANE
 
-/// `--pace`: each voice's natural pace at 1× on one passage, silent. Speaking rate is characters
+/// `--pace`: the narrator's natural pace at 1× on one passage, silent. Speaking rate is characters
 /// per second of voice (each sentence's own leading and trailing quiet left out, pauses inside it
 /// kept); articulation rate leaves out pauses inside sentences too (quiet of 150 ms or more).
 /// Also the narrator cloned from its reference clip time-compressed by `TimeStretch`
@@ -15,14 +15,7 @@ func benchPace(_ args: [String]) async {
     let out = value("--out").map { URL(fileURLWithPath: $0) }
     if let out { try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true) }
 
-    let kokoro = Voice()
-    do { try await kokoro.prepareEnglish() } catch { print("kokoro failed to load: \(error)"); return }
     var takes: [(name: String, sentences: [[Float]])] = []
-    var kokoroSentences: [[Float]] = []
-    for text in passage {
-        kokoroSentences.append((try? await kokoro.synthesize(text, language: .english, speed: 1))?.samples ?? [])
-    }
-    takes.append(("kokoro 1.0x", kokoroSentences))
 
     let shipped: VoicePreset
     do { shipped = try VoicePreset.named("london-storyteller") } catch { print("\(error)"); return }

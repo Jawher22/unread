@@ -3,14 +3,20 @@ import NaturalLanguage
 import ApplicationServices
 import ServiceManagement
 
-enum VoiceChoice: String, Codable {
-    case kokoro, narrator
-    static let key = "voice"
+/// The reading speed, kept across launches. 1.2× by default: at 1× the London storyteller, the
+/// slowest preset, speaks 16.6 voiced characters a second (`--pace`), slow for reading along.
+enum ReadingSpeed {
+    static let key = "speed"
+    /// Before Kokoro was dropped, speed was kept per voice; the narrator's carries over.
+    private static let narratorKey = "speed.narrator"
+    static let options: [Float] = [0.9, 1.0, 1.15, 1.2, 1.3, 1.5, 1.75, 2.0]
 
-    /// Speed is kept per voice: at 1× the narrator speaks slower than Kokoro (`--pace`).
-    var speedKey: String { "speed.\(rawValue)" }
-    var defaultSpeed: Float { self == .narrator ? 1.2 : 1 }
-    var savedSpeed: Float { (UserDefaults.standard.object(forKey: speedKey) as? NSNumber)?.floatValue ?? defaultSpeed }
+    static var saved: Float {
+        let defaults = UserDefaults.standard
+        return ((defaults.object(forKey: key) ?? defaults.object(forKey: narratorKey)) as? NSNumber)?.floatValue ?? 1.2
+    }
+
+    static func save(_ speed: Float) { UserDefaults.standard.set(speed, forKey: key) }
 }
 
 /// The interaction:
@@ -24,7 +30,6 @@ enum VoiceChoice: String, Codable {
 final class AppController: NSObject {
     private let overlay = Overlay()
     private let player = Player()
-    private let voice = Voice()
     private let hotkey = ModifierHotkey()
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
@@ -33,17 +38,11 @@ final class AppController: NSObject {
     private var trustTimer: Timer?
 
     private var session: ReadingSession?
-    private var ready = false
-    private var voiceChoice: VoiceChoice { ReadingVoice.shared.choice }
-    private lazy var speed = voiceChoice.savedSpeed
+    private var speed = ReadingSpeed.saved
     private var speedMenu: NSMenu!
-    private enum NarratorState { case unloaded, loading, ready(Narrator), failed }
-    private var narratorState = NarratorState.unloaded
-    private var voiceChoiceMenu: NSMenu!
-    private var narrator: Narrator? {
-        guard voiceChoice == .narrator, case .ready(let n) = narratorState else { return nil }
-        return n
-    }
+    private var voiceItem: NSMenuItem!
+    /// Nil until it has loaded (a few seconds after launch), or if it can't.
+    private var narrator: Narrator?
 
     // Aiming state while the key is held.
     private var aimTimer: Timer?
@@ -87,7 +86,6 @@ final class AppController: NSObject {
         super.init()
         setUpMenu()
         NarratorVoices.shared.onChoose = { [weak self] in self?.narratorVoiceChosen($0.language) }
-        ReadingVoice.shared.onChoose = { [weak self] _ in self?.voiceChoiceChanged() }
         hotkey.onPress = { [weak self] in self?.keyDown() }
         hotkey.onRelease = { [weak self] held in self?.keyUp(held: held) }
         hotkey.onCancel = { [weak self] in
@@ -108,7 +106,7 @@ final class AppController: NSObject {
         print("[unread] accessibility trusted: \(trusted)")
         if !trusted { waitForAccessibility() }
         configureLoginItemOnFirstRun()
-        loadModels()
+        loadNarrator()
     }
 
     // MARK: Permissions
@@ -176,47 +174,34 @@ final class AppController: NSObject {
 
     // MARK: Models
 
-    private func loadModels() {
-        setStatus("Loading voice… (first run downloads the model)")
-        Task {
-            let t = Date()
-            do {
-                try await voice.prepareEnglish()
-                ready = true
-                print(String(format: "[unread] English voice ready in %.1fs", Date().timeIntervalSince(t)))
-                setStatus("Hold ⌃ and point to read")
-                loadNarratorIfChosen()
-            } catch {
-                print("[unread] failed to load English voice: \(error)")
-                setStatus("Voice failed to load — see terminal")
-            }
-            do {
-                try await voice.prepareFrench()
-                print("[unread] French voice ready")
-            } catch {
-                print("[unread] French voice unavailable: \(error)")
-            }
+    /// The narrator is the only voice: until it has loaded, ⌃ beeps. It loads in a few seconds,
+    /// about a minute the first time a new build runs (Core ML compiles it for the Neural Engine).
+    private func loadNarrator() {
+        guard Narrator.isInstalled() else {
+            NarratorVoices.shared.status = .missing
+            setStatus("Voice model missing: run scripts/fetch-narrator.sh")
+            print("[unread] \(Narrator.Failure.modelMissing(Narrator.modelDirectory, revision: Narrator.modelRevision))")
+            return
         }
-    }
-
-    private func loadNarratorIfChosen() {
-        guard voiceChoice == .narrator, case .unloaded = narratorState else { return }
-        narratorState = .loading
+        NarratorVoices.shared.status = .loading
+        setStatus("Loading voice…")
         updateVoiceMenu()
         Task {
             let t = Date()
             do {
                 let voices = NarratorVoices.shared
                 guard let english = voices.preset(for: .english) else { throw Narrator.Failure.voiceMissing("English") }
-                narratorState = .ready(try await Narrator.load(english: english, french: voices.preset(for: .french)))
+                narrator = try await Narrator.load(english: english, french: voices.preset(for: .french))
                 print(String(format: "[unread] narrator ready in %.1fs", Date().timeIntervalSince(t)))
+                voices.status = .ready
+                setStatus("Hold ⌃ and point to read")
                 NarratorVoices.languages.forEach(narratorVoiceChosen) // picked while it loaded
             } catch {
-                narratorState = .failed
-                print("[unread] narrator unavailable, reading with Kokoro: \(error)")
+                NarratorVoices.shared.status = .unavailable
+                setStatus("Voice failed to load: see the log")
+                print("[unread] narrator unavailable: \(error)")
             }
             updateVoiceMenu()
-            session?.narrator = narrator
         }
     }
 
@@ -224,7 +209,7 @@ final class AppController: NSObject {
     /// next sentence. Each pass re-reads the choice, so the last of several quick picks wins.
     private func narratorVoiceChosen(_ language: NLLanguage) {
         updateVoiceMenu()
-        guard case .ready(let narrator) = narratorState else { return }
+        guard let narrator else { return }
         Task {
             while let preset = NarratorVoices.shared.preset(for: language) {
                 do {
@@ -243,9 +228,9 @@ final class AppController: NSObject {
     // MARK: Hotkey
 
     private func keyDown() {
-        guard ready else { NSSound.beep(); return }
+        guard let narrator else { NSSound.beep(); return }
         player.warm() // open the audio device now, not on release
-        narrator?.wake() // after a while idle, its first sentence is slow; the hold's speculation starts ~0.3 s from now
+        narrator.wake() // after a while idle, its first sentence is slow; the hold's speculation starts ~0.3 s from now
         aimTarget = nil
         aimDocument = nil
         speculation = nil
@@ -311,12 +296,12 @@ final class AppController: NSObject {
     /// job (pointer moved on) finishes before the next starts, so it can delay
     /// a fresh one by at most one sentence.
     private func speculate(_ doc: ReadableDocument, from start: AnyObject) {
+        guard let narrator else { return }
         if let s = speculation, s.matches(doc, start) || !s.done { return }
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
-        if narrator != nil { session?.yieldNarrator() }
-        spec.primed = PrimedSentence.prepare(doc, from: start, kokoro: voice, narrator: narrator, speed: speed,
-                                             settled: { [weak spec] in spec?.done = true })
+        session?.yieldNarrator()
+        spec.primed = PrimedSentence.prepare(doc, from: start, narrator: narrator, settled: { [weak spec] in spec?.done = true })
     }
 
     private func endAiming() {
@@ -329,7 +314,7 @@ final class AppController: NSObject {
     }
 
     private func keyUp(held: TimeInterval) {
-        guard ready else { return }
+        guard narrator != nil else { return }
         let target = aimTarget
         let spec = speculation
         speculation = nil
@@ -401,12 +386,13 @@ final class AppController: NSObject {
 
     private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date,
                               gesture: LatencyRecord.Gesture, lookupMs: Double? = nil, primed: PrimedSentence? = nil) {
+        guard let narrator else { return }
         session?.stop()
         print("[unread] reading \(type(of: doc)) in pid \(AX.pid(doc.element))")
         let app = NSRunningApplication(processIdentifier: AX.pid(doc.element))?.bundleIdentifier
         let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs,
                                    speculative: gesture == .hold ? primed != nil : nil)
-        let s = ReadingSession(document: doc, start: start, speed: speed, kokoro: voice, narrator: narrator, player: player,
+        let s = ReadingSession(document: doc, start: start, speed: speed, narrator: narrator, player: player,
                                overlay: overlay, startedAt: releasedAt, timing: timing, primed: primed)
         s.onFinish = { [weak self, weak s] in
             guard let self, self.session === s else { return }
@@ -443,7 +429,7 @@ final class AppController: NSObject {
 
         let speedItem = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
         speedMenu = NSMenu()
-        for s: Float in [0.9, 1.0, 1.15, 1.2, 1.3, 1.5, 1.75, 2.0] {
+        for s in ReadingSpeed.options {
             let item = NSMenuItem(title: String(format: "%.2g×", s), action: #selector(pickSpeed(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = s
@@ -453,32 +439,11 @@ final class AppController: NSObject {
         speedItem.submenu = speedMenu
         menu.addItem(speedItem)
 
-        let readerItem = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
-        voiceChoiceMenu = NSMenu()
-        for choice in [VoiceChoice.kokoro, .narrator] {
-            let item = NSMenuItem(title: "", action: #selector(pickVoiceChoice(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = choice.rawValue
-            voiceChoiceMenu.addItem(item)
-        }
-        voiceChoiceMenu.addItem(.separator())
-        let presetsItem = NSMenuItem(title: "Narrator Voices…", action: #selector(openVoiceSettings), keyEquivalent: "")
-        presetsItem.target = self
-        voiceChoiceMenu.addItem(presetsItem)
-        readerItem.submenu = voiceChoiceMenu
-        menu.addItem(readerItem)
+        voiceItem = NSMenuItem(title: "", action: #selector(openVoiceSettings), keyEquivalent: "")
+        voiceItem.target = self
+        menu.addItem(voiceItem)
         updateVoiceMenu()
 
-        let voiceItem = NSMenuItem(title: "Kokoro English voice", action: nil, keyEquivalent: "")
-        let voiceMenu = NSMenu()
-        for v in ["af_heart", "af_bella", "af_nicole", "am_michael", "am_fenrir", "bf_emma", "bm_george", "bm_fable"] {
-            let item = NSMenuItem(title: v, action: #selector(pickVoice(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = v == "af_heart" ? .on : .off
-            voiceMenu.addItem(item)
-        }
-        voiceItem.submenu = voiceMenu
-        menu.addItem(voiceItem)
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -501,7 +466,7 @@ final class AppController: NSObject {
 
     @objc private func pickSpeed(_ item: NSMenuItem) {
         speed = item.representedObject as? Float ?? 1
-        UserDefaults.standard.set(speed, forKey: voiceChoice.speedKey)
+        ReadingSpeed.save(speed)
         session?.speed = speed
         updateSpeedMenu()
     }
@@ -511,45 +476,8 @@ final class AppController: NSObject {
     }
 
     private func updateVoiceMenu() {
-        let name = NarratorVoices.shared.preset(for: .english)?.name ?? "no voice"
-        for item in voiceChoiceMenu.items {
-            guard let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) else { continue }
-            item.state = choice == voiceChoice ? .on : .off
-            item.title = choice == .kokoro ? "Kokoro" : "Narrator — \(name)" + (narratorStatus.note.map { " (\($0))" } ?? "")
-        }
-        ReadingVoice.shared.narratorStatus = narratorStatus
-    }
-
-    private var narratorStatus: NarratorStatus {
-        switch narratorState {
-        case .unloaded: .notLoaded
-        case .loading: .loading
-        case .ready: .ready
-        case .failed: .unavailable
-        }
-    }
-
-    @objc private func pickVoiceChoice(_ item: NSMenuItem) {
-        ReadingVoice.shared.choose((item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro)
-    }
-
-    private func voiceChoiceChanged() {
-        speed = voiceChoice.savedSpeed
-        session?.speed = speed
-        updateSpeedMenu()
-        if voiceChoice == .narrator, case .failed = narratorState { narratorState = .unloaded }
-        if ready { loadNarratorIfChosen() }
-        updateVoiceMenu()
-        session?.narrator = narrator
-    }
-
-    @objc private func pickVoice(_ item: NSMenuItem) {
-        let v = item.title
-        item.menu?.items.forEach { $0.state = $0 === item ? .on : .off }
-        Task {
-            await voice.setEnglishVoice(v)
-            session?.kokoroVoiceChanged() // re-voice what's waiting behind the current sentence
-        }
+        let name = NarratorVoices.shared.preset(for: .english)?.name ?? "none"
+        voiceItem.title = "Voice: \(name)" + (NarratorVoices.shared.status.note.map { " (\($0))" } ?? "") + "…"
     }
 
     @objc private func openSettings() { SettingsWindow.shared.show() }

@@ -12,7 +12,7 @@ extension Sentence {
     var words: [Substring] { text.split(separator: " ") }
 }
 
-/// A synthesized sentence: its audio, and when each display word starts.
+/// A spoken sentence: its audio, and when each display word starts.
 struct Speech: Sendable {
     let samples: [Float]
     /// Sample offset into `samples` where each display word starts; nil for a
@@ -21,125 +21,9 @@ struct Speech: Sendable {
 }
 
 enum WordTiming {
-    /// One word as the voice said it: where it is in the audio, and how many
-    /// phoneme tokens it took (its spoken length).
-    struct Spoken: Equatable {
-        let samples: Range<Int>
-        let phonemes: Int
-    }
-
-    /// Kokoro's token ids: 0 is BOS/EOS (also between chunks), 16 is the
-    /// space between words, 1…15 are punctuation (pauses), the rest phonemes.
-    /// Same ids in the English v3 and French legacy vocabularies.
-    private static let boundary: Int32 = 0, space: Int32 = 16, lastPunctuation: Int32 = 15
-
-    /// The spoken words, from the per-token durations. A word runs from its
-    /// first token to its last phoneme (a trailing comma's pause isn't part
-    /// of it). Groups with no phoneme (a lone "—") are dropped.
-    static func spokenWords(ids: [Int32], durations: [Int32], sampleCount: Int) -> [Spoken] {
-        guard ids.count == durations.count, !ids.isEmpty else { return [] }
-        let frames = durations.reduce(0) { $0 + Int($1) }
-        guard frames > 0, sampleCount > 0 else { return [] }
-        let perFrame = Double(sampleCount) / Double(frames) // 600 at 24 kHz
-        var words: [Spoken] = []
-        var frame = 0, phonemes = 0
-        var start: Int?, end: Int?
-        func close() {
-            if let s = start, let e = end, e > s {
-                words.append(Spoken(samples: Int(Double(s) * perFrame)..<Int(Double(e) * perFrame), phonemes: phonemes))
-            }
-            start = nil; end = nil; phonemes = 0
-        }
-        for (id, d) in zip(ids, durations) {
-            if id == boundary || id == space {
-                close()
-            } else {
-                if start == nil { start = frame }
-                if id > lastPunctuation { end = frame + Int(d); phonemes += 1 }
-            }
-            frame += Int(d)
-        }
-        close()
-        return words
-    }
-
     /// Lowercased letters and digits: what two spellings of a word share.
     static func key<S: StringProtocol>(_ word: S) -> String {
         String(word.lowercased().filter { $0.isLetter || $0.isNumber })
-    }
-
-    /// When each display word starts, in samples.
-    ///
-    /// Two steps. The text the voice read (`spokenText`, with numbers and
-    /// symbols spelled out: "$45" → "forty five dollars") is matched to the
-    /// spoken words by length, since the voice spells acronyms out ("API" →
-    /// three words) and runs some French phrases together ("tout le monde" →
-    /// one). Then the display words are matched to that text by spelling.
-    static func starts(display: [Substring], spoken: [Spoken], spokenText: String?) -> [Int?] {
-        guard !display.isEmpty, !spoken.isEmpty else { return display.map { _ in nil } }
-        let source = spokenText.map { $0.split(whereSeparator: \.isWhitespace) } ?? display
-        let said = source.filter { !key($0).isEmpty }
-        guard !said.isEmpty else { return display.map { _ in nil } }
-        let saidStarts = group(said, spoken)
-        return align(display.map(key), said.map(key)).map { $0.flatMap { saidStarts[$0] } }
-    }
-
-    /// Start sample of each written word, by a monotone length-based
-    /// alignment (Gale–Church style) of written words to spoken words: one
-    /// written word may take up to four spoken words, or up to three written
-    /// words share one. Words sharing a spoken word split it by their length.
-    static func group(_ written: [Substring], _ spoken: [Spoken]) -> [Int?] {
-        let n = written.count, m = spoken.count
-        // Expected spoken length: about one phoneme per letter, more for an
-        // acronym the voice spells out letter by letter.
-        let expected = written.map { w -> Double in
-            let letters = Double(key(w).count)
-            let isAcronym = w.count >= 2 && w.filter(\.isLetter).count >= 2 && w.allSatisfy { !$0.isLetter || $0.isUppercase }
-            return isAcronym ? letters * 2.5 : letters
-        }
-        // Calibrate letters → phonemes on this sentence.
-        let ratio = Double(spoken.reduce(0) { $0 + $1.phonemes }) / max(expected.reduce(0, +), 1)
-        let moves: [(a: Int, b: Int, penalty: Double)] = [(1, 1, 0), (1, 2, 0.6), (2, 1, 0.6), (1, 3, 1.0), (3, 1, 1.0), (1, 4, 1.4)]
-        let inf = Double.infinity
-        var cost = Array(repeating: Array(repeating: inf, count: m + 1), count: n + 1)
-        var from = Array(repeating: Array(repeating: -1, count: m + 1), count: n + 1)
-        cost[0][0] = 0
-        for i in 0...n {
-            for j in 0...m where cost[i][j] < inf {
-                for (k, mv) in moves.enumerated() where i + mv.a <= n && j + mv.b <= m {
-                    let e = expected[i..<(i + mv.a)].reduce(0, +) * ratio
-                    let p = Double(spoken[j..<(j + mv.b)].reduce(0) { $0 + $1.phonemes })
-                    let c = cost[i][j] + abs(log((p + 1) / (e + 1))) + mv.penalty
-                    if c < cost[i + mv.a][j + mv.b] { cost[i + mv.a][j + mv.b] = c; from[i + mv.a][j + mv.b] = k }
-                }
-            }
-        }
-        guard cost[n][m] < inf else { return proportional(written, spoken) }
-        var out = [Int?](repeating: nil, count: n)
-        var i = n, j = m
-        while i > 0, j > 0, from[i][j] >= 0 {
-            let mv = moves[from[i][j]]
-            i -= mv.a; j -= mv.b
-            let first = spoken[j].samples
-            if mv.a == 1 { out[i] = first.lowerBound; continue }
-            // Several written words in one spoken word: split it by letters.
-            let lengths = expected[i..<(i + mv.a)], total = max(lengths.reduce(0, +), 1)
-            var at = 0.0
-            for (k, len) in lengths.enumerated() {
-                out[i + k] = first.lowerBound + Int(Double(first.count) * at / total)
-                at += len
-            }
-        }
-        return out
-    }
-
-    /// Fallback: written words spread over the speech by their length.
-    private static func proportional(_ written: [Substring], _ spoken: [Spoken]) -> [Int?] {
-        let lengths = written.map { max(key($0).count, 1) }
-        let total = lengths.reduce(0, +)
-        let first = spoken.first!.samples.lowerBound, span = Double(spoken.last!.samples.upperBound - first)
-        var at = 0
-        return lengths.map { len in defer { at += len }; return first + Int(span * Double(at) / Double(total)) }
     }
 
     /// For each display word, the index of the first said word that belongs

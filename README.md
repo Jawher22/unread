@@ -26,22 +26,23 @@ English and French are detected per sentence and switched automatically.
 
 Same playbook as [Hex](https://github.com/kitlangton/Hex), in reverse:
 
-- **Small model on the Neural Engine.** [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) via [FluidAudio](https://github.com/FluidInference/FluidAudio)'s CoreML port: ~25–35× real time on Apple Silicon.
-- **Always warm.** Models load once at launch (under 1 s after the first download) and stay resident.
-- **Work starts on key-down.** The audio device opens and the target paragraph is resolved while you're still holding the key.
-- **Pipelined.** Three sentences are synthesized ahead of the one playing, so playback is gapless.
+- **A narrator on the Neural Engine.** Qwen3-TTS 1.7B through Core ML ([TinyTrashLabs' model set](https://huggingface.co/tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE)), cloning one of 34 designed voices (English and French), streaming as it speaks: ~0.7× real time, the GPU untouched.
+- **Always warm.** The model loads once at launch (a few seconds) and stays resident; ⌃ going down wakes it after a while idle.
+- **Work starts on key-down.** The audio device opens, the target paragraph is resolved and its first sentence is synthesized while you're still holding the key.
+- **Pipelined.** Sentences are synthesized ahead of the one playing, so playback is gapless.
 
-Measured on an M-series MacBook: 80–250 ms to synthesize a sentence, ~25 ms to find the document, ~70 ms to extract 12 sentences with their on-screen positions.
+Measured on an M-series MacBook: ~0.3–0.6 s from release to first audio after a hold, ~25 ms to find the document, ~70 ms to extract 12 sentences with their on-screen positions.
 
 ## Requirements
 
 - Apple Silicon Mac, macOS 15 or later
 - Accessibility permission (to read on-screen text and watch the hotkey)
-- ~360 MB of models, downloaded on first launch to `~/.cache/fluidaudio`
+- The narrator's model (2.88 GB), fetched once with `scripts/fetch-narrator.sh`, and the word aligner's (~100 MB), downloaded on first launch to `~/.cache/fluidaudio`
 
 ## Build and run
 
 ```bash
+scripts/fetch-narrator.sh     # the voice model, once
 scripts/bundle.sh --install   # builds, signs and installs ~/Applications/Unread.app
 open ~/Applications/Unread.app
 ```
@@ -55,7 +56,7 @@ For quick iteration you can also run the bare binary from a terminal that has Ac
 Developer tools:
 
 ```bash
-./.build/release/Unread --bench     # silent: model load + synthesis timings
+./.build/release/Unread --narrate   # silent: the voice's load, first audio and speed
 ./.build/release/Unread --extract   # print the sentences Unread would read from the front window
 ./.build/release/Unread --stats     # latency percentiles from your real use
 ```
@@ -68,7 +69,9 @@ Sources/Unread/
   AX.swift        Accessibility API helpers
   Document.swift  Finds readable text under the pointer and walks it sentence by sentence
   Session.swift   Synthesis pipeline, playback queue, highlight following
-  Audio.swift     Kokoro voices (EN v3 + FR), language detection, gapless AVAudioEngine playback
+  Narrator.swift  The voice: Qwen3-TTS on the Neural Engine, streaming sentence by sentence
+  Align.swift     Word timing by forced alignment of the voice's audio
+  Audio.swift     Language detection, gapless AVAudioEngine playback
   Overlay.swift   Click-through highlight layer above every app
   Latency.swift   Per-reading timing log (~/Library/Logs/Unread/latency.jsonl) and --stats
   App.swift       Menu bar, interaction state machine
@@ -88,13 +91,13 @@ Text comes from the macOS Accessibility tree, not screenshots. Web content is re
 
 - Main-content extraction (skip navigation and other page chrome)
 - Floating mini-player pill, media keys and Now Playing
-- Faster first audio (synthesize the opening clause first)
-- More voices (Pocket TTS, voice cloning), better French
+- "Design a voice" and "use my own voice"
 - PDF and EPUB, OCR fallback
 - Notarized release, Homebrew cask
 
 ## Credits
 
-- [FluidAudio](https://github.com/FluidInference/FluidAudio): CoreML speech models for Apple devices
-- [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): the voice
+- Qwen3-TTS: the voice, through [Gloam Voice Studio](https://github.com/TinyTrashLabs/gloam-voice-studio)'s Core ML runtime (vendored, see `Vendor/QwenANE`)
+- [FluidAudio](https://github.com/FluidInference/FluidAudio): CoreML speech models for Apple devices (the word aligner)
+- [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): the first voice
 - [Hex](https://github.com/kitlangton/Hex): the inspiration for the feel

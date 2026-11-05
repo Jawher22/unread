@@ -1,48 +1,5 @@
 import AVFoundation
-import FluidAudio
 import NaturalLanguage
-
-/// Owns the TTS models. Kept loaded and warm for the app's lifetime: the
-/// first synthesis after load compiles for the Neural Engine and is slow,
-/// every one after that is a few tens of milliseconds.
-actor Voice {
-    private let english = KokoroAneManager(variant: .english, version: .v3)
-    private var french: KokoroAneManager?
-    private(set) var englishVoice = "af_heart"
-
-    func prepareEnglish() async throws {
-        try await english.initialize(preloadVoices: [englishVoice])
-        _ = try await english.synthesizeDetailed(text: "Ready to read.", voice: englishVoice)
-    }
-
-    /// French lives on Kokoro's legacy pipeline (v3 is English/JA/ZH only).
-    func prepareFrench() async throws {
-        let m = KokoroAneManager(variant: .french)
-        try await m.initialize()
-        _ = try await m.synthesizeDetailed(text: "Bonjour.")
-        french = m
-    }
-
-    func setEnglishVoice(_ v: String) { englishVoice = v }
-
-    /// Audio for `text`, with when each of its words (split at spaces) starts.
-    func synthesize(_ text: String, language: NLLanguage, speed: Float) async throws -> Speech {
-        let r = language == .french && french != nil
-            ? try await french!.synthesizeDetailed(text: text, voice: "ff_siwis", speed: speed)
-            : try await english.synthesizeDetailed(text: text, voice: englishVoice, speed: speed)
-        let spoken = WordTiming.spokenWords(ids: r.inputIds, durations: r.predictedDurations, sampleCount: r.samples.count)
-        let display = text.split(separator: " ")
-        return Speech(samples: r.samples, wordStarts: WordTiming.starts(display: display, spoken: spoken, spokenText: r.normalizedText))
-    }
-
-    /// The voice's own view of a sentence, for `--words`.
-    func spokenWords(_ text: String, language: NLLanguage) async throws -> (normalized: String?, phonemes: String, words: [WordTiming.Spoken]) {
-        let r = language == .french && french != nil
-            ? try await french!.synthesizeDetailed(text: text, voice: "ff_siwis")
-            : try await english.synthesizeDetailed(text: text, voice: englishVoice)
-        return (r.normalizedText, r.phonemes, WordTiming.spokenWords(ids: r.inputIds, durations: r.predictedDurations, sampleCount: r.samples.count))
-    }
-}
 
 /// Picks English or French per sentence, but sticky: short or ambiguous
 /// sentences keep the current language so a stray "Paris" doesn't flip it.
@@ -118,9 +75,9 @@ final class Player {
     enum Ending {
         /// The quiet that closes a sentence (`Pacing`); `played` fires once it's heard.
         case sentence(pause: Int, played: @Sendable () -> Void)
-        /// More of the same sentence, after `pause`: the clause break the
-        /// piece ends with (#14).
-        case clause(pause: [Float])
+        /// More of the same sentence follows, after `pause`: the next chunk of a
+        /// sentence streaming into the player.
+        case more(pause: [Float])
     }
 
     /// Schedule one piece of speech and the pause after it. `consumed` fires
@@ -139,7 +96,7 @@ final class Player {
         let (pause, played): ([Float], (@Sendable () -> Void)?)
         switch ending {
         case .sentence(let samples, let p): (pause, played) = ([Float](repeating: 0, count: samples), p)
-        case .clause(let p): (pause, played) = (p, nil)
+        case .more(let p): (pause, played) = (p, nil)
         }
         let start = claim(samples.count + pause.count)
         node.scheduleBuffer(speech, completionCallbackType: .dataConsumed) { _ in consumed() }
@@ -225,30 +182,10 @@ extension Speech {
     static let quietLevel: Float = 0.01
     static let window = 240
 
-    /// Quiet samples at the start of the audio (Kokoro leads every chunk with ~0.3 s).
+    /// Quiet samples at the start of the audio.
     var leadingQuiet: Int { quietRuns(in: 0..<samples.count).first.map { $0.lowerBound == 0 ? $0.count : 0 } ?? 0 }
-    /// Quiet samples at the end of the audio (Kokoro ends every chunk with ~0.5 s).
+    /// Quiet samples at the end of the audio.
     var trailingQuiet: Int { quietRuns(in: 0..<samples.count).last.map { $0.upperBound == samples.count ? $0.count : 0 } ?? 0 }
-
-    /// The first `words` display words of this speech, cut where the voice
-    /// pauses before the next word: the speech, and that pause (#14). With
-    /// no pause there, it's cut at the quietest moment, with no pause.
-    func cut(beforeWord words: Int) -> (speech: Speech, pause: [Float]) {
-        let from = wordStarts.prefix(words).last { $0 != nil }.flatMap { $0 } ?? 0
-        // Word starts run a little behind the voice; look just past the next one.
-        let next = wordStarts.dropFirst(words).first { $0 != nil }.flatMap { $0 }.map { $0 + Self.window * 10 }
-        let range = from..<min(next ?? samples.count, samples.count)
-        let cut: Range<Int>
-        if let pause = quietRuns(in: range).max(by: { $0.count < $1.count }), pause.count >= Self.window * 2 {
-            cut = pause
-        } else {
-            let quietest = stride(from: range.lowerBound, to: range.upperBound, by: Self.window).min { a, b in
-                peak(a) < peak(b)
-            } ?? range.upperBound
-            cut = quietest..<quietest
-        }
-        return (Speech(samples: Array(samples[..<cut.lowerBound]), wordStarts: Array(wordStarts.prefix(words))), Array(samples[cut]))
-    }
 
     /// The same speech without the quiet it starts with, but for the last
     /// `keep` samples before the voice.

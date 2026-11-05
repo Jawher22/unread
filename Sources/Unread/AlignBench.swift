@@ -1,12 +1,13 @@
 import AVFoundation
 import NaturalLanguage
 
-/// `--align [--narrator] ["sentence"…]`: forced alignment (#58) against Kokoro's own word timing,
-/// which is exact (its durations), next to the character estimate the narrator used before.
-/// `--narrator` also aligns the narrator's audio (no ground truth: aligned against estimated).
+/// `--align ["sentence"…]`: forced alignment (#58) of the narrator's audio, next to the character
+/// estimate it falls back to, and a partial alignment of the first 60% of the audio, as while it
+/// streams. No ground truth: Kokoro's word starts were exact (its durations) and were the reference
+/// until it was dropped (aligned: median 50 ms off, p95 145 ms). `--align --check` measures a reading end to end.
 func benchAlign(_ args: [String]) async {
     if let i = args.firstIndex(of: "--check"), args.indices.contains(i + 2) {
-        await checkRecording(URL(fileURLWithPath: args[i + 1]), log: URL(fileURLWithPath: args[i + 2]))
+        await checkRecording(URL(fileURLWithPath: args[i + 1]), log: URL(fileURLWithPath: args[i + 2]), verbose: args.contains("--verbose"))
         return
     }
     let given = args.drop { $0 != "--align" }.dropFirst().filter { !$0.hasPrefix("--") }
@@ -25,78 +26,49 @@ func benchAlign(_ args: [String]) async {
         "The real lesson of the plot is patience.",
     ] : Array(given)
 
-    let voice = Voice()
-    do { try await voice.prepareEnglish() } catch { print("Kokoro failed to load: \(error)"); return }
     var t = Date()
     let aligner: Aligner
     do { aligner = try await Aligner.load() } catch { print("aligner failed to load: \(error)"); return }
     print(String(format: "aligner loaded in %.2f s", Date().timeIntervalSince(t)))
     _ = try? await aligner.starts(display: ["Warm", "up."], samples: [Float](repeating: 0, count: 24_000))
-
-    var alignedErrors: [Double] = [], estimatedErrors: [Double] = [], partialErrors: [Double] = []
-    var missing = 0, words = 0, callMs: [Double] = []
-    for s in sentences {
-        guard let speech = try? await voice.synthesize(s, language: .english, speed: 1) else { print("synthesis failed: \(s)"); continue }
-        let display = s.split(separator: " ")
-        t = Date()
-        guard let aligned = try? await aligner.starts(display: display, samples: speech.samples) else { print("alignment failed: \(s)"); continue }
-        let ms = Date().timeIntervalSince(t) * 1000
-        callMs.append(ms)
-        let quiet = Speech(samples: speech.samples)
-        let estimated = WordTiming.estimated(display[...], voiced: quiet.leadingQuiet..<max(quiet.leadingQuiet, speech.samples.count - quiet.trailingQuiet))
-        // Streaming: the first 60% of the audio, as a live sentence has it partway.
-        let cut = speech.samples.count * 6 / 10
-        let partial = (try? await aligner.starts(display: display, samples: Array(speech.samples[..<cut]), complete: false)) ?? []
-        print(String(format: "\n%.0f ms for %.1f s: %@", ms, Double(speech.samples.count) / 24_000, s))
-        print("      truth  aligned  estimate  partial")
-        for (i, w) in display.enumerated() {
-            let truth = speech.wordStarts[i]
-            func cell(_ v: Int?) -> String { v.map { String(format: "%6.2f", Double($0) / 24_000) } ?? "     –" }
-            let p = i < partial.count ? partial[i] : nil
-            print("    \(cell(truth))   \(cell(aligned[i]))    \(cell(estimated[i]))   \(cell(p))  \(w)")
-            guard let truth else { continue }
-            words += 1
-            if let a = aligned[i] { alignedErrors.append(Double(a - truth) / 24) } else { missing += 1 }
-            if let e = estimated[i] { estimatedErrors.append(Double(e - truth) / 24) }
-            if let p { partialErrors.append(Double(p - truth) / 24) }
-        }
-    }
     func summary(_ name: String, _ errors: [Double]) {
         let abs = errors.map(Swift.abs).sorted()
         guard !abs.isEmpty else { print("\(name): none"); return }
         func q(_ p: Double) -> Double { abs[min(abs.count - 1, Int(Double(abs.count) * p))] }
         let bias = errors.reduce(0, +) / Double(errors.count)
-        print(String(format: "%@: %d words, |error| median %.0f ms, p90 %.0f, p95 %.0f, max %.0f; mean signed %+.0f ms",
+        print(String(format: "%@: %d words, |difference| median %.0f ms, p90 %.0f, p95 %.0f, max %.0f; mean signed %+.0f ms",
                      name, errors.count, q(0.5), q(0.9), q(0.95), abs.last!, bias))
     }
-    print("\nagainst Kokoro's own word starts (\(words) words, \(missing) without an aligned start):")
-    summary("aligned  ", alignedErrors)
-    summary("estimated", estimatedErrors)
-    summary("partial  ", partialErrors)
-    let sorted = callMs.sorted()
-    if !sorted.isEmpty { print(String(format: "alignment call: median %.0f ms, max %.0f ms", sorted[sorted.count / 2], sorted.last!)) }
 
-    guard args.contains("--narrator") else { return }
     let narrator: Narrator
     do { narrator = try await Narrator.load(english: try VoicePreset.named("london-storyteller"), french: nil) } catch { print("narrator: \(error)"); return }
-    var drift: [Double] = []
-    for s in sentences.prefix(6) {
+    var drift: [Double] = [], partialDrift: [Double] = [], callMs: [Double] = []
+    for s in sentences {
         var samples: [Float] = []
         do { for try await chunk in narrator.speak(s, language: .english) { samples += chunk } } catch { print("narrator: \(error)"); continue }
         let display = s.split(separator: " ")
         t = Date()
-        guard let aligned = try? await aligner.starts(display: display, samples: samples) else { continue }
+        guard let aligned = try? await aligner.starts(display: display, samples: samples) else { print("alignment failed: \(s)"); continue }
         let ms = Date().timeIntervalSince(t) * 1000
+        callMs.append(ms)
         let quiet = Speech(samples: samples)
         let estimated = WordTiming.estimated(display[...], voiced: quiet.leadingQuiet..<max(quiet.leadingQuiet, samples.count - quiet.trailingQuiet))
-        print(String(format: "\nnarrator, %.0f ms for %.1f s: %@", ms, Double(samples.count) / 24_000, s))
+        let partial = (try? await aligner.starts(display: display, samples: Array(samples[..<(samples.count * 6 / 10)]), complete: false)) ?? []
+        print(String(format: "\n%.0f ms for %.1f s: %@", ms, Double(samples.count) / 24_000, s))
+        print("    aligned  estimate  partial")
         for (i, w) in display.enumerated() {
             func cell(_ v: Int?) -> String { v.map { String(format: "%6.2f", Double($0) / 24_000) } ?? "     –" }
-            print("    \(cell(aligned[i]))    \(cell(estimated[i]))  \(w)")
+            let p = i < partial.count ? partial[i] : nil
+            print("    \(cell(aligned[i]))    \(cell(estimated[i]))   \(cell(p))  \(w)")
             if let a = aligned[i], let e = estimated[i] { drift.append(Double(a - e) / 24) }
+            if let a = aligned[i], let p { partialDrift.append(Double(p - a) / 24) }
         }
     }
-    summary("\nnarrator: aligned against estimated", drift)
+    print("")
+    summary("estimate against aligned", drift)
+    summary("partial against whole   ", partialDrift)
+    let sorted = callMs.sorted()
+    if !sorted.isEmpty { print(String(format: "alignment call: median %.0f ms, max %.0f ms", sorted[sorted.count / 2], sorted.last!)) }
 
     // Both on the Neural Engine: does aligning (once a second, as while a sentence streams) slow the narrator?
     let filler = [Float](repeating: 0, count: 24_000 * 6)
@@ -122,8 +94,8 @@ func benchAlign(_ args: [String]) async {
 
 /// `--align --check out.wav session.log`: the word starts a reading scheduled (`[timing]` lines, logged
 /// with `UNREAD_DEBUG_OVERLAY=1`) against an alignment of what `--simulate --record` heard. Checks
-/// the session's timing end to end (stretch, live runs, trims), not the aligner.
-func checkRecording(_ wav: URL, log: URL) async {
+/// the session's timing end to end (stretch, live runs, trims), not the aligner. `--verbose`: every word, scheduled and heard.
+func checkRecording(_ wav: URL, log: URL, verbose: Bool = false) async {
     guard let file = try? AVAudioFile(forReading: wav),
           let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
           (try? file.read(into: buffer)) != nil, file.processingFormat.sampleRate == 24_000 else { print("can't read \(wav.path) at 24 kHz"); return }
@@ -142,9 +114,16 @@ func checkRecording(_ wav: URL, log: URL) async {
         let from = max(Int((first - 0.3) * 24_000), 0)
         let next = sentences.dropFirst(k + 1).lazy.compactMap { $0.starts.compactMap { $0 }.first }.first
         let to = min(next.map { Int($0 * 24_000) } ?? audio.count, audio.count)
-        guard from < to, let heard = try? await aligner.starts(display: s.text.split(separator: " "), samples: Array(audio[from..<to])) else { continue }
+        // Aligned as reading aligns it: the words the narrator was given (#18), mapped back to the page's.
+        let display = s.text.split(separator: " "), spoken = Speakable(display, language: .english)
+        guard from < to, let said = try? await aligner.starts(display: spoken.words, samples: Array(audio[from..<to])) else { continue }
+        let heard = spoken.displayStarts(said, displayCount: display.count)
         var worst = 0.0, sum = 0.0, n = 0
-        for (scheduled, h) in zip(s.starts, heard) {
+        for (i, (scheduled, h)) in zip(s.starts, heard).enumerated() {
+            if verbose {
+                print(String(format: "    %@  %@  %@", scheduled.map { String(format: "%6.2f", $0) } ?? "     –",
+                             h.map { String(format: "%6.2f", Double(from + $0) / 24_000) } ?? "     –", String(display[i])))
+            }
             guard let scheduled, let h else { continue }
             let e = (scheduled - Double(from + h) / 24_000) * 1000
             errors.append(e); sum += e; n += 1
@@ -157,3 +136,48 @@ func checkRecording(_ wav: URL, log: URL) async {
     print(String(format: "\nscheduled against heard: %d words, |error| median %.0f ms, p95 %.0f, max %.0f; mean signed %+.0f ms",
                  abs.count, abs[abs.count / 2], abs[min(abs.count - 1, abs.count * 95 / 100)], abs.last!, errors.reduce(0, +) / Double(errors.count)))
 }
+
+/// `--hear ["sentence"…] [--voice id] [--raw]`: what the narrator says for each sentence, silent. It
+/// says the sentence as reading gives it (`Speakable`; `--raw`: as written), and the aligner's model
+/// transcribes the audio (greedy CTC, so expect the odd misheard word). For technical text (#18).
+func benchHear(_ args: [String]) async {
+    func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
+    let flagValues = Set(["--voice"].compactMap(value))
+    let given = args.drop { $0 != "--hear" }.dropFirst().filter { !$0.hasPrefix("--") && !flagValues.contains($0) }
+    let sentences = given.isEmpty ? hearCases : Array(given)
+    let narrator: Narrator, aligner: Aligner
+    do {
+        narrator = try await Narrator.load(english: try VoicePreset.named(value("--voice") ?? NarratorVoices.defaults[.english]!), french: nil)
+        aligner = try await Aligner.load()
+    } catch { print("\(error)"); return }
+    for s in sentences {
+        let given = args.contains("--raw") ? s : Speakable(s, language: .english).text
+        var samples: [Float] = []
+        do { for try await chunk in narrator.speak(given, language: .english) { samples += chunk } } catch { print("narrator: \(error)"); continue }
+        let heard = (try? await aligner.transcribe(samples)) ?? "?"
+        print(String(format: "\n%5.1f s  %@", Double(samples.count) / 24_000, s) + (given == s ? "" : "\n         given: \(given)")
+              + "\n         heard: \(heard)")
+    }
+}
+
+/// Technical writing as it appears in blogs and LLM replies.
+private let hearCases = [
+    "Rename user_id to account_id in the config.",
+    "Call getUserName() before the request.",
+    "Run it with --dry-run and the --verbose flag.",
+    "Edit Sources/Unread/App.swift and restart the app.",
+    "The model has 82M parameters and runs at 2.2 s per page.",
+    "Version v3.5 replaced v3.4.1 in May.",
+    "It takes ~250 ms, e.g. on an M1, i.e. most Macs.",
+    "See #48 and PR #73 for the details.",
+    "It's 3× faster vs. the old one, at 1.2× speed.",
+    "Set CORS_ORIGIN to * and restart the API.",
+    "The p95 latency dropped from 1.4s to 380ms.",
+    "On 2026-11-05 we shipped it at 10:30 AM.",
+    "Use JSON over HTTP, not XML over gRPC.",
+    "Read docs/design.md, section 4.2, then the README.",
+    "It costs $45.99 a month, or 10% less yearly.",
+    "The cache hit rate went from 40% to 92.5%.",
+    "Use a->b and x => y, but never a != b.",
+    "Install it with npm install --save-dev typescript@5.4.",
+]

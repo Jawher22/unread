@@ -13,8 +13,7 @@ struct LatencyRecord: Codable {
     var lookupMs: Double?
     /// Extracting the first sentence (AX text walk).
     var extractMs: Double?
-    /// Synthesizing what became first audio: the first sentence, or its
-    /// opening clause when it was split.
+    /// Asking the narrator for the first sentence → its first audio scheduled.
     var synthMs: Double?
     /// Release → first buffer scheduled on the player.
     var firstAudioMs: Double?
@@ -23,14 +22,10 @@ struct LatencyRecord: Codable {
     var outputLatencyMs: Double?
     /// Length of the first sentence, in characters.
     var chars: Int?
-    /// Length of the text synthesized first (the opening clause and a few
-    /// words of lookahead), when the sentence was split so the voice could
-    /// start on it while the rest was synthesized (#14).
-    var openingChars: Int?
     /// Whether first audio came from speculative synthesis during the hold (#5).
     var speculative: Bool?
-    /// Nil in records from before the narrator (#62): Kokoro.
-    var voice: VoiceChoice?
+    /// "narrator", or "kokoro" before Kokoro was dropped; nil before the narrator (#62), Kokoro then too.
+    var voice: String? = "narrator"
 }
 
 enum LatencyLog {
@@ -80,19 +75,13 @@ enum LatencyLog {
             stage("  \(g.rawValue)", records.filter { $0.gesture == g }.map(\.firstAudioMs))
         }
         if records.contains(where: { $0.voice != nil }) {
-            stage("  kokoro", records.filter { $0.voice != .narrator }.map(\.firstAudioMs))
-            stage("  narrator", records.filter { $0.voice == .narrator }.map(\.firstAudioMs))
+            stage("  kokoro (before it was dropped)", records.filter { $0.voice != "narrator" }.map(\.firstAudioMs))
+            stage("  narrator", records.filter { $0.voice == "narrator" }.map(\.firstAudioMs))
         }
         let spec = records.filter { $0.speculative != nil }
         if !spec.isEmpty {
             stage("  speculative hit", spec.filter { $0.speculative == true }.map(\.firstAudioMs))
             stage("  speculative miss", spec.filter { $0.speculative == false }.map(\.firstAudioMs))
-        }
-        // Splitting started being logged with `openingChars` (#14).
-        let sinceSplit = records.drop { $0.openingChars == nil }
-        if !sinceSplit.isEmpty {
-            stage("  first sentence split", sinceSplit.filter { $0.openingChars != nil }.map(\.firstAudioMs))
-            stage("  first sentence whole", sinceSplit.filter { $0.openingChars == nil }.map(\.firstAudioMs))
         }
         stage("lookup (double-tap)", records.map(\.lookupMs))
         stage("extract first sentence", records.map(\.extractMs))

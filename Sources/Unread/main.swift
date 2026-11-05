@@ -21,39 +21,25 @@ if args.contains("--stats") {
     exit(0)
 }
 
-if args.contains("--bench") {
-    // Silent: time model load and per-sentence synthesis, no audio output.
-    let sentences = [
-        "The quick brown fox jumps over the lazy dog.",
-        "In 1859, Charles Darwin published On the Origin of Species, a book that changed how we understand life on Earth.",
-        "Reading should feel effortless.",
-        "Le petit prince est un livre que tout le monde devrait lire au moins une fois dans sa vie.",
-    ]
-    let done = DispatchSemaphore(value: 0)
-    Task {
-        let voice = Voice()
-        var t = Date()
-        do { try await voice.prepareEnglish() } catch { print("english load failed: \(error)") }
-        print(String(format: "english load+warm: %.2fs", Date().timeIntervalSince(t)))
-        t = Date()
-        do { try await voice.prepareFrench() } catch { print("french load failed: \(error)") }
-        print(String(format: "french load+warm: %.2fs", Date().timeIntervalSince(t)))
-        let tracker = LanguageTracker()
-        for s in sentences {
-            let lang = tracker.language(for: s)
-            for run in 0..<3 {
-                let t0 = Date()
-                let samples = (try? await voice.synthesize(s, language: lang, speed: 1))?.samples ?? []
-                let ms = Date().timeIntervalSince(t0) * 1000
-                let audio = Double(samples.count) / 24_000
-                if run == 2 { print(String(format: "[%@] %5.0f ms for %.2fs audio (%.0fx realtime)  %@", lang.rawValue, ms, audio, audio * 1000 / ms, String(s.prefix(40)))) }
-            }
-        }
-        if args.contains("--split") { await benchSplit(voice) }
-        done.signal()
+if let i = args.firstIndex(of: "--speakable") {
+    // What the narrator is given for each sentence (#18), only where it differs: the arguments, or
+    // stdin's lines (`scripts/extract-fixture.sh … | Unread --speakable`). `--french` for French rules.
+    let given = args[(i + 1)...].filter { !$0.hasPrefix("--") }
+    let lines = given.isEmpty ? AnyIterator { readLine() }.map { $0 } : Array(given)
+    var changed = 0
+    for line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+        let said = Speakable(line, language: args.contains("--french") ? .french : .english).text
+        guard said != line.split(separator: " ").joined(separator: " ") else { continue }
+        changed += 1
+        print("\(line)\n  → \(said)")
     }
-    done.wait()
+    print("\(changed) of \(lines.count) lines changed")
     exit(0)
+}
+
+if args.contains("--speakable-check") {
+    // Silent: what the narrator is given for technical writing (#18), against a table. Exit 1 on failure.
+    exit(Speakable.check() ? 0 : 1)
 }
 
 if args.contains("--stretch-check") {
@@ -85,54 +71,24 @@ if args.contains("--pace") {
     exit(0)
 }
 
-if args.contains("--align") {
-    // Silent: forced alignment of word starts (#58), checked against Kokoro's own timing.
-    // `--align [--narrator] ["sentence"…]`
+if args.contains("--hear") {
+    // Silent: what the narrator says for each sentence, transcribed by the aligner's model (#18).
+    // `--hear ["sentence"…] [--voice id]`
     let done = DispatchSemaphore(value: 0)
     Task {
-        await benchAlign(args)
+        await benchHear(args)
         done.signal()
     }
     done.wait()
     exit(0)
 }
 
-if let i = args.firstIndex(of: "--words") {
-    // Silent: when each word of a sentence starts (#20), as the voice times it.
-    // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.
-    let given = args[(i + 1)...].filter { !$0.hasPrefix("--") }
-    let sentences = given.isEmpty ? [
-        "The quick brown fox jumps over the lazy dog.",
-        "In 1859, Charles Darwin published On the Origin of Species — a book that changed how we understand life.",
-        "It costs $45.99 (about 40 €) per month, or 10% less if you pay yearly.",
-        "Use `fetch()` with well-known APIs, e.g. the U.S. Census API at 3:30 PM.",
-        "Le petit prince est un livre que tout le monde devrait lire au moins une fois dans sa vie.",
-    ] : Array(given)
+if args.contains("--align") {
+    // Silent: forced alignment of the narrator's word starts (#58).
+    // `--align ["sentence"…]`, or `--align --check out.wav session.log`
     let done = DispatchSemaphore(value: 0)
     Task {
-        let voice = Voice()
-        do { try await voice.prepareEnglish(); try await voice.prepareFrench() } catch { print("load failed: \(error)") }
-        let tracker = LanguageTracker()
-        for s in sentences {
-            let lang = tracker.language(for: s)
-            guard let raw = try? await voice.spokenWords(s, language: lang),
-                  let speech = try? await voice.synthesize(s, language: lang, speed: 1) else { print("synthesis failed"); continue }
-            let display = s.split(separator: " ")
-            let said = (raw.normalized ?? "").split(whereSeparator: \.isWhitespace).filter { !WordTiming.key($0).isEmpty }
-            let mode = said.count == raw.words.count ? "one to one" : "\(said.count) normalized words for \(raw.words.count) spoken"
-            print("\n[\(lang.rawValue)] \(s)")
-            print("  normalized: \(raw.normalized ?? "nil")")
-            print("  phonemes:   \(raw.phonemes)")
-            print("  \(display.count) display words, \(raw.words.count) spoken words, \(mode)")
-            // Phoneme groups as the voice spaced them, against their times (punctuation-only groups are dropped there too).
-            let groups = raw.phonemes.split(separator: " ").filter { $0.contains { !$0.isPunctuation } }
-            print("  spoken: " + zip(raw.words, groups.count == raw.words.count ? groups.map(String.init) : raw.words.map { _ in "?" })
-                .map { String(format: "%.2f %@", Double($0.0.samples.lowerBound) / 24_000, $0.1) }.joined(separator: " · "))
-            for (w, start) in zip(display, speech.wordStarts) {
-                print("    " + (start.map { String(format: "%6.2fs", Double($0) / 24_000) } ?? "     – ") + "  \(w)")
-            }
-            print(String(format: "    %6.2fs  (end)", Double(speech.samples.count) / 24_000))
-        }
+        await benchAlign(args)
         done.signal()
     }
     done.wait()
@@ -311,7 +267,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     // Read from a point exactly like a hold does, but muted, then quit:
     // `--simulate 700,450 [seconds] [--pid N]`. With UNREAD_DEBUG_OVERLAY=1 it
     // logs every highlight and word-mark change. Draws the real highlight on screen.
-    // `--record out.wav` writes what the player outputs, pauses included; `--speed X` reads at X (default 1.3).
+    // `--record out.wav` writes what the player outputs, pauses included; `--speed X` reads at X (default 1.3);
+    // `--voice id` reads English in that preset (default: the London storyteller, not the one chosen in Settings).
     let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
     let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 12 : 12
     let app = NSApplication.shared
@@ -329,7 +286,7 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             if gap > 50 { over50 += 1 }
         }
         func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms; the worst %.1f s in", worst, over16, over50, worstAt)) }
-        let overlay = Overlay(), player = Player(muted: true), voice = Voice()
+        let overlay = Overlay(), player = Player(muted: true)
         func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
         let speed = value(after: "--speed").flatMap(Float.init) ?? 1.3
         if let path = value(after: "--record") {
@@ -354,22 +311,16 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         guard let (doc, startAt) = found else { print("nothing at point"); exit(1) }
         let para = (start: startAt, ())
         Task { @MainActor in
-            try? await voice.prepareEnglish()
-            // --voice narrator: read with the narrator (#62), as the menu's Voice choice does.
-            // --voice-change-at T: switch between it and Kokoro after T seconds (#15).
-            var narrator: Narrator?
-            let switchAt = value(after: "--voice-change-at").flatMap(Double.init)
-            if value(after: "--voice") == "narrator" || switchAt != nil {
+            let narrator: Narrator
+            do {
                 let t = Date()
-                do {
-                    narrator = try await Narrator.load(english: VoicePreset.named(NarratorVoices.defaults[.english]!),
-                                                     french: NarratorVoices.preset(for: .french))
-                    print(String(format: "[simulate] narrator loaded in %.1fs", Date().timeIntervalSince(t)))
-                } catch {
-                    print("[simulate] narrator unavailable, reading with Kokoro: \(error)")
-                }
+                let english = try VoicePreset.named(value(after: "--voice") ?? NarratorVoices.defaults[.english]!)
+                narrator = try await Narrator.load(english: english, french: NarratorVoices.preset(for: .french))
+                print(String(format: "[simulate] narrator loaded in %.1fs, reading English as %@", Date().timeIntervalSince(t), english.name))
+            } catch {
+                print("[simulate] narrator unavailable: \(error)")
+                exit(1)
             }
-            let reader = value(after: "--voice") == "narrator" ? narrator : nil
             // --primed [S]: start from the first sentence prepared during a hold (#5), released S seconds
             // (default 0.4) after the preparing began.
             var primed: PrimedSentence?
@@ -380,15 +331,15 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 // drops the narrator's mapped pages first.
                 if let idle = value(after: "--idle-before").flatMap(Double.init) {
                     try? await Task.sleep(for: .seconds(idle))
-                    if args.contains("--evict"), let reader { reader.workingSet.evict() } // as memory pressure would
-                    if !args.contains("--no-wake") { reader?.wake() }
+                    if args.contains("--evict") { narrator.workingSet.evict() } // as memory pressure would
+                    if !args.contains("--no-wake") { narrator.wake() }
                     try? await Task.sleep(for: .seconds(0.3))
                 }
-                primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: reader, speed: speed)
+                primed = PrimedSentence.prepare(doc, from: para.start, narrator: narrator)
                 try? await Task.sleep(for: .seconds(hold))
                 print(String(format: "[simulate] released after a %.2fs hold", hold))
             }
-            let s = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: reader, player: player,
+            let s = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator, player: player,
                                    overlay: overlay, startedAt: Date(), primed: primed)
             s.onFinish = { print("[session] finished"); done() }
             var reading = s
@@ -399,12 +350,6 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             if let j = args.firstIndex(of: "--speed-change-at"), args.indices.contains(j + 1), let at = Double(args[j + 1]) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); reading.speed = 1.75 }
             }
-            if let at = switchAt, let loaded = narrator {
-                DispatchQueue.main.asyncAfter(deadline: .now() + at) {
-                    reading.narrator = reading.narrator == nil ? loaded : nil
-                    print("[simulate] voice → \(reading.narrator == nil ? "kokoro" : "narrator")")
-                }
-            }
             s.start()
             // --jump-at T: after T seconds, hold to jump back to the start, released 0.4 s later, as
             // the app does (the session yields the narrator to the hold's speculation).
@@ -412,11 +357,11 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + at) {
                     s.setAiming(true)
                     s.yieldNarrator()
-                    let primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: s.narrator, speed: speed)
+                    let primed = PrimedSentence.prepare(doc, from: para.start, narrator: narrator)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         print("[simulate] jumped")
                         s.stop()
-                        reading = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: s.narrator,
+                        reading = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator,
                                                  player: player, overlay: overlay, startedAt: Date(), primed: primed)
                         reading.onFinish = { print("[session] finished"); done() }
                         reading.start()
