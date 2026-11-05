@@ -44,8 +44,6 @@ enum OpeningClause {
     /// words, which are cut off: said alone, a clause ends falling like a
     /// sentence; with words after it, it ends as a comma does (`--bench --split`).
     static let lookahead = 3
-    /// Quiet kept before the rest's voice, so its onset isn't clipped.
-    static let onset = 0.05
 
     /// The text to synthesize for `words` of `sentence`: with the lookahead
     /// when more of the sentence follows.
@@ -59,6 +57,28 @@ enum OpeningClause {
         guard let last = word.last(where: { !"\"'”’»)]".contains($0) }) else { return false }
         return ",;:—–".contains(last) || word == "-"
     }
+}
+
+/// The quiet between sentences, as a narrator leaves it (#56): short inside
+/// a paragraph, longer where one ends. Each piece of speech comes with its
+/// own padding (Kokoro: ~0.3 s before the voice, ~0.5 s after, so every
+/// sentence used to be followed by ~0.9 s). It's trimmed to `edge` on each
+/// side and this pause put between, shorter at faster speeds.
+enum Pacing {
+    /// Seconds from one sentence's last sound to the next one's first, at 1×.
+    static let sentence = 0.5, block = 1.0
+    /// Quiet kept on each side of the voice, so onsets and tails aren't clipped.
+    static let edge = 0.05
+    /// The player schedules the next sentence during this pause, so it never goes below this.
+    static let minPause = 0.12
+
+    /// The pause to put after `sentence`, in samples at 24 kHz.
+    static func pause(after sentence: Sentence, speed: Float) -> Int {
+        let quiet = (sentence.endsBlock ? block : self.sentence) / Double(speed) - 2 * edge
+        return Int(max(quiet, minPause) * 24_000)
+    }
+
+    static var edgeSamples: Int { Int(edge * 24_000) }
 }
 
 extension Sentence {
@@ -349,16 +369,18 @@ final class ReadingSession {
             nextToPlay += 1
             let piece = next.pending
             let continues = piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1
-            // The rest of a split sentence follows the opening clause's pause without Kokoro's lead-in.
-            let speech = continues ? next.speech.trimmingLeadingQuiet(keep: Int(OpeningClause.onset * 24_000)) : next.speech
+            // Without the voice's lead-in: the pause before it is `Pacing`'s, or the
+            // opening clause's own when this is the rest of a split sentence (#14).
+            let speech = next.speech.trimmingLeadingQuiet(keep: Pacing.edgeSamples)
             // Nothing to say: skip it, unless the sentence playing needs it to end.
             guard !speech.samples.isEmpty || (continues && piece.endsSentence) else { continue }
             playerWantsMore = false
             spokeAnything = true
             let samples: [Float], ending: Player.Ending
             if piece.endsSentence {
-                samples = speech.samples.isEmpty ? [0] : speech.samples
-                ending = .sentence(played: { [weak self] in
+                let said = speech.trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
+                samples = said.isEmpty ? [0] : said
+                ending = .sentence(pause: Pacing.pause(after: piece.sentence, speed: next.speed), played: { [weak self] in
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
                 })
             } else {
@@ -368,8 +390,13 @@ final class ReadingSession {
                 ending = .clause(pause: pause)
             }
             if debugSession {
-                print(String(format: "[session] playing #%d at %.2g× (%.1fs) %@", piece.seq, next.speed,
-                             Double(samples.count) / 24_000, piece.text.prefix(40).debugDescription))
+                let after: String
+                switch ending {
+                case .sentence(let pause, _): after = String(format: "+%.2fs%@", Double(pause) / 24_000, piece.sentence.endsBlock ? " ¶" : "")
+                case .clause(let pause): after = String(format: "+%.2fs clause", Double(pause.count) / 24_000)
+                }
+                print(String(format: "[session] playing #%d at %.2g× (%.1fs %@) %@", piece.seq, next.speed,
+                             Double(samples.count) / 24_000, after, piece.text.prefix(40).debugDescription))
             }
             let start = player.schedule(samples, ending: ending, consumed: { [weak self] in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.speechConsumed() } }

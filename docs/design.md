@@ -202,6 +202,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Long first sentences (#14, 2026-11-04),** `--bench --split`. Synthesis takes ~40 ms + 1.45 ms per character (57 ms for 14 characters, 248 ms for 149, 474 ms for 293). Splitting the first sentence at a clause break cuts what first audio waits for from 248–296 ms to 104–195 ms in English and from 185–238 ms to 97–123 ms in French. The rest takes 140–220 ms to synthesize, while the opening plays for 2.9–6.7 s. Kokoro pads every chunk with ~0.3 s of quiet before the voice and ~0.5 s after. Joined as is, that is a 715–890 ms hole where a whole sentence pauses 210–520 ms. A clause synthesized alone ends with a falling, sentence-final pitch. Synthesized with the next 3 words, which are then cut off at the voice's own pause, it ends as inside the whole sentence, and the join pauses 100–460 ms.
 
+**Narrator pacing (#56, 2026-11-05),** `--simulate … --speed 1.0 --record`. Before, every sentence was followed by ~0.9 s of quiet (Kokoro's ~0.3 s lead-in and ~0.5 s tail plus a 120 ms gap), paragraph or not. Now the padding is trimmed to 50 ms a side and `Pacing` sets the pause: measured in the recorded output of `fixtures/pages/notes.txt`, 0.49–0.51 s between sentences and 0.99–1.01 s at paragraph ends. The first sound comes 0.1 s after scheduling instead of ~0.3 s (also #48).
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -231,6 +233,14 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 12. **Apply speed and voice changes immediately:** drop and re-synthesize the look-ahead queue.
 13. **Highlight quality: follow the voice word by word** (#20, moved up from Phase 3 on 2026-11-04). Mark the spoken word inside the sentence highlight. Time it with Kokoro's `predictedDurations` (both engines already return them from `synthesizeDetailed`), map onto the word boxes `walk()` and `lines(of:)` already measure, and drive it from the player's sample clock. Chromium browsers without text positions keep the paragraph fallback.
 
+**Phase 1.5: narrator voice** (added 2026-11-05, before Phase 2). The author tried ElevenReader's narration and wants that quality on-device. Open voices close to it are 0.5–4B parameters and run on MLX, not CoreML. Fish Audio Drama 3 is the closest to ElevenLabs on the Artificial Analysis arena (1272 vs Eleven v4's 1334), but needs ~26 GB. Real people's voices are cloned only with their consent.
+- **Listening test (#55):** Ming-3.0-tts 0.5B, Qwen3-TTS 1.7B (voice from a description), Voxtral 4B, Kyutai TTS and Kokoro on the same paragraphs; the author picks by ear, and first audio and speed are measured on this Mac.
+- **Narrator pacing (#56):** longer pauses at block breaks, and 2–3 sentences synthesized together after the first, so intonation carries across a paragraph. Helps Kokoro too.
+- **Narrator helper (#57):** the chosen voice in a Swift MLX helper process, warm and streaming.
+- **Word timing by forced alignment (#58):** Parakeet CTC (already in FluidAudio) aligns each sentence's text to its audio, for voices that report no durations.
+- **Voice presets (#60):** designed voices locked by a ~5 s clip the Base model clones, previewed in Settings from stored audio. The author's pick so far: "London storyteller" (Qwen3 VoiceDesign).
+- **Default voice (#59):** the narrator becomes the default if it meets ~300 ms to first audio; Kokoro covers model load, possibly French, and smaller Macs.
+
 **Phase 2: sources the author reads**
 14. **PDF and EPUB. Probe before building:** run `--extract` on an EPUB in Apple Books (WebKit, may already work), a PDF in Chrome's viewer (PDFium exposes an AX tree) and a PDF in Preview (PDFKit). Then fix what's missing: page headers, page numbers, hyphenation. OCR via ScreenCaptureKit + Vision is the last resort.
 15. **LLM responses still streaming** (T3 Code, Claude): at the end of the text, wait briefly for it to grow before finishing.
@@ -238,7 +248,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 
 **Phase 3: polish**
 17. Listen-away minimum: media keys, AirPods, pause on route change.
-18. Voices: A/B Kokoro voices vs Pocket TTS vs Phonon. Better French via Pocket TTS 24-layer later; `ff_siwis` is good enough for now.
+18. Voices: superseded by Phase 1.5 (#55–#59), which covers better French too.
 
 **Later: public release**
 - Signing and notarization, first-run onboarding, model download progress, Homebrew cask, MIT license.
