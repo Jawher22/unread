@@ -25,5 +25,10 @@ app.whenReady().then(() => {
   }
   if (remote) win.loadURL(file); else win.loadFile(file);
   // extract-fixture.sh waits for "loaded" before reading the page.
-  win.once('ready-to-show', () => { win.showInactive(); console.log('loaded'); });
+  win.once('ready-to-show', () => {
+    win.showInactive();
+    // Hidden, the host must never take the keyboard (#66): its window is on every Space, so macOS can make it active.
+    if (hidden) app.setActivationPolicy('prohibited');
+    console.log('loaded');
+  });
 });

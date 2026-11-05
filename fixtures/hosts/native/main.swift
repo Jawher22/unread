@@ -10,7 +10,10 @@ let path = CommandLine.arguments.last!
 let hidden = CommandLine.arguments.contains("--hidden")
 let url = URL(fileURLWithPath: path).standardizedFileURL
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory) // no Dock icon, never becomes frontmost
+// Hidden, the host must never take the keyboard (#66). Its window is on every Space, so macOS
+// can still make an .accessory app active (switching Spaces, closing the frontmost window),
+// and the author's typing or dictation would land in the text view.
+app.setActivationPolicy(hidden ? .prohibited : .accessory) // no Dock icon
 
 // Short enough that the text overflows and the view has to scroll while reading.
 let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 640, height: 420),
