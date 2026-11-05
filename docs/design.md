@@ -50,7 +50,14 @@ Chosen: **Kokoro-82M via [FluidAudio](https://github.com/FluidInference/FluidAud
 | Qwen3-TTS, Chatterbox, OmniVoice ([speech-swift](https://github.com/soniqo/speech-swift), MLX) | Heavier (0.8–1.7B parameters), more expressive. Possible "premium voice" tier |
 | Cloud (ElevenLabs, OpenAI, Cartesia) | Quality reference. Only ever an optional bring-your-own-key extra |
 
-**Narrator (#62, engine only so far):** Qwen3-TTS 1.7B Base cloning the "London storyteller" preset (#60), on the Neural Engine through Core ML, inside Unread like Kokoro. It uses TinyTrashLabs' published model set (`tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE`, Apache-2.0, 2.88 GB, fetched by `scripts/fetch-narrator.sh`) and Gloam Voice Studio's MIT runtime, vendored in `Vendor/QwenANE` with a few small changes listed in its README. It replaces the MLX helper (#57): ~0.3 GB footprint instead of 6–7 GB, and no GPU. It streams one sentence at a time and isn't wired into reading yet. Measurements in §7.
+**Narrator (#62):** Qwen3-TTS 1.7B Base cloning the "London storyteller" preset (#60), on the Neural Engine through Core ML, inside Unread like Kokoro. It uses TinyTrashLabs' published model set (`tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE`, Apache-2.0, 2.88 GB, fetched by `scripts/fetch-narrator.sh`) and Gloam Voice Studio's MIT runtime, vendored in `Vendor/QwenANE` with a few small changes listed in its README. It replaces the MLX helper (#57): ~0.3 GB footprint instead of 6–7 GB, and no GPU. Measurements in §7.
+
+Reading with it: the menu's Voice submenu picks Kokoro (the default until #59) or the narrator, and the choice is kept. The narrator loads in the background at launch when chosen, or when picked; Kokoro reads until it's ready, and if the model is missing. It reads English and French.
+- **Streaming.** The narrator runs at ~1.4× real time and its first audible chunk takes ~560 ms, so a sentence still being synthesized when its turn comes plays chunk by chunk, once a little has arrived (`Narrator.prebuffer`: 0.1 s at 1×, more when sped up). That's the sentence a reading starts on and usually the next one or two; after that, synthesis is ahead and sentences wait whole, off the player (#15).
+- **The hold.** Speculation starts the stream during the hold, so release plays what has arrived and the rest follows. The narrator says one sentence at a time, so a speculation dropped because the pointer moved stops its stream, and a reading that's playing stops synthesizing ahead while the user aims.
+- **No opening-clause split.** That's Kokoro's workaround for not streaming (#14). The narrator's first audible chunk doesn't depend on the sentence's length, and a clause said alone would lose the intonation of the whole sentence.
+- **Speed.** Qwen3 has no speed control, so its audio is time-stretched as it plays, pitch kept (WSOLA). A speed change doesn't redo the narrator's queued audio.
+- **Word mark.** Estimated from characters across the voiced part of each sentence until forced alignment (#58). The sentence highlight is the same as with Kokoro.
 
 ## 5. Interaction design
 
@@ -227,6 +234,28 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - **Cancelling** mid-sentence frees the narrator 13 ms later; the next sentence is normal.
 - **A 771-character sentence** is said in 5 parts of ≤200 characters, 45 s, 17.1 c/s, with no part cut short.
 - **Audio.** Peak 0.32–0.55, RMS 0.048–0.106. Pace median 14.9 c/s; outside 13–16: "Why does this matter?" 16.8, the 194-character English sentence 16.6, "Bonjour à tous." 11.7, and the long French sentence 17.2. Pitch per sentence: English median 95 Hz (78–119; the low one is the question), French 106 Hz (90–165; the high one is the greeting). Worth a listen: `--narrate --out narrator.wav`.
+
+**Reading with the narrator (#62, 2026-11-05),** `--simulate … --voice narrator --record`, muted, on `notes.txt` (native text view) and `inline.html` (WebKit), this M4 Pro. First audio runs from "release" to the first buffer on the player; the voice starts 30–60 ms into it. `--primed S` releases S seconds after the speculation began. Medians of 10 runs, range in brackets:
+
+| First audio | notes.txt | inline.html |
+| --- | --- | --- |
+| Narrator, from scratch, 1× | 620 ms (615–633) | 626 ms (615–687) |
+| Narrator, primed 0.4 s, 1× | 183 ms (167–206) | 185 ms (174–228) |
+| Narrator, primed 0.8 s, 1× | 34 ms (29–38) | |
+| Narrator, from scratch, 1.3× | 801 ms (793–825) | 711 ms (699–742) |
+| Narrator, primed 0.4 s, 1.3× | 377 ms (365–424) | |
+| Kokoro, from scratch / primed 0.4 s, 1× | 129 / 41 ms | 122 / 42 ms |
+
+- **From scratch it's the narrator's first audible chunk** (~590 ms for this sentence) plus extraction. The first chunk already holds more than the 0.1 s prebuffer at 1×; at 1.3× the prebuffer (0.25 s of playback) adds ~180 ms. A hold of 0.8 s hides all of it.
+- **No underrun** in 60 s readings at 1× and 1.3×, primed or not, on both pages: the recordings have no digital silence inside a sentence. At 1× the first 2–3 sentences stream; at 1.3× 4–7 of the first nine do, since synthesis only just outruns playback, and none stalls.
+- **Pauses:** 450–510 ms between sentences and 950–1000 ms after a paragraph at 1× (`Pacing`: 500 and 1000); 340–390 and 720–760 ms at 1.3× (385 and 769). Up to 50 ms short of Kokoro's when the stream starts less than 50 ms before the voice.
+- **At 1.75×** synthesis falls behind (it needs 0.57 s per second of audio and takes ~0.72): no underrun inside a sentence, but up to ~0.5 s of extra wait between sentences.
+- **Word mark:** within 10 ms of its (estimated) start for 95% of words; up to 180 ms off when a streaming sentence's estimate is revised.
+- **Main thread:** worst stall 23–37 ms, none over 50 ms (Kokoro: 23–32 ms). **GPU:** 0 ms. Stretching a whole sentence takes ~5 ms per 10 s of audio.
+- **Switching** to Kokoro mid-reading redid 1 queued sentence, to the narrator 3; the pauses around the switch stayed at 450–520 ms. A speed change redoes no narrator audio.
+- **A jump while reading** (`--jump-at`): first audio 218 ms after release when synthesis was ahead, 592 ms early in a reading, when the narrator was still busy with the sentence playing.
+- **Kokoro is unchanged:** its recordings are sample-identical to before this change (60 s of `notes.txt`; a split first sentence, primed and not).
+- **Chunk size and prebuffer.** Replaying the chunk arrivals of 49 sentences: with chunks growing to 12 frames, a player starting 0.1 s in ran dry in 4 sentences at 1× (worst 186 ms) and in all of them at 1.3×; capped at 4 frames, 2 at 1× (≤ 7 ms) and, with `Narrator.prebuffer`, none at 1.15–2×.
 
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
