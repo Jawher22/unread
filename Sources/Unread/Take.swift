@@ -33,8 +33,9 @@ final class NarratorTake {
     private var alignedThrough = 0, aligning = false
     private var task: Task<Void, Never>?
 
-    init(_ narrator: Narrator, text: String, words: ArraySlice<Substring>, language: NLLanguage) {
-        let stream = narrator.speak(text, language: language)
+    /// `after`: the sentence before it in the same paragraph, for the narrator to carry on from (#56).
+    init(_ narrator: Narrator, text: String, words: ArraySlice<Substring>, language: NLLanguage, after previous: String? = nil) {
+        let stream = narrator.speak(text, language: language, after: previous)
         pace = narrator.pace(for: language)
         self.words = Array(words)
         aligner = language == .english ? narrator.aligner : nil

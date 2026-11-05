@@ -201,14 +201,21 @@ actor Narrator {
     /// One sentence's audio at 24 kHz, streamed as it's synthesized, starting ~50 ms before the
     /// voice. Sentences are synthesized in the order they're asked for. Cancelling the consuming
     /// task, or dropping the stream, stops synthesis within a frame.
-    nonisolated func speak(_ text: String, language: NLLanguage) -> AsyncThrowingStream<[Float], Error> {
+    ///
+    /// `after`: the sentence before it in the same paragraph. If that was the last one said, and
+    /// in full, this one carries on from it (#56): the talker hears its text and audio before this
+    /// one's, as it does between the parts of a long sentence, so the paragraph is one performance.
+    nonisolated func speak(_ text: String, language: NLLanguage, after previous: String? = nil) -> AsyncThrowingStream<[Float], Error> {
         AsyncThrowingStream { stream in
             let flag = CancelFlag()
             stream.onTermination = { _ in flag.cancel() }
             // Straight onto the actor's queue: a Task per call could reach the actor out of order.
-            queue.async { self.assumeIsolated { $0.synthesize(text, language: Self.code(language), flag: flag, into: stream) } }
+            queue.async { self.assumeIsolated { $0.synthesize(text, language: Self.code(language), after: previous, flag: flag, into: stream) } }
         }
     }
+
+    /// The session the last sentence was said in, kept for the next one to carry on from.
+    private var lastSaid: (text: String, language: String, voice: String, session: QwenTalkSession)?
 
     /// Returns once nothing is being synthesized.
     func idle() {}
@@ -235,9 +242,11 @@ actor Narrator {
     }
     private var lastLanguage = "en"
 
-    private func synthesize(_ text: String, language: String, flag: CancelFlag,
+    private func synthesize(_ text: String, language: String, after previous: String?, flag: CancelFlag,
                             into stream: AsyncThrowingStream<[Float], Error>.Continuation) {
         lastReport = nil
+        let carried = lastSaid
+        lastSaid = nil
         defer {
             lastActive = Date()
             lastLanguage = language
@@ -252,8 +261,13 @@ actor Narrator {
         let firstDecode = Mutex<Double?>(nil)
         engine.onDecode = { firstDecode.withLock { $0 = $0 ?? Date().timeIntervalSince(start) } }
         defer { engine.onDecode = nil }
-        let voice = (voices[language] ?? voices["en"]!).files
-        let session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: text)
+        let clone = voices[language] ?? voices["en"]!, voice = clone.files
+        let session: QwenTalkSession
+        if let previous, let carried, carried.text == previous, carried.language == language, carried.voice == clone.preset.id {
+            session = carried.session
+        } else {
+            session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: text)
+        }
         let parts = parts(of: text, voice: voice, language: language)
         var leading = 0.0, stop = "", timings: QwenTimings?, frames = 0
         do {
@@ -264,6 +278,7 @@ actor Narrator {
                 stop = r.stopReason.rawValue
                 if r.stopReason == .cancelled { break }
             }
+            if stop != QwenStopReason.cancelled.rawValue { lastSaid = (text, language, clone.preset.id, session) }
             stream.finish()
         } catch {
             stream.finish(throwing: error)
