@@ -1,0 +1,8 @@
+{
+  "name": "London storyteller",
+  "language": "en",
+  "description": "An older British man in his seventies with a warm, slightly gravelly London voice. He reads slowly and calmly, like a storyteller by the fire, with a wry, knowing warmth.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "london-storyteller.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels fast."
+}

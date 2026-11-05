@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build Unread.app: release build, bundle, sign.
+# Build Unread.app: release build, bundle, sign. The voice presets go in the
+# bundle; the narrator's model set doesn't (2.88 GB, scripts/fetch-narrator.sh).
 #
 #   scripts/bundle.sh             # → build/Unread.app
 #   scripts/bundle.sh --install   # …and copy it to ~/Applications, then restart it
@@ -22,6 +23,7 @@ BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Unread "$APP/Contents/MacOS/Unread"
+cp -R Resources/Voices "$APP/Contents/Resources/Voices"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

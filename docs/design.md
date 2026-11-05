@@ -50,6 +50,8 @@ Chosen: **Kokoro-82M via [FluidAudio](https://github.com/FluidInference/FluidAud
 | Qwen3-TTS, Chatterbox, OmniVoice ([speech-swift](https://github.com/soniqo/speech-swift), MLX) | Heavier (0.8–1.7B parameters), more expressive. Possible "premium voice" tier |
 | Cloud (ElevenLabs, OpenAI, Cartesia) | Quality reference. Only ever an optional bring-your-own-key extra |
 
+**Narrator (#62, engine only so far):** Qwen3-TTS 1.7B Base cloning the "London storyteller" preset (#60), on the Neural Engine through Core ML, inside Unread like Kokoro. It uses TinyTrashLabs' published model set (`tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE`, Apache-2.0, 2.88 GB, fetched by `scripts/fetch-narrator.sh`) and Gloam Voice Studio's MIT runtime, vendored in `Vendor/QwenANE` with a few small changes listed in its README. It replaces the MLX helper (#57): ~0.3 GB footprint instead of 6–7 GB, and no GPU. It streams one sentence at a time and isn't wired into reading yet. Measurements in §7.
+
 ## 5. Interaction design
 
 **Principle: the pointer is the cursor for listening.** No selection. The app infers *what* and *where* from what's on screen.
@@ -203,6 +205,28 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 **Long first sentences (#14, 2026-11-04),** `--bench --split`. Synthesis takes ~40 ms + 1.45 ms per character (57 ms for 14 characters, 248 ms for 149, 474 ms for 293). Splitting the first sentence at a clause break cuts what first audio waits for from 248–296 ms to 104–195 ms in English and from 185–238 ms to 97–123 ms in French. The rest takes 140–220 ms to synthesize, while the opening plays for 2.9–6.7 s. Kokoro pads every chunk with ~0.3 s of quiet before the voice and ~0.5 s after. Joined as is, that is a 715–890 ms hole where a whole sentence pauses 210–520 ms. A clause synthesized alone ends with a falling, sentence-final pitch. Synthesized with the next 3 words, which are then cut off at the voice's own pause, it ends as inside the whole sentence, and the join pauses 100–460 ms.
 
 **Narrator pacing (#56, 2026-11-05),** `--simulate … --speed 1.0 --record`. Before, every sentence was followed by ~0.9 s of quiet (Kokoro's ~0.3 s lead-in and ~0.5 s tail plus a 120 ms gap), paragraph or not. Now the padding is trimmed to 50 ms a side and `Pacing` sets the pause: measured in the recorded output of `fixtures/pages/notes.txt`, 0.49–0.51 s between sentences and 0.99–1.01 s at paragraph ends. The first sound comes 0.1 s after scheduling instead of ~0.3 s (also #48).
+
+**Narrator on the Neural Engine (#62, 2026-11-05),** `--narrate --runs 2`: 12 sentences (8 English, 4 French, 15–194 characters), twice, warm, on this M4 Pro.
+
+| | Result |
+| --- | --- |
+| First decoded chunk (silent or not) | median 268 ms, p90 311 |
+| First audible chunk | median 558 ms, p90 624, range 461–686 |
+| Quiet the model generates before the voice | median 0.38 s, range 0.10–0.60 |
+| Speed | RTF median 0.72 (1.4× real time); 0.97–1.05 for sentences under 2 s |
+| Load | 1.3–2.6 s; ~50 s the first time a binary path loads it (Core ML compiles for that path) |
+| Memory | footprint 0.21 GB loaded, peak 0.27 GB; 1.09 GB peak during the first-load compile |
+| GPU | 0 clients, 0 ms (the GPU driver's registry); the MLX helper kept the GPU 86–96% busy |
+
+- **What first audio is made of.** The first chunk (2 frames) is ready at ~265 ms: ~125 ms prefill, two frames at ~52 ms, ~35 ms vocoder. Then the model's quiet start, 0.1–0.6 s of audio at the same 52 ms a frame, is what's left. The stream starts 50 ms before the voice.
+- **Upsampler on the CPU.** On the Neural Engine each vocoder call waited behind the talker, 85–130 ms instead of 27 ms. Moving it to the CPU cut the first chunk from ~360 to ~260 ms and made short chunks cheap; the audio and speed are unchanged.
+- **Short chunks until the voice starts.** With the upsampler on the Neural Engine this cost more than it saved (first audible median 640 vs 560 ms). On the CPU it brings the first audible chunk closest to the onset.
+- **Chunk growth.** A player starting at the first audible chunk would have waited for audio in 24 of 24 sentences with chunks of 2, 4, 8, 12 frames (worst 423 ms), in 4 of 24 with 2, 3, 4, 6, 9, 12 (worst 99 ms) and in 2–3 of 24 with 2, 2, 3, 4, 6, 9, 12 (worst 57 ms). The integration should still buffer a little before it starts.
+- **Cloning from the speaker embedding alone** (no reference clip or transcript in the prompt; prototype, same seed) made first audio worse, not better: first audible ~730 ms against ~560, because the voice started quietly. Pitch was similar (English medians 94–121 Hz against 85–133 with the clip; the clip itself is 104 Hz), pace more spread out (11.4–18.5 c/s). The full prompt stays.
+- **Trimming the clip's trailing quiet** (0.16 → 0.02 s) made the model's quiet start longer (0.30–1.02 s), so the clip stays as designed.
+- **Cancelling** mid-sentence frees the narrator 13 ms later; the next sentence is normal.
+- **A 771-character sentence** is said in 5 parts of ≤200 characters, 45 s, 17.1 c/s, with no part cut short.
+- **Audio.** Peak 0.32–0.55, RMS 0.048–0.106. Pace median 14.9 c/s; outside 13–16: "Why does this matter?" 16.8, the 194-character English sentence 16.6, "Bonjour à tous." 11.7, and the long French sentence 17.2. Pitch per sentence: English median 95 Hz (78–119; the low one is the question), French 106 Hz (90–165; the high one is the greeting). Worth a listen: `--narrate --out narrator.wav`.
 
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 

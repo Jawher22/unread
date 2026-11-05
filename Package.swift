@@ -10,8 +10,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Unread",
-            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio"), "QwenANE"],
             swiftSettings: [.swiftLanguageMode(.v5)]
-        )
+        ),
+        // Gloam Voice Studio's Qwen3-TTS Neural Engine runtime, vendored (MIT). See Vendor/QwenANE/README.md.
+        .target(
+            name: "QwenANE",
+            path: "Vendor/QwenANE/Sources",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
