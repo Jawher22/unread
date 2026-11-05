@@ -179,6 +179,8 @@ final class ReadingSession {
     /// Extracting or synthesizing the next sentence (one at a time).
     private var producing = false
     private var inFlight: NarratorTake?
+    /// The last piece the narrator was asked for: the next sentence of its paragraph carries on from it (#56).
+    private var lastNarrated: Pending?
     /// #15: a buffer on the player can't be taken back, so only the piece playing streams into it.
     private var live: Live?
     private struct Live {
@@ -429,8 +431,11 @@ final class ReadingSession {
                 backlog = (backlog + [pending]).sorted { $0.seq < $1.seq }
                 return
             }
+            let previous = lastNarrated.flatMap { p in
+                p.seq == pending.seq - 1 && p.endsSentence && !p.sentence.endsBlock && p.language == pending.language ? p.narrated : nil
+            }
             enqueue(pending, take: .narrator(NarratorTake(narrator, text: pending.narrated, words: pending.sentence.words[pending.words],
-                                                         language: pending.language)), synthMs: 0)
+                                                         language: pending.language, after: previous)), synthMs: 0)
             return
         }
         let generation = self.generation, speed = self.speed, kokoro = self.kokoro
@@ -456,6 +461,7 @@ final class ReadingSession {
         switch take {
         case .kokoro: if timing != nil, timing?.synthMs == nil { timing?.synthMs = synthMs }
         case .narrator(let t):
+            lastNarrated = pending
             t.onArrival = { [weak self, weak t] in if let self, let t { self.arrived(t) } }
             if !t.streamed { inFlight = t; producing = true }
         }
