@@ -269,6 +269,7 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     // Read from a point exactly like a hold does, but muted, then quit:
     // `--simulate 700,450 [seconds] [--pid N]`. With UNREAD_DEBUG_OVERLAY=1 it
     // logs every highlight and word-mark change. Draws the real highlight on screen.
+    // `--record out.wav` writes what the player outputs, pauses included; `--speed X` reads at X (default 1.3).
     let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
     let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 12 : 12
     let app = NSApplication.shared
@@ -287,6 +288,12 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         }
         func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms", worst, over16, over50)) }
         let overlay = Overlay(), player = Player(muted: true), voice = Voice()
+        func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
+        let speed = value(after: "--speed").flatMap(Float.init) ?? 1.3
+        if let path = value(after: "--record") {
+            do { try player.record(to: URL(fileURLWithPath: path)) } catch { print("can't record to \(path): \(error)"); exit(1) }
+        }
+        @MainActor func done() { player.finishRecording(); report(); exit(0) }
         let point = CGPoint(x: xy[0], y: xy[1])
         // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows).
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
@@ -311,13 +318,13 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                     }
                     guard let (first, scope) = extracted else { return nil }
                     let opening = OpeningClause.of(first)
-                    let speech = try? await voice.synthesize(OpeningClause.text(of: first, saying: opening), language: .english, speed: 1.3)
+                    let speech = try? await voice.synthesize(OpeningClause.text(of: first, saying: opening), language: .english, speed: speed)
                     return .init(sentence: first, scope: scope, extractMs: 0, words: opening, speech: speech, synthMs: 0)
                 })
             }
-            let s = ReadingSession(document: doc, start: para.start, speed: 1.3, voice: voice, player: player, overlay: overlay,
+            let s = ReadingSession(document: doc, start: para.start, speed: speed, voice: voice, player: player, overlay: overlay,
                                    startedAt: Date(), primed: primed)
-            s.onFinish = { print("[session] finished"); report(); exit(0) }
+            s.onFinish = { print("[session] finished"); done() }
             measuring = true
             lastTick = Date()
             // --speed-change-at T: switch to 1.75× after T seconds (#15).
@@ -326,7 +333,7 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             }
             s.start()
             _ = s // keep alive
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); report(); exit(0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); done() }
         }
     }
     app.run()
@@ -338,6 +345,7 @@ if args.contains("--extract") {
     //   --extract --pid N --from-start  any app's main window (no focus needed), whole document
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
+    //   --blocks                      mark a sentence that ends its paragraph with " ¶" (#56)
     //   --word-boxes                  also print each word's box (#20)
     //   --from-text "…"               point at the first visible text containing this, and start at the sentence holding it
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
@@ -404,7 +412,7 @@ if args.contains("--extract") {
             }
             last = s
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
-            print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
+            print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))\(args.contains("--blocks") && s.endsBlock ? " ¶" : "")")
             if args.contains("--word-boxes") {
                 // Each display word with its box (#20); "?" where it has none.
                 _ = doc.lines(of: s)

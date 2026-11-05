@@ -50,7 +50,7 @@ func benchSplit(_ voice: Voice) async {
                      wholeMs, headMs, headText.count, headText, restMs, Double(h.samples.count) / 24_000))
         // Joined the way the session plays it.
         let (clause, pause) = h.cut(beforeWord: opening.count)
-        let rest = r.trimmingLeadingQuiet(keep: Int(OpeningClause.onset * 24_000))
+        let rest = r.trimmingLeadingQuiet(keep: Pacing.edgeSamples)
         let offset = clause.samples.count + pause.count
         let joined = Speech(samples: clause.samples + pause + rest.samples,
                             wordStarts: clause.wordStarts + rest.wordStarts.map { $0.map { $0 + offset } })

@@ -69,8 +69,6 @@ final class Player {
     private let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
     private var idleTimer: Timer?
     private(set) var isPaused = false
-    /// Breath between sentences.
-    private let gap = [Float](repeating: 0, count: 24_000 * 12 / 100)
     /// Two soft, overlapping bell-like notes (E5 → B5), quiet and short.
     private lazy var chimeBuffer: AVAudioPCMBuffer? = {
         let rate = 24_000.0, length = Int(rate * 0.6)
@@ -95,6 +93,22 @@ final class Player {
         engine.prepare()
     }
 
+    private var recording: AVAudioFile?
+
+    /// Also write everything the player outputs, silences included, to `url`
+    /// (`--simulate … --record`: hear pacing and voices without playing them).
+    func record(to url: URL) throws {
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        node.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in try? file.write(from: buffer) }
+        recording = file
+    }
+
+    func finishRecording() {
+        node.removeTap(onBus: 0)
+        recording?.close()
+        recording = nil
+    }
+
     func warm() {
         idleTimer?.invalidate()
         if !engine.isRunning { try? engine.start() }
@@ -102,8 +116,8 @@ final class Player {
 
     /// What follows a piece of speech.
     enum Ending {
-        /// The breath that closes a sentence; `played` fires once it's heard.
-        case sentence(played: @Sendable () -> Void)
+        /// The quiet that closes a sentence (`Pacing`); `played` fires once it's heard.
+        case sentence(pause: Int, played: @Sendable () -> Void)
         /// More of the same sentence, after `pause`: the clause break the
         /// piece ends with (#14).
         case clause(pause: [Float])
@@ -124,7 +138,7 @@ final class Player {
         guard let speech = buffer(samples) else { return queueEnd }
         let (pause, played): ([Float], (@Sendable () -> Void)?)
         switch ending {
-        case .sentence(let p): (pause, played) = (gap, p)
+        case .sentence(let samples, let p): (pause, played) = ([Float](repeating: 0, count: samples), p)
         case .clause(let p): (pause, played) = (p, nil)
         }
         let start = claim(samples.count + pause.count)
@@ -242,6 +256,13 @@ extension Speech {
         let cut = max(leadingQuiet - keep, 0)
         guard cut > 0 else { return self }
         return Speech(samples: Array(samples[cut...]), wordStarts: wordStarts.map { $0.map { max($0 - cut, 0) } })
+    }
+
+    /// The same speech without the quiet it ends with, but for the first `keep` samples after the voice.
+    func trimmingTrailingQuiet(keep: Int) -> Speech {
+        let cut = max(trailingQuiet - keep, 0)
+        guard cut > 0 else { return self }
+        return Speech(samples: Array(samples.dropLast(cut)), wordStarts: wordStarts)
     }
 
     /// Stretches of quiet windows in `range`.
