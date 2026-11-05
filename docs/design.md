@@ -61,7 +61,7 @@ Reading with it: the menu's Voice submenu picks Kokoro (the default until #59) o
 - **Speed.** Qwen3 has no speed control, so its audio is time-stretched as it plays, pitch kept (WSOLA). A speed change doesn't redo the narrator's queued audio.
 - **Pace.** At 1× the London storyteller speaks 16.6 voiced characters a second and Kokoro 19.7 (§7), so the narrator starts at 1.2×, and the speed is kept per voice choice across launches. Cloning from a time-compressed clip speeds the voice itself up, but only ~60% of the compression carries over; that's for the listener to judge (§7).
 - **Waking.** After a while unused, the narrator's first sentence started 0.9–2.4 s after release in real use. ⌃ going down now reads its model pages back and warms the Neural Engine, so the hold's speculation starts warm (§7).
-- **Word mark.** Estimated from characters across the voiced part of each sentence until forced alignment (#58). The sentence highlight is the same as with Kokoro.
+- **Word mark.** Timed by forced alignment (#58): Parakeet CTC 110M aligns each English sentence's text to the narrator's audio, as it streams and again once it's complete. French has no CTC model, so its words are still spread by characters. The sentence highlight is the same as with Kokoro.
 
 ## 5. Interaction design
 
@@ -254,7 +254,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - **No underrun** in 60 s readings at 1× and 1.3×, primed or not, on both pages: the recordings have no digital silence inside a sentence. At 1× the first 2–3 sentences stream; at 1.3× 4–7 of the first nine do, since synthesis only just outruns playback, and none stalls.
 - **Pauses:** 450–510 ms between sentences and 950–1000 ms after a paragraph at 1× (`Pacing`: 500 and 1000); 340–390 and 720–760 ms at 1.3× (385 and 769). Up to 50 ms short of Kokoro's when the stream starts less than 50 ms before the voice.
 - **At 1.75×** synthesis falls behind (it needs 0.57 s per second of audio and takes ~0.72): no underrun inside a sentence, but up to ~0.5 s of extra wait between sentences.
-- **Word mark:** within 10 ms of its (estimated) start for 95% of words; up to 180 ms off when a streaming sentence's estimate is revised.
+- **Word mark:** within 10 ms of its scheduled start for 95% of words; up to 180 ms off when a streaming sentence's timing is revised.
+- **Word timing (#58, 2026-11-05).** `--align` on 12 sentences of Kokoro audio, against Kokoro's own starts (exact, from its durations): aligned starts are a median 50 ms off, p95 145 ms, max 223 ms, mean bias +2 ms; the character estimate the narrator used before is 195 ms, p95 1.2 s. Aligning the first 60% of the audio, as a live sentence has it: median 51 ms, p95 146 ms. A call takes ~70 ms (the model pads to 15 s), the load 0.2 s (the first, ~48 s: download and Neural Engine compile). Run on the Neural Engine once a second beside the narrator, the narrator kept its speed (RTF 0.67–0.76 vs 0.66–0.74 alone). End to end (`--simulate` on `notes.txt` at 1.2×, recorded, 150 words of 11 sentences, the first three streamed), the scheduled starts against an alignment of the recording: median 44 ms, p95 129 ms, max 224 ms, mean −38 ms (the mark slightly early); with the estimate, 166 ms, p95 400 ms, max 574 ms. No underrun either way.
 - **Main thread:** worst stall 23–37 ms, none over 50 ms (Kokoro: 23–32 ms). **GPU:** 0 ms. Stretching a whole sentence takes ~5 ms per 10 s of audio.
 - **Switching** to Kokoro mid-reading redid 1 queued sentence, to the narrator 3; the pauses around the switch stayed at 450–520 ms. A speed change redoes no narrator audio.
 - **A jump while reading** (`--jump-at`): first audio 218 ms after release when synthesis was ahead, 592 ms early in a reading, when the narrator was still busy with the sentence playing.
@@ -337,7 +338,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 - **Listening test (#55):** Ming-3.0-tts 0.5B, Qwen3-TTS 1.7B (voice from a description), Voxtral 4B, Kyutai TTS and Kokoro on the same paragraphs; the author picks by ear, and first audio and speed are measured on this Mac.
 - **Narrator pacing (#56):** longer pauses at block breaks, and 2–3 sentences synthesized together after the first, so intonation carries across a paragraph. Helps Kokoro too.
 - **Narrator helper (#57):** the chosen voice in a Swift MLX helper process, warm and streaming.
-- **Word timing by forced alignment (#58):** Parakeet CTC (already in FluidAudio) aligns each sentence's text to its audio, for voices that report no durations.
+- **Word timing by forced alignment (#58, done 2026-11-05):** Parakeet CTC 110M (in FluidAudio) aligns each English sentence's text to the narrator's audio, as it streams and once complete: a quarter of the estimate's error (§7). French keeps the estimate.
 - **Voice presets (#60, done 2026-11-05):** 26 English and 8 French designed voices, each locked by a ~5 s clip the Base model clones, previewed in Settings from stored audio and chosen per language. The author's pick so far: "London storyteller". Later: "Design a voice" (type a description, hear it, keep it) and "Use my own voice", in the same preset format.
 - **Default voice (#59):** the narrator becomes the default if it meets ~300 ms to first audio; Kokoro covers model load, possibly French, and smaller Macs.
 

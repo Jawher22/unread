@@ -85,6 +85,18 @@ if args.contains("--pace") {
     exit(0)
 }
 
+if args.contains("--align") {
+    // Silent: forced alignment of word starts (#58), checked against Kokoro's own timing.
+    // `--align [--narrator] ["sentence"…]`
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        await benchAlign(args)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if let i = args.firstIndex(of: "--words") {
     // Silent: when each word of a sentence starts (#20), as the voice times it.
     // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.

@@ -88,6 +88,9 @@ actor Narrator {
     private let chunkFrames: [Int]
     nonisolated let startup: Startup
     nonisolated let workingSet: WorkingSet
+    /// Times its English words (#58): the model reports none. Nil if it couldn't load; words are then estimated.
+    nonisolated var aligner: Aligner? { alignerSlot.withLock { $0 } }
+    private let alignerSlot = Mutex<Aligner?>(nil)
     private(set) var lastReport: Report?
 
     /// The model set from scripts/fetch-narrator.sh. `UNREAD_NARRATOR_MODEL` overrides the folder.
@@ -101,11 +104,23 @@ actor Narrator {
     }
 
     /// Loads the model, encodes each preset's clip (cached after the first time) and warms both languages.
+    /// Loads the aligner alongside (~0.2 s; its first load downloads ~100 MB and compiles for about 50 s).
     static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
-        try await withCheckedThrowingContinuation { done in
+        async let aligner = loadAligner()
+        let narrator = try await withCheckedThrowingContinuation { done in
             DispatchQueue.global(qos: .userInitiated).async {
                 done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames) })
             }
+        }
+        let loaded = await aligner
+        narrator.alignerSlot.withLock { $0 = loaded }
+        return narrator
+    }
+
+    private static func loadAligner() async -> Aligner? {
+        do { return try await Aligner.load() } catch {
+            print("[narrator] no word timing, words are estimated: \(error)")
+            return nil
         }
     }
 
