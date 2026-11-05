@@ -117,12 +117,13 @@ if let i = args.firstIndex(of: "--words") {
 
 if let i = args.firstIndex(of: "--settings-snapshot"), args.indices.contains(i + 1) {
     // Render the Settings window to a PNG, off-screen, after `seconds` of the
-    // demo playing: `--settings-snapshot out.png [seconds] [--dark]`.
+    // demo playing: `--settings-snapshot out.png [seconds] [--dark] [--tab voices|highlight]`.
     // For checking the window's layout without screen recording.
     let out = args[i + 1]
     let seconds = args.indices.contains(i + 2) ? Double(args[i + 2]) ?? 1.5 : 1.5
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let t = args.firstIndex(of: "--tab"), args.indices.contains(t + 1) { UserDefaults.standard.set(args[t + 1], forKey: SettingsTab.key) }
     MainActor.assumeIsolated {
         HighlightDemoView.fixedTime = seconds
         let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
@@ -337,7 +338,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             if value(after: "--voice") == "narrator" || switchAt != nil {
                 let t = Date()
                 do {
-                    narrator = try await Narrator.load(preset: VoicePreset.named("london-storyteller"))
+                    narrator = try await Narrator.load(english: VoicePreset.named(NarratorVoices.defaults[.english]!),
+                                                     french: NarratorVoices.preset(for: .french))
                     print(String(format: "[simulate] narrator loaded in %.1fs", Date().timeIntervalSince(t)))
                 } catch {
                     print("[simulate] narrator unavailable, reading with Kokoro: \(error)")

@@ -6,11 +6,13 @@ import NaturalLanguage
 /// sentence: first decoded chunk (silent or not), first audible chunk, total,
 /// speed, and whether a player starting at the first chunk would have run dry.
 /// Checks the GPU stays unused, and writes the audio to a WAV to listen to.
-/// `--cancel-test` cancels a long sentence mid-way; `--long-test` says one too
-/// long for the talker's memory in one piece.
+/// `--voice <id>` reads its language in that preset (#60). `--cancel-test` cancels
+/// a long sentence mid-way; `--long-test` says one too long for the talker's memory
+/// in one piece; `--switch-test [--cold]` switches through every preset (`--cold`:
+/// with its encoded clip deleted from the cache first).
 func benchNarrator(_ args: [String]) async {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
-    let flagValues = Set(["--out", "--runs", "--chunks"].compactMap(value))
+    let flagValues = Set(["--out", "--runs", "--chunks", "--voice"].compactMap(value))
     let given = args.drop { $0 != "--narrate" }.dropFirst().filter { !$0.hasPrefix("--") && !flagValues.contains($0) }
     let sentences = given.isEmpty ? defaultSentences : Array(given)
     let runs = value("--runs").flatMap(Int.init) ?? 2
@@ -20,7 +22,11 @@ func benchNarrator(_ args: [String]) async {
     let loading = Date()
     let narrator: Narrator
     do {
-        narrator = try await Narrator.load(preset: VoicePreset.named("london-storyteller"), chunkFrames: chunks)
+        let picked = try value("--voice").map(VoicePreset.named)
+        let english = try picked?.language == .english ? picked! : VoicePreset.named(NarratorVoices.defaults[.english]!)
+        let french = picked?.language == .french ? picked : NarratorVoices.preset(for: .french)
+        print("voices: \(english.id), \(french?.id ?? "the English one for French")")
+        narrator = try await Narrator.load(english: english, french: french, chunkFrames: chunks)
     } catch {
         print("load failed: \(error)")
         return
@@ -47,6 +53,7 @@ func benchNarrator(_ args: [String]) async {
 
     if args.contains("--cancel-test") { await cancelTest(narrator) }
     if args.contains("--long-test") { await longTest(narrator) }
+    if args.contains("--switch-test") { await switchTest(narrator, cold: args.contains("--cold")) }
     let gpuAfter = gpuTime()
     print(String(format: "\npeak memory footprint %.2f GB; GPU: %d clients, %.1f ms of GPU time (%d clients, %.1f ms before loading)",
                  footprint().peak, gpuAfter.clients, gpuAfter.ms, gpuBefore.clients, gpuBefore.ms))
@@ -192,6 +199,33 @@ private func cancelTest(_ narrator: Narrator) async {
     print("  three asked at once finished in order \(finished.map { $0 + 1 })")
 }
 
+/// Switch to each preset in turn, then say a sentence in it: what the switch cost, and whether
+/// the sentence after it starts as fast as one in a voice already in use.
+private func switchTest(_ narrator: Narrator, cold: Bool) async {
+    print("\nswitch test" + (cold ? " (clips encoded afresh)" : ""))
+    let lines: [NLLanguage: String] = [.english: "When a request arrives, the server first checks whether it has already done this work.",
+                                       .french: "Il pleuvait depuis le matin, et la ville semblait retenir son souffle."]
+    var costs: [(clone: Double, warm: Double, first: Double, again: Double)] = []
+    for preset in VoicePreset.all {
+        if cold { try? FileManager.default.removeItem(at: Narrator.cacheDirectory(preset)) }
+        let cost: Narrator.Switch?
+        do { cost = try await narrator.use(preset) } catch { print("  \(preset.id): \(error)"); continue }
+        guard let cost, let line = lines[preset.language],
+              let first = await say(line, language: preset.language, narrator),
+              let again = await say(line, language: preset.language, narrator) else { continue }
+        let fromSwitch = cost.clone + cost.warm + first.firstAudible
+        costs.append((cost.clone, cost.warm, first.firstAudible, again.firstAudible))
+        print(String(format: "  %@ %-22@ clone %4.0f ms  warm %4.0f ms  first audible %4.0f ms (%4.0f ms from the switch), again %4.0f ms",
+                     preset.language.rawValue, preset.id, cost.clone * 1000, cost.warm * 1000, first.firstAudible * 1000,
+                     fromSwitch * 1000, again.firstAudible * 1000))
+    }
+    guard !costs.isEmpty else { return }
+    func m(_ v: [Double]) -> Double { (median(v) ?? .nan) * 1000 }
+    print(String(format: "  over %d switches, medians: clone %.0f ms (max %.0f), warm %.0f ms (max %.0f), first audible after %.0f ms, again %.0f ms",
+                 costs.count, m(costs.map(\.clone)), (costs.map(\.clone).max() ?? 0) * 1000, m(costs.map(\.warm)),
+                 (costs.map(\.warm).max() ?? 0) * 1000, m(costs.map(\.first)), m(costs.map(\.again))))
+}
+
 /// A sentence too long for the talker's 1024-slot memory in one piece.
 private func longTest(_ narrator: Narrator) async {
     print("\nlong sentence test")
@@ -260,7 +294,7 @@ func stretchCheck() -> Bool {
         ("noise", (0..<50_000).map { _ in Float.random(in: -0.5...0.5, using: &noise) }),
         ("sine", (0..<120_000).map { Float(0.5 * sin(2 * Double.pi * 220 * Double($0) / 24_000)) }),
     ]
-    if let clip = try? VoicePreset.named("london-storyteller").audio, let speech = try? readWAV(clip) { inputs.append(("voice", speech)) }
+    if let clip = try? VoicePreset.named(NarratorVoices.defaults[.english]!).audio, let speech = try? readWAV(clip) { inputs.append(("voice", speech)) }
     func stretch(_ x: [Float], _ rate: Double, pieces: [Int]) -> [Float] {
         var s = TimeStretch(rate: rate), out: [Float] = [], i = 0, k = 0
         while i < x.count {

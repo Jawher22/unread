@@ -262,6 +262,10 @@ final class ReadingSession {
     }
 
     func kokoroVoiceChanged() { redo(\.take.isKokoro) }
+    /// The narrator reads `language` in another preset now (#60): redo what's waiting in the old one.
+    func narratorVoiceChanged(_ language: NLLanguage) {
+        redo { if case .narrator = $0.take { $0.pending.language == language } else { false } }
+    }
 
     private func redo(_ stale: (Ready) -> Bool) {
         generation += 1
@@ -481,7 +485,7 @@ final class ReadingSession {
             case .narrator(let take) where take.isComplete:
                 (whole, speed) = (take.speech(words: piece.sentence.words[piece.words], speed: self.speed), self.speed)
             case .narrator(let take):
-                guard take.samples.count >= Narrator.prebuffer(characters: piece.narrated.count, speed: self.speed) else { return }
+                guard take.samples.count >= Narrator.prebuffer(characters: piece.narrated.count, speed: self.speed, pace: take.pace) else { return }
                 ready.removeFirst()
                 nextToPlay += 1
                 goLive(piece, take)
@@ -590,7 +594,7 @@ final class ReadingSession {
         if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }
         l.said += said.count
         let index = first ? place(piece, at: start, continues: piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1) : queued.count - 1
-        let predicted = l.voiced + Int(Double(piece.narrated.count) / Narrator.pace / Double(l.speed) * 24_000)
+        let predicted = l.voiced + Int(Double(piece.narrated.count) / l.take.pace / Double(l.speed) * 24_000)
         let end = complete ? l.said - min(quiet, edge) : max(predicted, l.said)
         let base = queued[index].start
         // Words the mark has reached keep their start, so it never steps back as the estimate grows
