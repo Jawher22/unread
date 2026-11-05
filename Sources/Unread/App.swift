@@ -244,6 +244,7 @@ final class AppController: NSObject {
     private func keyDown() {
         guard ready else { NSSound.beep(); return }
         player.warm() // open the audio device now, not on release
+        narrator?.wake() // after a while idle, its first sentence is slow; the hold's speculation starts ~0.3 s from now
         aimTarget = nil
         aimDocument = nil
         speculation = nil
