@@ -137,6 +137,44 @@ enum AX {
         return !strict || find(in: window, maxNodes: 300) { _, r in r == "AXWebArea" } != nil
     }
 
+    /// Chromium browsers (Aside, Chrome, Arc…) refuse AXManualAccessibility (−25205) and build a
+    /// page's tree only once a client walks into the window, and switch it off again when it goes
+    /// unused. Their window stays an AXWindow with the browser's own controls, so `treeLooksAlive`
+    /// can't tell. After Aside relaunched, every hold hit an empty AXScrollArea where the page was.
+    /// So when a window holds no web area, walk it (that is what wakes the page) and wait up to
+    /// `timeout` for one to appear; at most every 2 s per app, so pointing at the browser's
+    /// toolbar doesn't hold up the aim loop.
+    private static var wokenAt: [pid_t: Date] = [:]
+    static func wakeWebArea(in window: AXUIElement, timeout: TimeInterval = 1.5) -> AXUIElement? {
+        let pid = pid(window)
+        guard isChromium(pid) else { return nil }
+        let webArea: (AXUIElement, String) -> Bool = { _, r in r == "AXWebArea" }
+        if let area = find(in: window, maxNodes: 600, webArea) { return area }
+        guard Date().timeIntervalSince(wokenAt[pid] ?? .distantPast) > 2 else { return nil }
+        wokenAt[pid] = Date()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+            if let area = find(in: window, maxNodes: 600, webArea) {
+                print("[unread] woke the page's accessibility tree in pid \(pid)")
+                return area
+            }
+        }
+        return nil
+    }
+
+    /// Built on Chromium: Electron apps and Chromium browsers ship their engine as
+    /// `Contents/Frameworks/<name> Framework.framework`.
+    private static var chromium: [pid_t: Bool] = [:]
+    static func isChromium(_ pid: pid_t) -> Bool {
+        if let known = chromium[pid] { return known }
+        let frameworks = NSRunningApplication(processIdentifier: pid)?.bundleURL?.appendingPathComponent("Contents/Frameworks")
+        let names = frameworks.flatMap { try? FileManager.default.contentsOfDirectory(atPath: $0.path) } ?? []
+        let found = names.contains { $0.hasSuffix(" Framework.framework") }
+        chromium[pid] = found
+        return found
+    }
+
     static func mouseLocation() -> CGPoint {
         let m = NSEvent.mouseLocation
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0

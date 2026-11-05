@@ -1591,6 +1591,14 @@ enum DocumentFinder {
     static func document(at point: CGPoint) -> ReadableDocument? {
         guard let hit = AX.element(at: point) else { return nil }
         AX.enableTree(for: AX.pid(hit))
+        if let doc = document(climbingFrom: hit) { return doc }
+        // A Chromium browser may have no page tree right now: wake it, then hit-test again.
+        guard let window = AX.element(AX.attr(hit, kAXWindowAttribute)), AX.wakeWebArea(in: window) != nil,
+              let again = AX.element(at: point) else { return nil }
+        return document(climbingFrom: again)
+    }
+
+    private static func document(climbingFrom hit: AXUIElement) -> ReadableDocument? {
         var e: AXUIElement? = hit
         for _ in 0..<40 {
             guard let cur = e, let role = AX.role(cur) else { break }
@@ -1629,7 +1637,7 @@ enum DocumentFinder {
         let found = AX.find(in: window) { e, role in
             role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }
-        guard let e = found else { return nil }
+        guard let e = found ?? AX.wakeWebArea(in: window) else { return nil }
         return AX.role(e) == "AXWebArea" ? WebDocument(area: e) : NativeDocument(element: e)
     }
 }
