@@ -1,0 +1,11 @@
+{
+  "name": "Midwest grandmother",
+  "language": "en",
+  "summary": "American, kind and gentle",
+  "description": "An American woman in her seventies from the Midwest with a kind, gentle voice. Warm and reassuring, like a grandmother reading to her grandchildren, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "midwest-grandmother.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "midwest-grandmother-preview.m4a",
+  "pace": 17.8
+}

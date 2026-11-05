@@ -1,0 +1,11 @@
+{
+  "name": "Vieux conteur",
+  "language": "fr",
+  "summary": "Older, warm and a little husky",
+  "description": "Un homme âgé à la voix grave, chaleureuse et un peu rauque. Il lit calmement, comme un conteur au coin du feu, à un rythme naturel, pas lent.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "vieux-conteur.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "vieux-conteur-preview.m4a",
+  "pace": 18.2
+}

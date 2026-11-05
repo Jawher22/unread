@@ -1,0 +1,11 @@
+{
+  "name": "Wellington reader",
+  "language": "en",
+  "summary": "New Zealand, calm",
+  "description": "A woman from New Zealand in her forties with a calm, clear voice and a gentle New Zealand accent. Thoughtful and kind, reading at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "wellington-reader.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "wellington-reader-preview.m4a",
+  "pace": 17.7
+}

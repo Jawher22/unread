@@ -1,0 +1,11 @@
+{
+  "name": "Podcast host",
+  "language": "en",
+  "summary": "Young American, bright and friendly",
+  "description": "A young American woman in her twenties with a bright, clear, friendly voice, like a thoughtful podcast host. Lively and smiling as she speaks, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "podcast-host.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "podcast-host-preview.m4a",
+  "pace": 18.6
+}

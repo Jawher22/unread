@@ -1,0 +1,11 @@
+{
+  "name": "Outback yarn",
+  "language": "en",
+  "summary": "Australian, lively and dry",
+  "description": "An Australian man in his forties with a lively, dry-humoured voice and a broad Australian accent, like someone telling a good yarn. Relaxed but energetic, at a natural pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "outback-yarn.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "outback-yarn-preview.m4a",
+  "pace": 18.8
+}

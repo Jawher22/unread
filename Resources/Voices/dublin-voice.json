@@ -1,0 +1,11 @@
+{
+  "name": "Dublin voice",
+  "language": "en",
+  "summary": "Irish, warm and bright",
+  "description": "An Irish woman from Dublin in her thirties with a warm, bright voice and a gentle Irish accent. Friendly and expressive, speaking at a natural, lively pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "dublin-voice.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "dublin-voice-preview.m4a",
+  "pace": 17.0
+}

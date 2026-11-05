@@ -1,0 +1,11 @@
+{
+  "name": "Sydney narrator",
+  "language": "en",
+  "summary": "Australian, warm",
+  "description": "An Australian woman in her thirties from Sydney with a warm, open voice and a clear Australian accent. Friendly and grounded, reading at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "sydney-narrator.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "sydney-narrator-preview.m4a",
+  "pace": 20.1
+}

@@ -1,0 +1,11 @@
+{
+  "name": "Canadian teacher",
+  "language": "en",
+  "summary": "Calm and patient",
+  "description": "A Canadian man in his forties with a calm, patient voice, like a favourite teacher explaining something clearly. Warm and even, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "canadian-teacher.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "canadian-teacher-preview.m4a",
+  "pace": 17.2
+}

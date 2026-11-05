@@ -1,0 +1,11 @@
+{
+  "name": "Southern gentleman",
+  "language": "en",
+  "summary": "American South, easygoing",
+  "description": "An American man in his sixties from the South with a warm, easygoing voice and a soft Southern accent. Friendly and good-humoured, at a natural conversational pace, not slow.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "southern-gentleman.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "southern-gentleman-preview.m4a",
+  "pace": 16.8
+}

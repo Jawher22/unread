@@ -1,0 +1,11 @@
+{
+  "name": "Edinburgh reader",
+  "language": "en",
+  "summary": "Scottish, calm and clear",
+  "description": "A Scottish woman from Edinburgh in her forties with a calm, clear voice and a soft Scottish accent. Thoughtful and warm, reading at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "edinburgh-reader.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "edinburgh-reader-preview.m4a",
+  "pace": 18.7
+}

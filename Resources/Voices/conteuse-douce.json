@@ -1,0 +1,11 @@
+{
+  "name": "Conteuse douce",
+  "language": "fr",
+  "summary": "Soft and warm",
+  "description": "Une femme d'une quarantaine d'années à la voix douce, claire et chaleureuse, comme une conteuse qui lit une histoire le soir, à un rythme naturel et régulier.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "conteuse-douce.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "conteuse-douce-preview.m4a",
+  "pace": 18.4
+}

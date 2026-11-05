@@ -1,0 +1,11 @@
+{
+  "name": "New York reporter",
+  "language": "en",
+  "summary": "Quick and energetic",
+  "description": "A man in his thirties from New York with a quick, energetic, mid-range male voice and a light New York accent, like a radio reporter. Sharp, clear and engaging, at a brisk, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "new-york-reporter.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "new-york-reporter-preview.m4a",
+  "pace": 18.2
+}

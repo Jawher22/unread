@@ -1,0 +1,11 @@
+{
+  "name": "Conteur parisien",
+  "language": "fr",
+  "summary": "Parisian, deep and measured",
+  "description": "Un homme parisien d'une cinquantaine d'années, voix grave et posée, comme un narrateur de documentaire. Chaleureux et précis, à un rythme naturel et régulier, jamais lent.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "conteur-parisien.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "conteur-parisien-preview.m4a",
+  "pace": 18.6
+}

@@ -1,0 +1,11 @@
+{
+  "name": "American baritone",
+  "language": "en",
+  "summary": "Relaxed audiobook baritone",
+  "description": "A warm American man in his fifties with a rich baritone voice, relaxed and friendly, like a seasoned audiobook narrator. Natural, steady pacing with gentle emphasis, not slow.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "american-baritone.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "american-baritone-preview.m4a",
+  "pace": 17.8
+}

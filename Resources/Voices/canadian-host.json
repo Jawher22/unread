@@ -1,0 +1,11 @@
+{
+  "name": "Canadian host",
+  "language": "en",
+  "summary": "Friendly and clear",
+  "description": "A Canadian woman in her thirties with a friendly, clear voice and a light Canadian accent, like a public radio host. Warm and curious, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "canadian-host.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "canadian-host-preview.m4a",
+  "pace": 17.8
+}
