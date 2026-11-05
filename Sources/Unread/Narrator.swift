@@ -95,11 +95,12 @@ actor Narrator {
     /// Audio a streamed piece needs before it starts playing, in samples at 1×: 0.1 s of playback
     /// at 1×, 0.2 s at 1.2×, 0.3 s at 1.4×, since sped up it drains faster than the chunks come;
     /// and past ~1.3×, where playback outruns synthesis, enough that the stream ends just as
-    /// playback catches up. Replaying those 49 sentences' arrivals, none ran dry at 1.15–1.5×
-    /// (2 at 1×, by ≤ 7 ms), for a median 0.1–0.36 s more before first audio.
+    /// playback catches up (`audio` arrives in `audio * realTimeFactor` and plays in `audio / speed`).
+    /// Replaying the chunk arrivals of 49 sentences, none ran dry at 1.15–2× (2 at 1×, by ≤ 7 ms),
+    /// for a median 0.1 s more before first audio at 1.15×, 0.2 s at 1.3×, 0.36 s at 1.5×, 0.95 s at 2×.
     static func prebuffer(characters: Int, speed: Float) -> Int {
         let speed = Double(speed), audio = Double(characters) / pace
-        let playback: Double = 0.1 + 0.5 * max(speed - 1, 0), catchUp: Double = audio * (realTimeFactor - 1 / speed)
+        let playback: Double = 0.1 + 0.5 * max(speed - 1, 0), catchUp: Double = audio * (1 - 1 / (speed * realTimeFactor))
         return Int(max(playback * speed, catchUp) * Double(sampleRate))
     }
 
