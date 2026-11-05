@@ -79,12 +79,30 @@ actor Narrator {
     /// then growing no faster than synthesis gets ahead of playback (it runs at ~0.7× real time).
     /// The first size repeats until the voice starts (`ANEVocoder.speechStarted`), so the chunk with
     /// the onset can hold under 100 ms of audio; a second short one follows it. `[2, 4, 8, 12]` ran
-    /// dry after the first chunk in 24 of 24 sentences, this in 2 (`--narrate --chunks`).
-    static let chunkFrames = [2, 2, 3, 4, 6, 9, 12]
+    /// dry after the first chunk in 24 of 24 sentences, `[2, 2, 3, 4, 6, 9, 12]` in 2 (`--narrate --chunks`).
+    /// Capped at 4 frames, a streamed sentence arrives evenly enough to be played sped up: a 12-frame
+    /// chunk takes ~650 ms to make. Speed is unchanged (`--narrate`: RTF 0.74 vs 0.72). Replaying the
+    /// chunk arrivals of ~50 sentences read with `--simulate`, a player starting 0.1 s in at 1× ran
+    /// dry in 2 of 49 (worst 7 ms) instead of 4 of 48 (worst 186 ms), and at 1.3× in 25 instead of 48.
+    static let chunkFrames = [2, 2, 3, 4]
     /// A sentence is split when the talker's 1024-slot memory can't hold its prompt and audio at
     /// 1.5 frames a character (8.3 characters a second; the voice runs at 11–18).
     static let framesPerCharacter = 1.5
     static let maxPartCharacters = 200
+
+    /// Characters a second at 1×, and seconds of synthesis per second of audio (`--narrate`, §7).
+    static let pace = 14.9, realTimeFactor = 0.75
+    /// Audio a streamed piece needs before it starts playing, in samples at 1×: 0.1 s of playback
+    /// at 1×, 0.2 s at 1.2×, 0.3 s at 1.4×, since sped up it drains faster than the chunks come;
+    /// and past ~1.3×, where playback outruns synthesis, enough that the stream ends just as
+    /// playback catches up (`audio` arrives in `audio * realTimeFactor` and plays in `audio / speed`).
+    /// Replaying the chunk arrivals of 49 sentences, none ran dry at 1.15–2× (2 at 1×, by ≤ 7 ms),
+    /// for a median 0.1 s more before first audio at 1.15×, 0.2 s at 1.3×, 0.36 s at 1.5×, 0.95 s at 2×.
+    static func prebuffer(characters: Int, speed: Float) -> Int {
+        let speed = Double(speed), audio = Double(characters) / pace
+        let playback: Double = 0.1 + 0.5 * max(speed - 1, 0), catchUp: Double = audio * (1 - 1 / (speed * realTimeFactor))
+        return Int(max(playback * speed, catchUp) * Double(sampleRate))
+    }
 
     private let queue: DispatchSerialQueue
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }

@@ -56,6 +56,11 @@ if args.contains("--bench") {
     exit(0)
 }
 
+if args.contains("--stretch-check") {
+    // Silent: the narrator's time stretch at every menu speed. Exit 1 on failure.
+    exit(stretchCheck() ? 0 : 1)
+}
+
 if args.contains("--narrate") {
     // Silent: the narrator voice's load, first audio and speed per sentence (#62).
     // `--narrate ["sentence"…] [--out file.wav] [--runs N] [--chunks 2,3,4] [--cancel-test] [--long-test]`
@@ -289,23 +294,29 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     MainActor.assumeIsolated {
         // Main-thread stall meter (#12): a 10 ms timer; any late tick means the
         // main thread (overlay drawing, hotkey) was busy for that long.
-        var lastTick = Date(), worst = 0.0, over50 = 0, over16 = 0, measuring = false
+        var lastTick = Date(), worst = 0.0, worstAt = 0.0, over50 = 0, over16 = 0, measuring = false, measuredFrom = Date()
         Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
             let gap = Date().timeIntervalSince(lastTick) * 1000 - 10
             lastTick = Date()
             guard measuring else { return }
-            worst = max(worst, gap)
+            if gap > worst { worst = gap; worstAt = Date().timeIntervalSince(measuredFrom) }
             if gap > 16 { over16 += 1 }
             if gap > 50 { over50 += 1 }
         }
-        func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms", worst, over16, over50)) }
+        func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms; the worst %.1f s in", worst, over16, over50, worstAt)) }
         let overlay = Overlay(), player = Player(muted: true), voice = Voice()
         func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
         let speed = value(after: "--speed").flatMap(Float.init) ?? 1.3
         if let path = value(after: "--record") {
             do { try player.record(to: URL(fileURLWithPath: path)) } catch { print("can't record to \(path): \(error)"); exit(1) }
         }
-        @MainActor func done() { player.finishRecording(); report(); exit(0) }
+        @MainActor func done() {
+            player.finishRecording()
+            report()
+            let gpu = gpuTime()
+            print(String(format: "[simulate] GPU: %d clients, %.1f ms", gpu.clients, gpu.ms))
+            exit(0)
+        }
         let point = CGPoint(x: xy[0], y: xy[1])
         // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows).
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
@@ -319,33 +330,65 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         let para = (start: startAt, ())
         Task { @MainActor in
             try? await voice.prepareEnglish()
-            // --primed: start from a pre-synthesized first sentence, like a hold does (#5).
-            var primed: PrimedSentence?
-            if args.contains("--primed") {
-                let start = para.start
-                primed = PrimedSentence(prepared: Task { @MainActor () -> PrimedSentence.Prepared? in
-                    let extracted = await AXWorker.shared.run { () -> (Sentence, ReadingScope?)? in
-                        let scope = doc.scope(from: start)
-                        return doc.sentence(from: start, in: scope).map { ($0, scope) }
-                    }
-                    guard let (first, scope) = extracted else { return nil }
-                    let opening = OpeningClause.of(first)
-                    let speech = try? await voice.synthesize(OpeningClause.text(of: first, saying: opening), language: .english, speed: speed)
-                    return .init(sentence: first, scope: scope, extractMs: 0, words: opening, speech: speech, synthMs: 0)
-                })
+            // --voice narrator: read with the narrator (#62), as the menu's Voice choice does.
+            // --voice-change-at T: switch between it and Kokoro after T seconds (#15).
+            var narrator: Narrator?
+            let switchAt = value(after: "--voice-change-at").flatMap(Double.init)
+            if value(after: "--voice") == "narrator" || switchAt != nil {
+                let t = Date()
+                do {
+                    narrator = try await Narrator.load(preset: VoicePreset.named("london-storyteller"))
+                    print(String(format: "[simulate] narrator loaded in %.1fs", Date().timeIntervalSince(t)))
+                } catch {
+                    print("[simulate] narrator unavailable, reading with Kokoro: \(error)")
+                }
             }
-            let s = ReadingSession(document: doc, start: para.start, speed: speed, voice: voice, player: player, overlay: overlay,
-                                   startedAt: Date(), primed: primed)
+            let reader = value(after: "--voice") == "narrator" ? narrator : nil
+            // --primed [S]: start from the first sentence prepared during a hold (#5), released S seconds
+            // (default 0.4) after the preparing began.
+            var primed: PrimedSentence?
+            if let j = args.firstIndex(of: "--primed") {
+                let hold = args.indices.contains(j + 1) ? Double(args[j + 1]) ?? 0.4 : 0.4
+                primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: reader, speed: speed)
+                try? await Task.sleep(for: .seconds(hold))
+                print(String(format: "[simulate] released after a %.2fs hold", hold))
+            }
+            let s = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: reader, player: player,
+                                   overlay: overlay, startedAt: Date(), primed: primed)
             s.onFinish = { print("[session] finished"); done() }
+            var reading = s
             measuring = true
             lastTick = Date()
+            measuredFrom = lastTick
             // --speed-change-at T: switch to 1.75× after T seconds (#15).
             if let j = args.firstIndex(of: "--speed-change-at"), args.indices.contains(j + 1), let at = Double(args[j + 1]) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); s.speed = 1.75 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) { print("[simulate] speed → 1.75×"); reading.speed = 1.75 }
+            }
+            if let at = switchAt, let loaded = narrator {
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                    reading.narrator = reading.narrator == nil ? loaded : nil
+                    print("[simulate] voice → \(reading.narrator == nil ? "kokoro" : "narrator")")
+                }
             }
             s.start()
-            _ = s // keep alive
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { s.stop(); done() }
+            // --jump-at T: after T seconds, hold to jump back to the start, released 0.4 s later, as
+            // the app does (the session yields the narrator to the hold's speculation).
+            if let at = value(after: "--jump-at").flatMap(Double.init) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                    s.setAiming(true)
+                    s.yieldNarrator()
+                    let primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: s.narrator, speed: speed)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        print("[simulate] jumped")
+                        s.stop()
+                        reading = ReadingSession(document: doc, start: para.start, speed: speed, kokoro: voice, narrator: s.narrator,
+                                                 player: player, overlay: overlay, startedAt: Date(), primed: primed)
+                        reading.onFinish = { print("[session] finished"); done() }
+                        reading.start()
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { reading.stop(); done() }
         }
     }
     app.run()

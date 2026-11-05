@@ -223,7 +223,7 @@ private func footprint() -> (now: Double, peak: Double) {
 }
 
 /// GPU clients this process opened and their accumulated GPU time, from the GPU driver's registry entries.
-private func gpuTime() -> (clients: Int, ms: Double) {
+func gpuTime() -> (clients: Int, ms: Double) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
     process.arguments = ["-r", "-c", "AGXDeviceUserClient", "-l"]
@@ -250,4 +250,49 @@ private func writeWAV(_ samples: [Float], rate: Double, to url: URL) throws {
     buffer.frameLength = AVAudioFrameCount(samples.count)
     samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
     try file.write(from: buffer)
+}
+
+/// `--stretch-check`: at every menu speed, `TimeStretch` gives the same output whole, in odd
+/// chunks and a sample at a time, of the expected length, with no step in a stretched sine.
+func stretchCheck() -> Bool {
+    var noise = SystemRandomNumberGenerator()
+    var inputs: [(String, [Float])] = [
+        ("noise", (0..<50_000).map { _ in Float.random(in: -0.5...0.5, using: &noise) }),
+        ("sine", (0..<120_000).map { Float(0.5 * sin(2 * Double.pi * 220 * Double($0) / 24_000)) }),
+    ]
+    if let clip = try? VoicePreset.named("london-storyteller").audio, let speech = try? readWAV(clip) { inputs.append(("voice", speech)) }
+    func stretch(_ x: [Float], _ rate: Double, pieces: [Int]) -> [Float] {
+        var s = TimeStretch(rate: rate), out: [Float] = [], i = 0, k = 0
+        while i < x.count {
+            let n = min(pieces[k % pieces.count], x.count - i)
+            out += s.push(Array(x[i..<i + n]))
+            i += n
+            k += 1
+        }
+        return out + s.finish()
+    }
+    var ok = true
+    for rate in [0.9, 1.15, 1.3, 1.5, 1.75, 2.0] {
+        for (name, x) in inputs {
+            let whole = stretch(x, rate, pieces: [x.count])
+            let same = stretch(x, rate, pieces: [3840, 1920, 2880, 7680, 5]) == whole && (name == "voice" || stretch(x, rate, pieces: [1]) == whole)
+            let length = whole.count == Int((Double(x.count) / rate).rounded())
+            var smooth = true
+            if name == "sine" {
+                let body = whole[2000..<(whole.count - 2000)]
+                smooth = zip(body, body.dropFirst()).allSatisfy { abs($0 - $1) < 0.03 } // the sine's own step is 0.029
+            }
+            ok = ok && same && length && smooth
+            print(String(format: "%.2f× %@: %@", rate, name, same && length && smooth ? "ok" : "FAIL (same \(same), length \(length), smooth \(smooth))"))
+        }
+    }
+    print(ok ? "PASS" : "FAIL")
+    return ok
+}
+
+private func readWAV(_ url: URL) throws -> [Float] {
+    let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { return [] }
+    try file.read(into: buffer)
+    return Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
 }

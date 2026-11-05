@@ -2,6 +2,11 @@ import AppKit
 import ApplicationServices
 import ServiceManagement
 
+enum VoiceChoice: String, Codable {
+    case kokoro, narrator
+    static let key = "voice"
+}
+
 /// The interaction:
 ///   hold ⌃ Control → the paragraph under the pointer lights up
 ///   release        → read from that paragraph to the end
@@ -24,6 +29,14 @@ final class AppController: NSObject {
     private var session: ReadingSession?
     private var ready = false
     private var speed: Float = 1.0
+    private var voiceChoice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init) ?? .kokoro
+    private enum NarratorState { case unloaded, loading, ready(Narrator), failed }
+    private var narratorState = NarratorState.unloaded
+    private var voiceChoiceMenu: NSMenu!
+    private var narrator: Narrator? {
+        guard voiceChoice == .narrator, case .ready(let n) = narratorState else { return nil }
+        return n
+    }
 
     // Aiming state while the key is held.
     private var aimTimer: Timer?
@@ -42,6 +55,11 @@ final class AppController: NSObject {
         func matches(_ doc: ReadableDocument, _ start: AnyObject) -> Bool {
             CFEqual(element, doc.element) && CFEqual(self.start, start)
         }
+        func claim() -> PrimedSentence? {
+            defer { primed = nil }
+            return primed
+        }
+        deinit { primed?.cancel() }
     }
     private var speculation: Speculation?
     /// The paragraph aimed at, and since when. Speculate once it's stable.
@@ -158,6 +176,7 @@ final class AppController: NSObject {
                 ready = true
                 print(String(format: "[unread] English voice ready in %.1fs", Date().timeIntervalSince(t)))
                 setStatus("Hold ⌃ and point to read")
+                loadNarratorIfChosen()
             } catch {
                 print("[unread] failed to load English voice: \(error)")
                 setStatus("Voice failed to load — see terminal")
@@ -168,6 +187,24 @@ final class AppController: NSObject {
             } catch {
                 print("[unread] French voice unavailable: \(error)")
             }
+        }
+    }
+
+    private func loadNarratorIfChosen() {
+        guard voiceChoice == .narrator, case .unloaded = narratorState else { return }
+        narratorState = .loading
+        updateVoiceMenu()
+        Task {
+            let t = Date()
+            do {
+                narratorState = .ready(try await Narrator.load(preset: VoicePreset.named("london-storyteller")))
+                print(String(format: "[unread] narrator ready in %.1fs", Date().timeIntervalSince(t)))
+            } catch {
+                narratorState = .failed
+                print("[unread] narrator unavailable, reading with Kokoro: \(error)")
+            }
+            updateVoiceMenu()
+            session?.narrator = narrator
         }
     }
 
@@ -191,7 +228,7 @@ final class AppController: NSObject {
     }
 
     private func beginAiming() {
-        session?.setHighlightSuspended(true)
+        session?.setAiming(true)
         aim()
         aimTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.aim() }
@@ -244,23 +281,9 @@ final class AppController: NSObject {
         if let s = speculation, s.matches(doc, start) || !s.done { return }
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
-        let voice = self.voice, speed = self.speed
-        let task = Task { @MainActor [weak spec] () -> PrimedSentence.Prepared? in
-            let extracted = await AXWorker.shared.run { () -> (Sentence, ReadingScope?, Double)? in
-                let t = Date()
-                let scope = doc.scope(from: start)
-                guard let sentence = doc.sentence(from: start, in: scope) else { return nil }
-                return (sentence, scope, LatencyLog.ms(since: t))
-            }
-            guard let (sentence, scope, extractMs) = extracted else { spec?.done = true; return nil }
-            let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
-            let t = Date(), opening = OpeningClause.of(sentence)
-            let speech = try? await voice.synthesize(OpeningClause.text(of: sentence, saying: opening), language: lang, speed: speed)
-            spec?.done = true
-            return PrimedSentence.Prepared(sentence: sentence, scope: scope, extractMs: extractMs, words: opening,
-                                           speech: speech, synthMs: LatencyLog.ms(since: t))
-        }
-        spec.primed = PrimedSentence(prepared: task)
+        if narrator != nil { session?.yieldNarrator() }
+        spec.primed = PrimedSentence.prepare(doc, from: start, kokoro: voice, narrator: narrator, speed: speed,
+                                             settled: { [weak spec] in spec?.done = true })
     }
 
     private func endAiming() {
@@ -269,7 +292,7 @@ final class AppController: NSObject {
         aimToken += 1 // drop any lookup still in flight
         aimInFlight = false
         overlay.hide()
-        session?.setHighlightSuspended(false)
+        session?.setAiming(false)
     }
 
     private func keyUp(held: TimeInterval) {
@@ -278,13 +301,15 @@ final class AppController: NSObject {
         let spec = speculation
         speculation = nil
         steadyAim = nil
+        // Jumping: stop the reading before aiming ends, or it would start the narrator on its next sentence first.
+        if held >= holdThreshold, target != nil { session?.stop() }
         endAiming()
         let releasedAt = Date()
 
         if held >= holdThreshold {
             // Point-and-hold: read from the paragraph we were aiming at.
             if let target {
-                let primed = spec.flatMap { $0.matches(target.document, target.start) ? $0.primed : nil }
+                let primed = spec.flatMap { $0.matches(target.document, target.start) ? $0.claim() : nil }
                 startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold, primed: primed)
             } else {
                 // Released before the first lookup came back from the AX worker
@@ -348,8 +373,8 @@ final class AppController: NSObject {
         let app = NSRunningApplication(processIdentifier: AX.pid(doc.element))?.bundleIdentifier
         let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs,
                                    speculative: gesture == .hold ? primed != nil : nil)
-        let s = ReadingSession(document: doc, start: start, speed: speed, voice: voice, player: player, overlay: overlay,
-                               startedAt: releasedAt, timing: timing, primed: primed)
+        let s = ReadingSession(document: doc, start: start, speed: speed, kokoro: voice, narrator: narrator, player: player,
+                               overlay: overlay, startedAt: releasedAt, timing: timing, primed: primed)
         s.onFinish = { [weak self, weak s] in
             guard let self, self.session === s else { return }
             self.session = nil
@@ -395,7 +420,19 @@ final class AppController: NSObject {
         speedItem.submenu = speedMenu
         menu.addItem(speedItem)
 
-        let voiceItem = NSMenuItem(title: "English voice", action: nil, keyEquivalent: "")
+        let readerItem = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+        voiceChoiceMenu = NSMenu()
+        for choice in [VoiceChoice.kokoro, .narrator] {
+            let item = NSMenuItem(title: "", action: #selector(pickVoiceChoice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice.rawValue
+            voiceChoiceMenu.addItem(item)
+        }
+        readerItem.submenu = voiceChoiceMenu
+        menu.addItem(readerItem)
+        updateVoiceMenu()
+
+        let voiceItem = NSMenuItem(title: "Kokoro English voice", action: nil, keyEquivalent: "")
         let voiceMenu = NSMenu()
         for v in ["af_heart", "af_bella", "af_nicole", "am_michael", "am_fenrir", "bf_emma", "bm_george", "bm_fable"] {
             let item = NSMenuItem(title: v, action: #selector(pickVoice(_:)), keyEquivalent: "")
@@ -431,12 +468,34 @@ final class AppController: NSObject {
         item.menu?.items.forEach { $0.state = $0 === item ? .on : .off }
     }
 
+    private func updateVoiceMenu() {
+        for item in voiceChoiceMenu.items {
+            let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
+            item.state = choice == voiceChoice ? .on : .off
+            switch (choice, narratorState) {
+            case (.kokoro, _): item.title = "Kokoro"
+            case (.narrator, .loading): item.title = "Narrator — London storyteller (loading…)"
+            case (.narrator, .failed): item.title = "Narrator — London storyteller (unavailable, see log)"
+            case (.narrator, _): item.title = "Narrator — London storyteller"
+            }
+        }
+    }
+
+    @objc private func pickVoiceChoice(_ item: NSMenuItem) {
+        voiceChoice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
+        UserDefaults.standard.set(voiceChoice.rawValue, forKey: VoiceChoice.key)
+        if voiceChoice == .narrator, case .failed = narratorState { narratorState = .unloaded }
+        if ready { loadNarratorIfChosen() }
+        updateVoiceMenu()
+        session?.narrator = narrator
+    }
+
     @objc private func pickVoice(_ item: NSMenuItem) {
         let v = item.title
         item.menu?.items.forEach { $0.state = $0 === item ? .on : .off }
         Task {
             await voice.setEnglishVoice(v)
-            session?.settingsChanged() // re-voice what's waiting behind the current sentence
+            session?.kokoroVoiceChanged() // re-voice what's waiting behind the current sentence
         }
     }
 

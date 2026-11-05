@@ -9,14 +9,43 @@ struct PrimedSentence {
         /// The reading scope computed with it, so release doesn't pay for it again.
         let scope: ReadingScope?
         let extractMs: Double
-        /// The display words `speech` says: the whole sentence, or the
-        /// opening clause of a long one (#14).
         let words: Range<Int>
-        let speech: Speech?
+        let take: Take
         let synthMs: Double
     }
     /// Nil if there was nothing to read at the aimed paragraph.
     let prepared: Task<Prepared?, Never>
+
+    @MainActor
+    static func prepare(_ doc: ReadableDocument, from start: AnyObject, kokoro: Voice, narrator: Narrator?, speed: Float,
+                        settled: @escaping @MainActor () -> Void = {}) -> PrimedSentence {
+        PrimedSentence(prepared: Task { @MainActor () -> Prepared? in
+            let found = await AXWorker.shared.run { () -> (Sentence, ReadingScope?, Double)? in
+                let t = Date()
+                let scope = doc.scope(from: start)
+                guard let sentence = doc.sentence(from: start, in: scope) else { return nil }
+                return (sentence, scope, LatencyLog.ms(since: t))
+            }
+            guard let (sentence, scope, extractMs) = found else { settled(); return nil }
+            let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
+            let t = Date()
+            if let narrator {
+                defer { settled() }
+                return Prepared(sentence: sentence, scope: scope, extractMs: extractMs, words: sentence.words.indices,
+                                take: .narrator(NarratorTake(narrator, text: sentence.text, language: lang)), synthMs: 0)
+            }
+            let opening = OpeningClause.of(sentence)
+            let speech = try? await kokoro.synthesize(OpeningClause.text(of: sentence, saying: opening), language: lang, speed: speed)
+            settled()
+            return Prepared(sentence: sentence, scope: scope, extractMs: extractMs, words: opening,
+                            take: .kokoro(speech ?? Speech(samples: []), speed: speed), synthMs: LatencyLog.ms(since: t))
+        })
+    }
+
+    func cancel() {
+        let prepared = self.prepared
+        Task { @MainActor in await prepared.value?.take.cancel() }
+    }
 }
 
 /// Where to cut a reading's first sentence so the voice starts on its
@@ -79,6 +108,7 @@ enum Pacing {
     }
 
     static var edgeSamples: Int { Int(edge * 24_000) }
+    static var edgeQuiet: [Float] { [Float](repeating: 0, count: edgeSamples) }
 }
 
 extension Sentence {
@@ -94,11 +124,11 @@ extension Sentence {
 @MainActor
 final class ReadingSession {
     let document: ReadableDocument
-    /// Changing it re-synthesizes everything not yet playing (#15).
-    var speed: Float { didSet { if speed != oldValue { settingsChanged() } } }
+    var speed: Float { didSet { if speed != oldValue { redo(\.take.isKokoro) } } }
+    var narrator: Narrator? { didSet { if narrator !== oldValue { redo { _ in true } } } }
     var onFinish: (() -> Void)?
 
-    private let voice: Voice
+    private let kokoro: Voice
     private let player: Player
     private let overlay: Overlay
     private let language = LanguageTracker()
@@ -140,11 +170,34 @@ final class ReadingSession {
         /// The display words this piece says.
         let words: Range<Int>
         var text: String { OpeningClause.text(of: sentence, saying: words) }
+        /// What the narrator says: not Kokoro's lookahead words, since streamed audio is on
+        /// the player before it could be cut after them.
+        var narrated: String { sentence.text(of: words) }
         var endsSentence: Bool { words.upperBound == sentence.words.count }
     }
-    private struct Ready { let pending: Pending; let speech: Speech; let speed: Float }
+    private struct Ready { let pending: Pending; let take: Take }
     /// Extracting or synthesizing the next sentence (one at a time).
     private var producing = false
+    private var inFlight: NarratorTake?
+    /// #15: a buffer on the player can't be taken back, so only the piece playing streams into it.
+    private var live: Live?
+    private struct Live {
+        let pending: Pending
+        let take: NarratorTake
+        let speed: Float
+        var stretch: TimeStretch?
+        var fed = 0, said = 0
+        var held: [Float] = []
+        /// The player's timeline runs on when it runs dry, so a chunk that comes late starts later.
+        var runs: [(said: Int, at: Int)] = []
+        var voiced = 0
+        var reached = Int.min
+
+        func timeline(_ s: Int) -> Int {
+            let run = runs.last { $0.said <= s } ?? runs[0]
+            return run.at + s - run.said
+        }
+    }
     private var cancelled = false
     private var spokeAnything = false
     private let debugSession = ProcessInfo.processInfo.environment["UNREAD_DEBUG_OVERLAY"] != nil
@@ -193,11 +246,13 @@ final class ReadingSession {
 
     var isPaused: Bool { player.isPaused }
 
-    init(document: ReadableDocument, start: AnyObject, speed: Float, voice: Voice, player: Player, overlay: Overlay, startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
+    init(document: ReadableDocument, start: AnyObject, speed: Float, kokoro: Voice, narrator: Narrator?, player: Player, overlay: Overlay,
+         startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
         self.document = document
         self.cursor = start
         self.speed = speed
-        self.voice = voice
+        self.kokoro = kokoro
+        self.narrator = narrator
         self.player = player
         self.overlay = overlay
         self.startedAt = startedAt
@@ -206,13 +261,17 @@ final class ReadingSession {
         self.primedSpeed = speed
     }
 
-    /// Speed or voice changed: keep the sentence that's playing, throw away
-    /// the audio waiting behind it and synthesize those sentences again.
-    /// A synthesis already running is redone when it finishes.
-    func settingsChanged() {
+    func kokoroVoiceChanged() { redo(\.take.isKokoro) }
+
+    private func redo(_ stale: (Ready) -> Bool) {
         generation += 1
-        backlog = (ready.map(\.pending) + backlog).sorted { $0.seq < $1.seq }
-        ready = []
+        let dropped = ready.filter(stale)
+        ready.removeAll(where: stale)
+        for r in dropped {
+            r.take.cancel()
+            if case .narrator(let t) = r.take, t === inFlight { inFlight = nil; producing = false }
+        }
+        backlog = (dropped.map(\.pending) + backlog).sorted { $0.seq < $1.seq }
         if debugSession { print("[session] settings changed; \(backlog.count) piece(s) to synthesize") }
         fill()
     }
@@ -228,6 +287,8 @@ final class ReadingSession {
 
     func stop() {
         cancelled = true
+        ready.forEach { $0.take.cancel() }
+        live?.take.cancel()
         refresh?.invalidate()
         overlay.clearFrameHandler(self)
         player.stop()
@@ -239,10 +300,20 @@ final class ReadingSession {
     }
 
     /// While the user is aiming at a new spot, the preview owns the overlay.
-    func setHighlightSuspended(_ suspended: Bool) {
-        suspendHighlight = suspended
-        if suspended { markedWord = nil; overlay.hideWord() } else { showCurrent(scroll: false) }
+    func setAiming(_ aiming: Bool) {
+        suspendHighlight = aiming
+        if aiming { markedWord = nil; overlay.hideWord() } else { yielding = false; showCurrent(scroll: false); fill() }
     }
+
+    /// The hold's speculation needs the narrator, which says one sentence at a time: stop the
+    /// sentence it's synthesizing ahead and start no other until the hold ends. A sentence
+    /// streaming into the player can't be stopped without cutting it.
+    func yieldNarrator() {
+        guard narrator != nil else { return }
+        yielding = true
+        if let t = inFlight, live?.take !== t { redo { if case .narrator(let r) = $0.take { r === t } else { false } } }
+    }
+    private var yielding = false
 
     // MARK: Pipeline
     //
@@ -256,7 +327,7 @@ final class ReadingSession {
         producing = true
         Task { [weak self] in
             let prepared = await p.prepared.value
-            guard let self, !self.cancelled else { return }
+            guard let self, !self.cancelled else { prepared?.take.cancel(); return }
             self.producing = false
             guard let prepared else { self.fill(); return } // nothing prepared: start the normal way
             self.scope = prepared.scope
@@ -265,16 +336,28 @@ final class ReadingSession {
             self.lastExtracted = prepared.sentence
             let lang = self.language.language(for: prepared.sentence.text) // keep language stickiness in step
             self.timing?.extractMs = prepared.extractMs
-            let pieces = self.pieces(of: prepared.sentence, language: lang, opening: prepared.words)
-            if self.speed != self.primedSpeed {
-                // The speed changed during the hold: synthesize the first sentence again.
-                self.backlog += pieces
+            let usable = switch prepared.take {
+            case .kokoro: self.narrator == nil && self.speed == self.primedSpeed
+            case .narrator: self.narrator != nil
+            }
+            guard usable else {
+                prepared.take.cancel()
+                self.backlog += self.pieces(of: prepared.sentence, language: lang, opening: self.opening(of: prepared.sentence))
                 self.fill()
                 return
             }
+            let pieces = self.pieces(of: prepared.sentence, language: lang, opening: prepared.words)
             self.backlog += pieces.dropFirst()
-            self.enqueue(pieces[0], speech: prepared.speech, speed: self.speed, synthMs: prepared.synthMs)
+            self.enqueue(pieces[0], take: prepared.take, synthMs: prepared.synthMs)
         }
+    }
+
+    /// The words a reading's first piece says: Kokoro starts on the opening clause of a long
+    /// sentence (#14). The narrator streams, so it doesn't need to: its first audible chunk
+    /// takes as long for 31 characters as for 194 (`--narrate`), and a clause said alone
+    /// would lose the intonation it carries across the sentence.
+    private func opening(of sentence: Sentence) -> Range<Int> {
+        narrator == nil ? OpeningClause.of(sentence) : sentence.words.indices
     }
 
     private func fill() {
@@ -313,7 +396,7 @@ final class ReadingSession {
             // while earlier ones play.
             let first = self.nextSeq == 0
             let pieces = self.pieces(of: sentence, language: self.language.language(for: sentence.text),
-                                     opening: first ? OpeningClause.of(sentence) : sentence.words.indices)
+                                     opening: first ? self.opening(of: sentence) : sentence.words.indices)
             self.backlog += pieces.dropFirst()
             self.synthesize(pieces[0])
         }
@@ -336,10 +419,19 @@ final class ReadingSession {
     /// Synthesize at the current settings. If they change before it's done,
     /// the piece goes back into `backlog` instead of playing.
     private func synthesize(_ pending: Pending) {
-        let generation = self.generation, speed = self.speed, voice = self.voice
+        if let narrator {
+            guard !yielding else {
+                producing = false
+                backlog = (backlog + [pending]).sorted { $0.seq < $1.seq }
+                return
+            }
+            enqueue(pending, take: .narrator(NarratorTake(narrator, text: pending.narrated, language: pending.language)), synthMs: 0)
+            return
+        }
+        let generation = self.generation, speed = self.speed, kokoro = self.kokoro
         Task { [weak self] in
             let synthStart = Date()
-            let speech = try? await voice.synthesize(pending.text, language: pending.language, speed: speed)
+            let speech = try? await kokoro.synthesize(pending.text, language: pending.language, speed: speed)
             guard let self, !self.cancelled else { return }
             self.producing = false
             guard generation == self.generation else {
@@ -347,42 +439,70 @@ final class ReadingSession {
                 self.fill()
                 return
             }
-            self.enqueue(pending, speech: speech, speed: speed, synthMs: LatencyLog.ms(since: synthStart))
+            // Nothing to say (synthesis failed): keep its place so order holds, then skip it.
+            self.enqueue(pending, take: .kokoro(speech ?? Speech(samples: []), speed: speed), synthMs: LatencyLog.ms(since: synthStart))
         }
     }
 
-    private func enqueue(_ pending: Pending, speech: Speech?, speed: Float, synthMs: Double) {
-        guard !cancelled else { return }
-        // Nothing to say (synthesis failed): keep its place so order holds, then skip it.
-        ready.append(Ready(pending: pending, speech: speech ?? Speech(samples: []), speed: speed))
+    private func enqueue(_ pending: Pending, take: Take, synthMs: Double) {
+        guard !cancelled else { take.cancel(); return }
+        ready.append(Ready(pending: pending, take: take))
         ready.sort { $0.pending.seq < $1.pending.seq }
-        if timing != nil, timing?.synthMs == nil { timing?.synthMs = synthMs }
+        switch take {
+        case .kokoro: if timing != nil, timing?.synthMs == nil { timing?.synthMs = synthMs }
+        case .narrator(let t):
+            t.onArrival = { [weak self, weak t] in if let self, let t { self.arrived(t) } }
+            if !t.isComplete { inFlight = t; producing = true }
+        }
         scheduleNext()
         fill()
+    }
+
+    private func arrived(_ take: NarratorTake) {
+        guard !cancelled else { return }
+        if debugSession {
+            let piece = live?.take === take ? live?.pending : ready.first { if case .narrator(let t) = $0.take { t === take } else { false } }?.pending
+            print(String(format: "[take] #%d (%d chars) %.0f ms: %d samples%@", piece?.seq ?? -1, piece?.text.count ?? 0,
+                         Date().timeIntervalSince(take.started) * 1000, take.samples.count, take.isComplete ? " complete" : ""))
+        }
+        if take.isComplete, take === inFlight { inFlight = nil; producing = false }
+        if live?.take === take { feed() } else { scheduleNext() }
+        if take.isComplete { fill() }
     }
 
     /// Hand the next piece to the player, if it's ready and the player has
     /// consumed the previous one's speech (it's now in its closing pause).
     private func scheduleNext() {
-        while !cancelled, playerWantsMore, let next = ready.first, next.pending.seq == nextToPlay {
+        while !cancelled, live == nil, playerWantsMore, let next = ready.first, next.pending.seq == nextToPlay {
+            let piece = next.pending
+            let whole: Speech, speed: Float
+            switch next.take {
+            case .kokoro(let speech, let s): (whole, speed) = (speech, s)
+            case .narrator(let take) where take.isComplete:
+                (whole, speed) = (take.speech(words: piece.sentence.words[piece.words], speed: self.speed), self.speed)
+            case .narrator(let take):
+                guard take.samples.count >= Narrator.prebuffer(characters: piece.narrated.count, speed: self.speed) else { return }
+                ready.removeFirst()
+                nextToPlay += 1
+                goLive(piece, take)
+                return
+            }
             ready.removeFirst()
             nextToPlay += 1
-            let piece = next.pending
             let continues = piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1
             // Without the voice's lead-in: the pause before it is `Pacing`'s, or the
             // opening clause's own when this is the rest of a split sentence (#14).
-            let speech = next.speech.trimmingLeadingQuiet(keep: Pacing.edgeSamples)
+            let speech = whole.trimmingLeadingQuiet(keep: Pacing.edgeSamples)
             // Nothing to say: skip it, unless the sentence playing needs it to end.
             guard !speech.samples.isEmpty || (continues && piece.endsSentence) else { continue }
             playerWantsMore = false
             spokeAnything = true
             let samples: [Float], ending: Player.Ending
-            if piece.endsSentence {
-                let said = speech.trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
+            if piece.endsSentence || !next.take.isKokoro {
+                // The rest of a split sentence follows a narrator piece after `Pacing.edge`, scheduled during it.
+                let said = speech.trimmingTrailingQuiet(keep: piece.endsSentence ? Pacing.edgeSamples : 0).samples
                 samples = said.isEmpty ? [0] : said
-                ending = .sentence(pause: Pacing.pause(after: piece.sentence, speed: next.speed), played: { [weak self] in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
-                })
+                ending = piece.endsSentence ? sentenceEnding(piece, speed: speed) : .clause(pause: Pacing.edgeQuiet)
             } else {
                 // Cut off the lookahead. The clause's own pause gives the slack to schedule the rest gaplessly.
                 let (clause, pause) = speech.cut(beforeWord: piece.words.count)
@@ -395,30 +515,127 @@ final class ReadingSession {
                 case .sentence(let pause, _): after = String(format: "+%.2fs%@", Double(pause) / 24_000, piece.sentence.endsBlock ? " ¶" : "")
                 case .clause(let pause): after = String(format: "+%.2fs clause", Double(pause.count) / 24_000)
                 }
-                print(String(format: "[session] playing #%d at %.2g× (%.1fs %@) %@", piece.seq, next.speed,
+                print(String(format: "[session] playing #%d at %.2g× (%.1fs %@) %@", piece.seq, speed,
                              Double(samples.count) / 24_000, after, piece.text.prefix(40).debugDescription))
             }
-            let start = player.schedule(samples, ending: ending, consumed: { [weak self] in
-                DispatchQueue.main.async { MainActor.assumeIsolated { self?.speechConsumed() } }
-            })
-            // The rest of a split sentence joins the sentence already playing.
-            if !continues {
-                queued.append(Playing(sentence: piece.sentence, start: start, lastSeq: piece.seq, wordStarts: piece.sentence.words.map { _ in nil }))
-                if queued.count == 1 { showCurrent(scroll: true) }
-            }
-            let last = queued.count - 1, shift = start - queued[last].start
-            queued[last].lastSeq = piece.seq
+            let start = player.schedule(samples, ending: ending, consumed: consumedCallback())
+            logScheduled(piece, from: start, to: start + samples.count, ending: ending)
+            let last = place(piece, at: start, continues: continues), shift = start - queued[last].start
             for (word, s) in zip(piece.words, speech.wordStarts) { queued[last].wordStarts[word] = s.map { $0 + shift } }
-            if var t = timing {
-                // Measured after scheduling: that's when the buffer is queued on a running engine.
-                t.firstAudioMs = LatencyLog.ms(since: startedAt)
-                t.outputLatencyMs = (player.outputLatency * 1000).rounded()
-                timing = nil
-                print(String(format: "[unread] first audio %.0f ms after release (%@, extract %.0f, synth %.0f, +%.0f device)",
-                             t.firstAudioMs!, t.gesture.rawValue, t.extractMs ?? 0, t.synthMs ?? 0, t.outputLatencyMs!))
-                LatencyLog.append(t)
+            switch next.take {
+            case .kokoro: firstAudio(samples, voice: .kokoro)
+            case .narrator(let take): firstAudio(samples, voice: .narrator, synthMs: LatencyLog.ms(since: take.started))
             }
         }
+    }
+
+    private func sentenceEnding(_ piece: Pending, speed: Float) -> Player.Ending {
+        .sentence(pause: Pacing.pause(after: piece.sentence, speed: speed), played: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
+        })
+    }
+
+    private func consumedCallback() -> @Sendable () -> Void {
+        { [weak self] in DispatchQueue.main.async { MainActor.assumeIsolated { self?.speechConsumed() } } }
+    }
+
+    private func place(_ piece: Pending, at start: Int, continues: Bool) -> Int {
+        if !continues {
+            queued.append(Playing(sentence: piece.sentence, start: start, lastSeq: piece.seq, wordStarts: piece.sentence.words.map { _ in nil }))
+            if queued.count == 1 { showCurrent(scroll: true) }
+        }
+        queued[queued.count - 1].lastSeq = piece.seq
+        return queued.count - 1
+    }
+
+    private func goLive(_ piece: Pending, _ take: NarratorTake) {
+        playerWantsMore = false
+        spokeAnything = true
+        live = Live(pending: piece, take: take, speed: speed, stretch: speed == 1 ? nil : TimeStretch(rate: Double(speed)))
+        if debugSession {
+            print(String(format: "[session] streaming #%d at %.2g× from %.2fs of audio %@", piece.seq, speed,
+                         Double(take.samples.count) / 24_000, piece.text.prefix(40).debugDescription))
+        }
+        feed()
+    }
+
+    private func feed() {
+        guard var l = live else { return }
+        let piece = l.pending, complete = l.take.isComplete
+        let arrived = Array(l.take.samples[l.fed...])
+        l.fed = l.take.samples.count
+        var out = l.held
+        if var stretch = l.stretch {
+            out += stretch.push(arrived)
+            if complete { out += stretch.finish() }
+            l.stretch = stretch
+        } else {
+            out += arrived
+        }
+        let quiet = Speech(samples: out).trailingQuiet, edge = piece.endsSentence ? Pacing.edgeSamples : 0
+        let keep = out.count - (complete ? max(quiet - edge, 0) : quiet)
+        var said = Array(out[..<keep])
+        l.held = Array(out[keep...])
+        guard !said.isEmpty || complete else { live = l; return }
+        if said.isEmpty { said = [0] }
+        let ending: Player.Ending = !complete ? .clause(pause: []) : piece.endsSentence ? sentenceEnding(piece, speed: l.speed) : .clause(pause: Pacing.edgeQuiet)
+        let consumed: @Sendable () -> Void = complete ? consumedCallback() : { @Sendable in }
+        let start = player.schedule(said, ending: ending, consumed: consumed)
+        let first = l.runs.isEmpty
+        if first {
+            l.voiced = Speech(samples: said).leadingQuiet
+        } else if start != l.timeline(l.said) {
+            if debugSession { print(String(format: "[session] underrun: #%d waited %.0f ms for audio", piece.seq, Double(start - l.timeline(l.said)) / 24)) }
+        }
+        if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }
+        l.said += said.count
+        let index = first ? place(piece, at: start, continues: piece.words.lowerBound > 0 && queued.last?.lastSeq == piece.seq - 1) : queued.count - 1
+        let predicted = l.voiced + Int(Double(piece.narrated.count) / Narrator.pace / Double(l.speed) * 24_000)
+        let end = complete ? l.said - min(quiet, edge) : max(predicted, l.said)
+        let base = queued[index].start
+        // Words the mark has reached keep their start, so it never steps back as the estimate grows
+        // (the player reports no position while paused; the mark draws `lead` ahead).
+        if let p = player.position { l.reached = max(l.reached, p - base + HighlightSettings.shared.style.lead.rawValue * 24) }
+        for (word, s) in zip(piece.words, WordTiming.estimated(piece.sentence.words[piece.words], voiced: l.voiced..<max(l.voiced, end))) {
+            if let old = queued[index].wordStarts[word], old <= l.reached { continue }
+            queued[index].wordStarts[word] = s.map { l.timeline($0) - base }
+        }
+        if first { firstAudio(said, voice: .narrator, synthMs: LatencyLog.ms(since: l.take.started)) }
+        if complete {
+            logScheduled(piece, from: l.runs[0].at, to: l.timeline(l.said), ending: ending)
+            live = nil
+        } else {
+            live = l
+        }
+    }
+
+    private var loggedFirstAudio = false
+
+    /// `synthMs`: the narrator's, from asking to playing; Kokoro's was recorded when it was synthesized.
+    private func firstAudio(_ samples: [Float], voice: VoiceChoice, synthMs: Double? = nil) {
+        guard !loggedFirstAudio else { return }
+        loggedFirstAudio = true
+        let ms = LatencyLog.ms(since: startedAt), voiceAt = Double(Speech(samples: samples).leadingQuiet) / 24
+        if debugSession { print(String(format: "[session] first audio %.0f ms after start, the voice %.0f ms into it", ms, voiceAt)) }
+        guard var t = timing else { return }
+        // Measured after scheduling: that's when the buffer is queued on a running engine.
+        t.firstAudioMs = ms
+        t.outputLatencyMs = (player.outputLatency * 1000).rounded()
+        t.voice = voice
+        if let synthMs { t.synthMs = synthMs }
+        timing = nil
+        print(String(format: "[unread] first audio %.0f ms after release (%@%@, extract %.0f, synth %.0f, +%.0f device)",
+                     t.firstAudioMs!, t.gesture.rawValue, voice == .narrator ? ", narrator" : "", t.extractMs ?? 0, t.synthMs ?? 0, t.outputLatencyMs!))
+        LatencyLog.append(t)
+    }
+
+    private func logScheduled(_ piece: Pending, from: Int, to: Int, ending: Player.Ending) {
+        guard debugSession else { return }
+        let pause = switch ending {
+        case .sentence(let pause, _): pause
+        case .clause(let pause): pause.count
+        }
+        print("[sched] #\(piece.seq) speech \(from)..\(to) pause \(pause)\(piece.sentence.endsBlock && piece.endsSentence ? " ¶" : "")")
     }
 
     private func speechConsumed() {
@@ -438,7 +655,7 @@ final class ReadingSession {
         if let last = lastHead, let next = queued.first { entry = (next.sentence.range, last.box) }
         if queued.isEmpty {
             overlay.hide()
-            if cursor == nil, !producing, ready.isEmpty, backlog.isEmpty { finish() }
+            if cursor == nil, !producing, live == nil, ready.isEmpty, backlog.isEmpty { finish() }
         } else {
             showCurrent(scroll: true)
         }

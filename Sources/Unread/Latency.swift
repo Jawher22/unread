@@ -29,6 +29,8 @@ struct LatencyRecord: Codable {
     var openingChars: Int?
     /// Whether first audio came from speculative synthesis during the hold (#5).
     var speculative: Bool?
+    /// Nil in records from before the narrator (#62): Kokoro.
+    var voice: VoiceChoice?
 }
 
 enum LatencyLog {
@@ -76,6 +78,10 @@ enum LatencyLog {
         stage("release → first audio", records.map(\.firstAudioMs))
         for g in [LatencyRecord.Gesture.hold, .doubleTap] {
             stage("  \(g.rawValue)", records.filter { $0.gesture == g }.map(\.firstAudioMs))
+        }
+        if records.contains(where: { $0.voice != nil }) {
+            stage("  kokoro", records.filter { $0.voice != .narrator }.map(\.firstAudioMs))
+            stage("  narrator", records.filter { $0.voice == .narrator }.map(\.firstAudioMs))
         }
         let spec = records.filter { $0.speculative != nil }
         if !spec.isEmpty {
