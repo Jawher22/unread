@@ -103,6 +103,12 @@ actor Narrator {
             .appendingPathComponent("Library/Application Support/Unread/models/Qwen3-TTS-1.7B-Base-ANE")
     }
 
+    /// The model set is on disk at the revision this build reads.
+    nonisolated static func isInstalled(at models: URL = modelDirectory) -> Bool {
+        let complete = try? String(contentsOf: models.appendingPathComponent(".complete"), encoding: .utf8)
+        return complete?.trimmingCharacters(in: .whitespacesAndNewlines) == modelRevision
+    }
+
     /// Loads the model, encodes each preset's clip (cached after the first time) and warms both languages.
     /// Loads the aligner alongside (~0.2 s; its first load downloads ~100 MB and compiles for about 50 s).
     static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
@@ -125,10 +131,7 @@ actor Narrator {
     }
 
     private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int]) throws {
-        let complete = try? String(contentsOf: models.appendingPathComponent(".complete"), encoding: .utf8)
-        guard complete?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.modelRevision else {
-            throw Failure.modelMissing(models, revision: Self.modelRevision)
-        }
+        guard Self.isInstalled(at: models) else { throw Failure.modelMissing(models, revision: Self.modelRevision) }
         queue = DispatchSerialQueue(label: "unread.narrator", qos: .userInitiated)
         self.chunkFrames = chunkFrames
         let mappedBefore = Set(MappedFiles.regions().map(\.address))
