@@ -63,36 +63,18 @@ struct VoicePreset: Sendable, Identifiable, Hashable {
     }
 }
 
+/// Where the narrator is: the only voice, so nothing reads until it's ready.
 enum NarratorStatus {
-    case notLoaded, loading, ready, unavailable
+    case notLoaded, loading, ready, unavailable, missing
 
-    /// What the menu says beside the narrator's name.
+    /// What the menu says beside the voice's name.
     var note: String? {
         switch self {
-        case .loading: "loading…"
-        case .unavailable: "unavailable, see log"
+        case .loading: "loading"
+        case .unavailable: "failed to load, see the log"
+        case .missing: "model not installed"
         case .notLoaded, .ready: nil
         }
-    }
-}
-
-/// Which voice reads (#59), shared by the menu and Settings and kept across launches. Until one is
-/// picked, the narrator if its model is installed, else Kokoro. While the narrator loads, or if it
-/// can't, Kokoro reads.
-@MainActor
-final class ReadingVoice: ObservableObject {
-    static let shared = ReadingVoice()
-    @Published private(set) var choice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init)
-        ?? (Narrator.isInstalled() ? .narrator : .kokoro)
-    @Published var narratorStatus = NarratorStatus.notLoaded
-    /// Called after a new choice.
-    var onChoose: ((VoiceChoice) -> Void)?
-
-    func choose(_ choice: VoiceChoice) {
-        guard choice != self.choice else { return }
-        self.choice = choice
-        UserDefaults.standard.set(choice.rawValue, forKey: VoiceChoice.key)
-        onChoose?(choice)
     }
 }
 
@@ -105,6 +87,7 @@ final class NarratorVoices: ObservableObject {
     nonisolated static let defaults: [NLLanguage: String] = [.english: "london-storyteller", .french: "conteur-parisien"]
 
     @Published private var chosen: [NLLanguage: String]
+    @Published var status = NarratorStatus.notLoaded
 
     private init() {
         chosen = Dictionary(uniqueKeysWithValues: Self.languages.map { language in

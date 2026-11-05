@@ -1,17 +1,7 @@
 import Foundation
 import NaturalLanguage
 
-enum Take {
-    case kokoro(Speech, speed: Float)
-    case narrator(NarratorTake)
-
-    var isKokoro: Bool { if case .kokoro = self { true } else { false } }
-
-    @MainActor func cancel() {
-        if case .narrator(let take) = self { take.cancel() }
-    }
-}
-
+/// A sentence the narrator says: its audio as it streams, and when each word starts, aligned as it comes (#58).
 @MainActor
 final class NarratorTake {
     private(set) var samples: [Float] = []
@@ -25,19 +15,26 @@ final class NarratorTake {
     var onArrival: (() -> Void)?
     /// Set while it streams into the player: what has arrived is aligned as it comes, for the word mark.
     var live = false { didSet { alignIfDue() } }
+    /// The sentence's display words, and what the narrator is given for them (#18).
     private let words: [Substring]
+    private let spoken: Speakable
+    /// Characters the narrator says: what its pace measures, for the prebuffer and the predicted end.
+    var characters: Int { spoken.text.count }
     private let aligner: Aligner?
-    /// Where each word starts in `samples`, by forced alignment (#58); nil where not known (yet).
+    /// Where each spoken word starts in `samples`, by forced alignment (#58); nil where not known (yet).
     private var aligned: [Int?] = []
     /// Samples the latest alignment covered, and whether one is running on a stream.
     private var alignedThrough = 0, aligning = false
     private var task: Task<Void, Never>?
 
+    /// `words`: the sentence's display words; the narrator is given them made sayable (`Speakable`).
     /// `after`: the sentence before it in the same paragraph, for the narrator to carry on from (#56).
-    init(_ narrator: Narrator, text: String, words: ArraySlice<Substring>, language: NLLanguage, after previous: String? = nil) {
-        let stream = narrator.speak(text, language: language, after: previous)
+    init(_ narrator: Narrator, words: ArraySlice<Substring>, language: NLLanguage, after previous: String? = nil) {
+        let spoken = Speakable(Array(words), language: language)
+        let stream = narrator.speak(spoken.text, language: language, after: previous.map { Speakable($0, language: language).text })
         pace = narrator.pace(for: language)
         self.words = Array(words)
+        self.spoken = spoken
         aligner = language == .english ? narrator.aligner : nil
         task = Task { [weak self] in
             do {
@@ -53,7 +50,7 @@ final class NarratorTake {
             guard let self, !Task.isCancelled else { return }
             self.streamed = true
             self.onArrival?()
-            if let aligner = self.aligner, let starts = try? await aligner.starts(display: self.words, samples: self.samples) {
+            if let aligner = self.aligner, let starts = try? await aligner.starts(display: self.spoken.words, samples: self.samples) {
                 guard !Task.isCancelled else { return }
                 (self.aligned, self.alignedThrough) = (starts, .max)
             }
@@ -73,7 +70,7 @@ final class NarratorTake {
         aligning = true
         let heard = samples
         Task { [weak self] in
-            let starts = try? await aligner.starts(display: self?.words ?? [], samples: heard, complete: false)
+            let starts = try? await aligner.starts(display: self?.spoken.words ?? [], samples: heard, complete: false)
             guard let self else { return }
             self.aligning = false
             if let starts, heard.count > self.alignedThrough {
@@ -84,14 +81,20 @@ final class NarratorTake {
         }
     }
 
-    /// When each word starts, in samples of the audio stretched to `speed`: aligned as far as the
-    /// alignment reached, the rest spread by characters from there to the end of `voiced`.
+    /// When each display word starts, in samples of the audio stretched to `speed`: the spoken words
+    /// aligned as far as the alignment reached, the rest spread by characters from there to the end
+    /// of `voiced`; a display word starts with its first spoken word, and one that isn't said has none.
     func wordStarts(voiced: Range<Int>, speed: Float) -> [Int?] {
+        spoken.displayStarts(spokenStarts(voiced: voiced, speed: speed), displayCount: words.count)
+    }
+
+    private func spokenStarts(voiced: Range<Int>, speed: Float) -> [Int?] {
+        let said = spoken.words[...]
         let scaled = aligned.map { $0.map { Int(Double($0) / Double(speed)) } }
         guard let last = scaled.lastIndex(where: { $0 != nil }), let from = scaled[last] else {
-            return WordTiming.estimated(words[...], voiced: voiced)
+            return WordTiming.estimated(said, voiced: voiced)
         }
-        return Array(scaled[...last]) + WordTiming.estimated(words[last...], voiced: from..<max(from, voiced.upperBound)).dropFirst()
+        return Array(scaled[...last]) + WordTiming.estimated(said[last...], voiced: from..<max(from, voiced.upperBound)).dropFirst()
     }
 
     func speech(speed: Float) -> Speech {

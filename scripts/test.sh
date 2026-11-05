@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build, then check every extraction fixture in both engines, all at once, and the narrator's time stretch (--stretch-check).
+# Build, then check every extraction fixture in both engines, all at once, the narrator's time stretch (--stretch-check) and what it's given for technical text (--speakable-check).
 #
 #   scripts/test.sh                 # every fixture page (.html, .txt, .rtf) with an expected file, then the corpus score (~40 s)
 #   scripts/test.sh --quick         # skip pages that declare --slow (rerender.html) and the corpus, for the inner loop (~5 s)
@@ -35,6 +35,8 @@ done
 FAILED=0
 if ./.build/release/Unread --stretch-check >"$OUT/stretch" 2>&1; then echo "PASS  stretch"
 else echo "FAIL  stretch"; sed 's/^/      /' "$OUT/stretch"; FAILED=1; fi
+if ./.build/release/Unread --speakable-check >"$OUT/speakable" 2>&1; then echo "PASS  speakable"
+else echo "FAIL  speakable"; sed 's/^/      /' "$OUT/speakable"; FAILED=1; fi
 for i in "${!PAGES[@]}"; do
     name=$(basename "${PAGES[$i]}")
     if wait "${PIDS[$i]}"; then echo "PASS  ${name%.*}"

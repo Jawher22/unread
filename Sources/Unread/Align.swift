@@ -72,12 +72,14 @@ actor Aligner {
     private let spotter: CtcKeywordSpotter
     private let tokenizer: CtcTokenizer
     private let blank: Int
+    private let vocabulary: [Int: String]
     private let converter = AudioConverter()
 
     private init(models: CtcModels, tokenizer: CtcTokenizer) {
         spotter = CtcKeywordSpotter(models: models, blankId: models.vocabulary.count)
         self.tokenizer = tokenizer
         blank = models.vocabulary.count
+        vocabulary = models.vocabulary
     }
 
     static func load() async throws -> Aligner {
@@ -99,6 +101,20 @@ actor Aligner {
                                              words: said.map { tokenizer.encode($0) }, blank: blank, complete: complete)
         let saidStarts = frames.map { $0.map { Int(Double($0) * result.frameDuration * 24_000) } }
         return WordTiming.align(display.map(WordTiming.key), said.map(WordTiming.key)).map { $0.flatMap { saidStarts[$0] } }
+    }
+
+    /// What the audio says, as the model hears it: the likeliest token each frame, repeats merged,
+    /// blanks dropped (greedy CTC). A rough transcript, for `--hear`: what the narrator said for a text.
+    func transcribe(_ samples: [Float]) async throws -> String {
+        guard !samples.isEmpty else { return "" }
+        let result = try await spotter.spotKeywordsWithLogProbs(audioSamples: try converter.resample(samples, from: 24_000), customVocabulary: CustomVocabularyContext(terms: []))
+        var text = "", previous = blank
+        for frame in result.logProbs {
+            guard let best = frame.indices.max(by: { frame[$0] < frame[$1] }) else { continue }
+            if best != previous, best != blank { text += vocabulary[best] ?? "" }
+            previous = best
+        }
+        return text.replacingOccurrences(of: "▁", with: " ").trimmingCharacters(in: .whitespaces)
     }
 
     /// Letters, digits and apostrophes, lowercased: what the tokenizer can spell.
