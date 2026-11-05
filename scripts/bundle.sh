@@ -1,5 +1,7 @@
 #!/bin/bash
 # Build Unread.app: release build, bundle, sign.
+# With Xcode installed it also builds the narrator helper (scripts/build-narrator.sh)
+# and bundles it, its Metal library and the voice presets.
 #
 #   scripts/bundle.sh             # → build/Unread.app
 #   scripts/bundle.sh --install   # …and copy it to ~/Applications, then restart it
@@ -17,11 +19,26 @@ VERSION="0.1.0"
 APP="build/Unread.app"
 
 scripts/build.sh
+NARRATOR=""
+if [[ -d "${NARRATOR_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]]; then
+    if scripts/build-narrator.sh; then
+        NARRATOR="Narrator/.build/release"
+    else
+        echo "warning: the narrator helper didn't build, so it isn't in this build" >&2
+    fi
+else
+    echo "warning: no Xcode, so no narrator helper in this build" >&2
+fi
 BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Unread "$APP/Contents/MacOS/Unread"
+cp -R Resources/Voices "$APP/Contents/Resources/Voices"
+if [[ -n "$NARRATOR" ]]; then
+    cp "$NARRATOR/unread-narrator" "$APP/Contents/MacOS/unread-narrator"
+    cp "$NARRATOR/mlx.metallib" "$APP/Contents/Resources/mlx.metallib"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,11 +65,15 @@ if [[ -z "$IDENTITY" ]]; then
 fi
 if [[ -n "$IDENTITY" ]]; then
     echo "Signing with: $IDENTITY"
-    codesign --force --timestamp=none --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
     echo "warning: no signing identity found; signing ad-hoc (Accessibility must be re-granted after every rebuild)" >&2
-    codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+    IDENTITY="-"
 fi
+# The helper is nested code: sign it before the app that seals it.
+if [[ -n "$NARRATOR" ]]; then
+    codesign --force --timestamp=none --sign "$IDENTITY" --identifier "$BUNDLE_ID.narrator" "$APP/Contents/MacOS/unread-narrator"
+fi
+codesign --force --timestamp=none --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --strict "$APP"
 echo "Built $APP ($VERSION, build $BUILD_NUMBER)"
 
