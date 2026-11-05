@@ -12,7 +12,7 @@ import NaturalLanguage
 /// with its encoded clip deleted from the cache first).
 func benchNarrator(_ args: [String]) async {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
-    let flagValues = Set(["--out", "--runs", "--chunks", "--voice"].compactMap(value))
+    let flagValues = Set(["--out", "--runs", "--chunks", "--voice", "--idle", "--wake", "--lead", "--churn"].compactMap(value))
     let given = args.drop { $0 != "--narrate" }.dropFirst().filter { !$0.hasPrefix("--") && !flagValues.contains($0) }
     let sentences = given.isEmpty ? defaultSentences : Array(given)
     let runs = value("--runs").flatMap(Int.init) ?? 2
@@ -35,6 +35,14 @@ func benchNarrator(_ args: [String]) async {
     print(String(format: "loaded in %.2f s (engine %.2f s, voice %.2f s, warm-up %.2f s), footprint %.2f GB; chunks %@",
                  Date().timeIntervalSince(loading), s.engine, s.voice, s.warmUp, footprint().now,
                  chunks.map(String.init).joined(separator: ",")))
+
+    if let idle = value("--idle") {
+        await idleTest(narrator, waits: idle.split(separator: ",").compactMap { Double($0) },
+                       wakes: value("--wake")?.split(separator: ",").map(String.init) ?? ["none"],
+                       lead: value("--lead").flatMap(Double.init) ?? 0,
+                       churn: value("--churn")?.split(separator: ",").map(String.init) ?? [], evict: args.contains("--evict"))
+        return
+    }
 
     let rate = Double(Narrator.sampleRate)
     let tracker = LanguageTracker()
@@ -159,6 +167,73 @@ private func summarize(_ results: [Narration]) {
     }
 }
 
+/// `--idle 0,60,600`: waits each many seconds, then says a short sentence, as a hold after a pause would.
+/// Each line shows the sentence's stages, the page faults it took and how much of the mapped model
+/// files was still in memory, to tell paging from a cold Neural Engine. `--wake none,both` cycles
+/// through what ⌃ going down does first (`Narrator.wake`: none, prefetch, warm, both), `--lead S`
+/// seconds before the sentence is asked for (the hold's speculation starts ~0.3 s after ⌃ goes down).
+/// `--churn file,…` reads those files during each wait, as a build or a browser churns the file cache.
+/// `--evict` drops the narrator's mapped pages after each wait, as memory pressure does.
+private func idleTest(_ narrator: Narrator, waits: [Double], wakes: [String], lead: Double, churn: [String], evict: Bool) async {
+    let probes = ["Paragraph pauses.", "The narrator is ready.", "She closed the book and smiled."]
+    var groups: [String: (UInt64, Int)] = [:]
+    for r in MappedFiles.regions() {
+        let key = r.path.contains("e5bundlecache") ? "Core ML compiled programs" : r.path.contains("fluidaudio") ? "Kokoro"
+            : r.path.replacingOccurrences(of: Narrator.modelDirectory.path + "/", with: "").split(separator: "/").prefix(2).joined(separator: "/")
+        groups[key, default: (0, 0)].0 += r.size
+        groups[key, default: (0, 0)].1 += MappedFiles.resident([r]).bytes
+    }
+    for (key, (size, resident)) in groups.sorted(by: { $0.value.0 > $1.value.0 }) where size > 4_000_000 {
+        print(String(format: "  mapped %6.0f MB, %3.0f%% in memory  %@", Double(size) / 1e6, Double(resident) * 100 / Double(size), key))
+    }
+    for (i, wait) in waits.enumerated() {
+        if i % wakes.count == 0 {
+            print(String(format: "  working set %.0f MB of the narrator's %.0f MB mapped", Double(narrator.workingSet.bytes) / 1e6,
+                         Double(narrator.workingSet.regions.reduce(0) { $0 + Int($1.size) }) / 1e6))
+        }
+        let waited = Date()
+        if wait > 0, !churn.isEmpty { readThrough(churn) }
+        let left = wait - Date().timeIntervalSince(waited)
+        if left > 0 { try? await Task.sleep(for: .seconds(left)) }
+        if evict, wait > 0 { narrator.workingSet.evict() }
+        let regions = MappedFiles.regions()
+        let before = MappedFiles.resident(regions)
+        let wake = wakes[i % wakes.count]
+        let faults = pageFaults()
+        if wake != "none" { narrator.wake(prefetch: wake != "warm", warm: wake != "prefetch") }
+        if lead > 0 { try? await Task.sleep(for: .seconds(lead)) }
+        let atAsk = MappedFiles.resident(regions)
+        guard let r = await say(probes[(i / wakes.count) % probes.count], language: .english, narrator) else { continue }
+        let after = pageFaults()
+        let t = r.report?.timings, frames = max(r.report?.frames ?? 1, 1)
+        print(String(format: "idle %4.0f s  %-8@ mapped %3.0f%%→%3.0f%% of %.2f GB  key-down→audible %4.0f ms  prefill %4.0f  %3.0f ms/frame  vocoder %4.0f  page-ins %5d  ",
+                     wait, wake as NSString, Double(before.bytes) * 100 / Double(max(before.of, 1)), Double(atAsk.bytes) * 100 / Double(max(atAsk.of, 1)),
+                     Double(before.of) / 1e9, (lead + r.firstAudible) * 1000, (t?.prefill ?? .nan) * 1000,
+                     (t?.loop ?? .nan) * 1000 / Double(frames), (t?.vocoder ?? .nan) * 1000, after.pageIns - faults.pageIns) + r.line)
+    }
+}
+
+private func readThrough(_ files: [String]) {
+    var buffer = [UInt8](repeating: 0, count: 8 << 20)
+    for file in files {
+        let fd = open(file, O_RDONLY)
+        guard fd >= 0 else { continue }
+        while read(fd, &buffer, buffer.count) > 0 {}
+        close(fd)
+    }
+}
+
+/// This process's page-ins (major faults, read from disk) and all faults so far.
+private func pageFaults() -> (pageIns: Int, faults: Int) {
+    var info = rusage_info_v4()
+    let ok = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
+    }
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    return ok == 0 ? (Int(info.ri_pageins), Int(usage.ru_minflt + usage.ru_majflt)) : (-1, -1)
+}
+
 private let longSentence = "Long before the first train reached the valley, the people who lived there measured distance not in miles but in days, and a journey to the coast was something a family planned for a whole season, packing bread, letters and patience for the road."
 
 /// Cancel a long sentence after its first second of audio: how long until the
@@ -275,7 +350,7 @@ func gpuTime() -> (clients: Int, ms: Double) {
     return (clients, nanoseconds / 1e6)
 }
 
-private func writeWAV(_ samples: [Float], rate: Double, to url: URL) throws {
+func writeWAV(_ samples: [Float], rate: Double, to url: URL) throws {
     let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: rate, AVNumberOfChannelsKey: 1,
                                    AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
     let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -306,7 +381,7 @@ func stretchCheck() -> Bool {
         return out + s.finish()
     }
     var ok = true
-    for rate in [0.9, 1.15, 1.3, 1.5, 1.75, 2.0] {
+    for rate in [0.9, 1.15, 1.2, 1.3, 1.5, 1.75, 2.0] {
         for (name, x) in inputs {
             let whole = stretch(x, rate, pieces: [x.count])
             let same = stretch(x, rate, pieces: [3840, 1920, 2880, 7680, 5]) == whole && (name == "voice" || stretch(x, rate, pieces: [1]) == whole)
@@ -324,7 +399,7 @@ func stretchCheck() -> Bool {
     return ok
 }
 
-private func readWAV(_ url: URL) throws -> [Float] {
+func readWAV(_ url: URL) throws -> [Float] {
     let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
     guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { return [] }
     try file.read(into: buffer)

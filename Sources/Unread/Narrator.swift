@@ -41,6 +41,9 @@ actor Narrator {
         let leadingSilence: Double
         let parts: Int
         let stop: String
+        /// The first part's stages, and how many frames it made.
+        let timings: QwenTimings?
+        let frames: Int
     }
 
     static let sampleRate = 24_000
@@ -84,6 +87,7 @@ actor Narrator {
     private let paces: Mutex<[String: Double]>
     private let chunkFrames: [Int]
     nonisolated let startup: Startup
+    nonisolated let workingSet: WorkingSet
     private(set) var lastReport: Report?
 
     /// The model set from scripts/fetch-narrator.sh. `UNREAD_NARRATOR_MODEL` overrides the folder.
@@ -112,6 +116,7 @@ actor Narrator {
         }
         queue = DispatchSerialQueue(label: "unread.narrator", qos: .userInitiated)
         self.chunkFrames = chunkFrames
+        let mappedBefore = Set(MappedFiles.regions().map(\.address))
         var t = Date()
         engine = try QwenANEEngine(modelsDirectory: models)
         let engineTime = Date().timeIntervalSince(t)
@@ -126,6 +131,8 @@ actor Narrator {
         self.voices = voices
         paces = Mutex(voices.compactMapValues(\.preset.pace))
         startup = Startup(engine: engineTime, voice: voiceTime, warmUp: Date().timeIntervalSince(t))
+        workingSet = WorkingSet(MappedFiles.regions().filter { !mappedBefore.contains($0.address) })
+        workingSet.note()
     }
 
     /// The preset's clip encoded for the model: about a second the first time, then read back from a cache.
@@ -191,9 +198,36 @@ actor Narrator {
     /// Returns once nothing is being synthesized.
     func idle() {}
 
+    /// ⌃ went down: a sentence may be asked for soon. After a while unused, the narrator's
+    /// first sentence is slow (`--narrate --idle`): macOS has dropped its mapped files, and the
+    /// Neural Engine has gone cold. Read the files back in the background, and warm up with a
+    /// 4-frame line if it's been idle (two vocoder calls: its first-chunk and later-chunk programs),
+    /// so the hold's speculation starts warm.
+    nonisolated func wake(prefetch: Bool = true, warm: Bool = true) {
+        if prefetch { DispatchQueue.global(qos: .userInitiated).async { self.workingSet.prefetch() } }
+        if warm { queue.async { self.assumeIsolated { $0.rewarm() } } }
+    }
+
+    /// Seconds idle after which a sentence starts measurably slower (prefill ~2× at 10 s).
+    static let coldAfter: TimeInterval = 5
+    private var lastActive = Date()
+
+    private func rewarm() {
+        guard Date().timeIntervalSince(lastActive) > Self.coldAfter else { return }
+        _ = try? engine.render(text: "Ready.", voice: (voices[lastLanguage] ?? voices["en"]!).files, seed: 1, maxFrames: 4, chunkFrames: [2],
+                               language: lastLanguage, onAudio: { _ in })
+        lastActive = Date()
+    }
+    private var lastLanguage = "en"
+
     private func synthesize(_ text: String, language: String, flag: CancelFlag,
                             into stream: AsyncThrowingStream<[Float], Error>.Continuation) {
         lastReport = nil
+        defer {
+            lastActive = Date()
+            lastLanguage = language
+            DispatchQueue.global(qos: .utility).async { [workingSet] in workingSet.note() }
+        }
         guard text.contains(where: { $0.isLetter || $0.isNumber }) else {
             stream.finish(throwing: Failure.nothingToSay)
             return
@@ -206,12 +240,12 @@ actor Narrator {
         let voice = (voices[language] ?? voices["en"]!).files
         let session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: text)
         let parts = parts(of: text, voice: voice, language: language)
-        var leading = 0.0, stop = ""
+        var leading = 0.0, stop = "", timings: QwenTimings?, frames = 0
         do {
             for (i, part) in parts.enumerated() {
                 let r = try session.render(part, chunkFrames: chunkFrames, cancelled: { flag.isCancelled },
                                            onAudio: { stream.yield($0) })
-                if i == 0 { leading = r.silenceBefore.leading }
+                if i == 0 { leading = r.silenceBefore.leading; timings = r.timings; frames = r.frames }
                 stop = r.stopReason.rawValue
                 if r.stopReason == .cancelled { break }
             }
@@ -219,7 +253,8 @@ actor Narrator {
         } catch {
             stream.finish(throwing: error)
         }
-        lastReport = Report(firstDecode: firstDecode.withLock { $0 }, leadingSilence: leading, parts: parts.count, stop: stop)
+        lastReport = Report(firstDecode: firstDecode.withLock { $0 }, leadingSilence: leading, parts: parts.count, stop: stop,
+                            timings: timings, frames: frames)
     }
 
     /// `text` whole, or in clause-sized parts when the talker's memory can't hold it.

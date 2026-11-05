@@ -73,6 +73,18 @@ if args.contains("--narrate") {
     exit(0)
 }
 
+if args.contains("--pace") {
+    // Silent: each voice's natural pace, and the narrator cloned from a time-compressed clip.
+    // `--pace [--reference-stretch 1.15,1.25] [--out DIR] [--speeds 1.15,1.3]`
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        await benchPace(args)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if let i = args.firstIndex(of: "--words") {
     // Silent: when each word of a sentence starts (#20), as the voice times it.
     // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.
@@ -351,6 +363,15 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             var primed: PrimedSentence?
             if let j = args.firstIndex(of: "--primed") {
                 let hold = args.indices.contains(j + 1) ? Double(args[j + 1]) ?? 0.4 : 0.4
+                // --idle-before S: leave the voice idle S seconds first; then ⌃ goes down 0.3 s before the
+                // speculation starts, and wakes the narrator as the app does (--no-wake: it doesn't). --evict
+                // drops the narrator's mapped pages first.
+                if let idle = value(after: "--idle-before").flatMap(Double.init) {
+                    try? await Task.sleep(for: .seconds(idle))
+                    if args.contains("--evict"), let reader { reader.workingSet.evict() } // as memory pressure would
+                    if !args.contains("--no-wake") { reader?.wake() }
+                    try? await Task.sleep(for: .seconds(0.3))
+                }
                 primed = PrimedSentence.prepare(doc, from: para.start, kokoro: voice, narrator: reader, speed: speed)
                 try? await Task.sleep(for: .seconds(hold))
                 print(String(format: "[simulate] released after a %.2fs hold", hold))

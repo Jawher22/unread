@@ -6,6 +6,11 @@ import ServiceManagement
 enum VoiceChoice: String, Codable {
     case kokoro, narrator
     static let key = "voice"
+
+    /// Speed is kept per voice: at 1× the narrator speaks slower than Kokoro (`--pace`).
+    var speedKey: String { "speed.\(rawValue)" }
+    var defaultSpeed: Float { self == .narrator ? 1.2 : 1 }
+    var savedSpeed: Float { (UserDefaults.standard.object(forKey: speedKey) as? NSNumber)?.floatValue ?? defaultSpeed }
 }
 
 /// The interaction:
@@ -29,8 +34,9 @@ final class AppController: NSObject {
 
     private var session: ReadingSession?
     private var ready = false
-    private var speed: Float = 1.0
     private var voiceChoice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init) ?? .kokoro
+    private lazy var speed = voiceChoice.savedSpeed
+    private var speedMenu: NSMenu!
     private enum NarratorState { case unloaded, loading, ready(Narrator), failed }
     private var narratorState = NarratorState.unloaded
     private var voiceChoiceMenu: NSMenu!
@@ -238,6 +244,7 @@ final class AppController: NSObject {
     private func keyDown() {
         guard ready else { NSSound.beep(); return }
         player.warm() // open the audio device now, not on release
+        narrator?.wake() // after a while idle, its first sentence is slow; the hold's speculation starts ~0.3 s from now
         aimTarget = nil
         aimDocument = nil
         speculation = nil
@@ -434,14 +441,14 @@ final class AppController: NSObject {
         menu.addItem(.separator())
 
         let speedItem = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
-        let speedMenu = NSMenu()
-        for s: Float in [0.9, 1.0, 1.15, 1.3, 1.5, 1.75, 2.0] {
+        speedMenu = NSMenu()
+        for s: Float in [0.9, 1.0, 1.15, 1.2, 1.3, 1.5, 1.75, 2.0] {
             let item = NSMenuItem(title: String(format: "%.2g×", s), action: #selector(pickSpeed(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = s
-            item.state = s == speed ? .on : .off
             speedMenu.addItem(item)
         }
+        updateSpeedMenu()
         speedItem.submenu = speedMenu
         menu.addItem(speedItem)
 
@@ -493,8 +500,13 @@ final class AppController: NSObject {
 
     @objc private func pickSpeed(_ item: NSMenuItem) {
         speed = item.representedObject as? Float ?? 1
+        UserDefaults.standard.set(speed, forKey: voiceChoice.speedKey)
         session?.speed = speed
-        item.menu?.items.forEach { $0.state = $0 === item ? .on : .off }
+        updateSpeedMenu()
+    }
+
+    private func updateSpeedMenu() {
+        speedMenu.items.forEach { $0.state = $0.representedObject as? Float == speed ? .on : .off }
     }
 
     private func updateVoiceMenu() {
@@ -514,6 +526,9 @@ final class AppController: NSObject {
     @objc private func pickVoiceChoice(_ item: NSMenuItem) {
         voiceChoice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
         UserDefaults.standard.set(voiceChoice.rawValue, forKey: VoiceChoice.key)
+        speed = voiceChoice.savedSpeed
+        session?.speed = speed
+        updateSpeedMenu()
         if voiceChoice == .narrator, case .failed = narratorState { narratorState = .unloaded }
         if ready { loadNarratorIfChosen() }
         updateVoiceMenu()
