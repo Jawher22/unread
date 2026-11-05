@@ -1,0 +1,11 @@
+{
+  "name": "Bedtime voice",
+  "language": "en",
+  "summary": "Deep, velvety and soothing",
+  "description": "A man in his forties with a very deep, velvety voice. Relaxed and soothing, like reading a bedtime story, but at a natural, steady pace rather than a slow one.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "bedtime-voice.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "bedtime-voice-preview.m4a",
+  "pace": 17.6
+}

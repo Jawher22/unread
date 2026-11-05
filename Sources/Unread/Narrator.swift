@@ -3,41 +3,10 @@ import NaturalLanguage
 import QwenANE
 import Synchronization
 
-/// A designed voice the narrator clones (#60): a ~5 s clip and its transcript.
-struct VoicePreset: Sendable {
-    let name: String
-    let description: String
-    let transcript: String
-    let audio: URL
-
-    static func load(_ url: URL) throws -> VoicePreset {
-        struct File: Decodable { let name, description, transcript, audio: String }
-        let file = try JSONDecoder().decode(File.self, from: Data(contentsOf: url))
-        return VoicePreset(name: file.name, description: file.description, transcript: file.transcript,
-                           audio: url.deletingLastPathComponent().appendingPathComponent(file.audio))
-    }
-
-    /// Resources/Voices/<name>.json, from Unread.app or the checkout a dev build runs from.
-    static func named(_ name: String) throws -> VoicePreset {
-        let file = "Voices/\(name).json"
-        let fm = FileManager.default
-        if let bundled = Bundle.main.resourceURL?.appendingPathComponent(file), fm.fileExists(atPath: bundled.path) {
-            return try load(bundled)
-        }
-        var dir = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent()
-        while let current = dir, current.path != "/" {
-            let candidate = current.appendingPathComponent("Resources/\(file)")
-            if fm.fileExists(atPath: candidate.path) { return try load(candidate) }
-            dir = current.deletingLastPathComponent()
-        }
-        throw Narrator.Failure.voiceMissing(name)
-    }
-}
-
-/// The narrator voice (#62): Qwen3-TTS 1.7B Base cloning a preset, on the
-/// Neural Engine through Core ML, in-process like Kokoro. Load once and keep
-/// it: loading takes ~2 s, and the first load of a new binary path compiles
-/// for the Neural Engine for about a minute.
+/// The narrator voice (#62): Qwen3-TTS 1.7B Base cloning a preset (#60), one
+/// per language, on the Neural Engine through Core ML, in-process like Kokoro.
+/// Load once and keep it: loading takes ~2 s, and the first load of a new
+/// binary path compiles for the Neural Engine for about a minute.
 ///
 /// Synthesis blocks for about the length of the audio, so the actor runs on
 /// its own serial queue rather than the cooperative pool.
@@ -90,7 +59,8 @@ actor Narrator {
     static let framesPerCharacter = 1.5
     static let maxPartCharacters = 200
 
-    /// Characters a second at 1×, and seconds of synthesis per second of audio (`--narrate`, §7).
+    /// Characters a second at 1× for a preset that wasn't measured, and seconds of synthesis per
+    /// second of audio (`--narrate`, §7).
     static let pace = 14.9, realTimeFactor = 0.75
     /// Audio a streamed piece needs before it starts playing, in samples at 1×: 0.1 s of playback
     /// at 1×, 0.2 s at 1.2×, 0.3 s at 1.4×, since sped up it drains faster than the chunks come;
@@ -98,7 +68,7 @@ actor Narrator {
     /// playback catches up (`audio` arrives in `audio * realTimeFactor` and plays in `audio / speed`).
     /// Replaying the chunk arrivals of 49 sentences, none ran dry at 1.15–2× (2 at 1×, by ≤ 7 ms),
     /// for a median 0.1 s more before first audio at 1.15×, 0.2 s at 1.3×, 0.36 s at 1.5×, 0.95 s at 2×.
-    static func prebuffer(characters: Int, speed: Float) -> Int {
+    static func prebuffer(characters: Int, speed: Float, pace: Double) -> Int {
         let speed = Double(speed), audio = Double(characters) / pace
         let playback: Double = 0.1 + 0.5 * max(speed - 1, 0), catchUp: Double = audio * (1 - 1 / (speed * realTimeFactor))
         return Int(max(playback * speed, catchUp) * Double(sampleRate))
@@ -107,7 +77,11 @@ actor Narrator {
     private let queue: DispatchSerialQueue
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let engine: QwenANEEngine
-    private let voice: QwenVoiceFiles
+    /// A preset ready to speak: its clip encoded.
+    private struct Clone { let preset: VoicePreset; let files: QwenVoiceFiles }
+    /// By the engine's language code. French is read in the English voice if it has none.
+    private var voices: [String: Clone]
+    private let paces: Mutex<[String: Double]>
     private let chunkFrames: [Int]
     nonisolated let startup: Startup
     private(set) var lastReport: Report?
@@ -122,16 +96,16 @@ actor Narrator {
             .appendingPathComponent("Library/Application Support/Unread/models/Qwen3-TTS-1.7B-Base-ANE")
     }
 
-    /// Loads the model, encodes the preset's clip (cached after the first time) and warms both languages.
-    static func load(preset: VoicePreset, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
+    /// Loads the model, encodes each preset's clip (cached after the first time) and warms both languages.
+    static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
         try await withCheckedThrowingContinuation { done in
             DispatchQueue.global(qos: .userInitiated).async {
-                done.resume(with: Result { try Narrator(preset: preset, models: modelDirectory, chunkFrames: chunkFrames) })
+                done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames) })
             }
         }
     }
 
-    private init(preset: VoicePreset, models: URL, chunkFrames: [Int]) throws {
+    private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int]) throws {
         let complete = try? String(contentsOf: models.appendingPathComponent(".complete"), encoding: .utf8)
         guard complete?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.modelRevision else {
             throw Failure.modelMissing(models, revision: Self.modelRevision)
@@ -142,21 +116,65 @@ actor Narrator {
         engine = try QwenANEEngine(modelsDirectory: models)
         let engineTime = Date().timeIntervalSince(t)
         t = Date()
-        let cache = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/Unread/narrator-voices")
-            .appendingPathComponent(preset.audio.deletingPathExtension().lastPathComponent)
-        voice = try QwenVoicePrep.prepared(referenceWAV: Data(contentsOf: preset.audio), transcript: preset.transcript,
-                                           cacheDirectory: cache, modelsDirectory: models, kind: .qwen17)
+        var voices = ["en": try Self.clone(english, models: models)]
+        if let french { voices["fr"] = try Self.clone(french, models: models) }
         let voiceTime = Date().timeIntervalSince(t)
         t = Date()
-        // Each language has its own prompt rows and talker memory prefix; build both now. Streaming too,
-        // so the trimmer and every chunk size's first call are behind us.
         for language in ["en", "fr"] {
-            _ = try engine.render(text: "Ready.", voice: voice, seed: 1, maxFrames: 3, chunkFrames: chunkFrames,
-                                  language: language, onAudio: { _ in })
+            try Self.warm(engine, (voices[language] ?? voices["en"]!).files, language: language, chunkFrames: chunkFrames)
         }
+        self.voices = voices
+        paces = Mutex(voices.compactMapValues(\.preset.pace))
         startup = Startup(engine: engineTime, voice: voiceTime, warmUp: Date().timeIntervalSince(t))
     }
+
+    /// The preset's clip encoded for the model: about a second the first time, then read back from a cache.
+    private static func clone(_ preset: VoicePreset, models: URL) throws -> Clone {
+        let files = try QwenVoicePrep.prepared(referenceWAV: Data(contentsOf: preset.audio), transcript: preset.transcript,
+                                               cacheDirectory: cacheDirectory(preset), modelsDirectory: models, kind: .qwen17)
+        return Clone(preset: preset, files: files)
+    }
+
+    static func cacheDirectory(_ preset: VoicePreset) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Unread/narrator-voices")
+            .appendingPathComponent(preset.audio.deletingPathExtension().lastPathComponent)
+    }
+
+    /// Each voice and language has its own prompt rows, talker memory prefix and vocoder priming:
+    /// build them with a line nobody hears. Streaming too, so the trimmer and every chunk size's
+    /// first call are behind us.
+    private static func warm(_ engine: QwenANEEngine, _ voice: QwenVoiceFiles, language: String, chunkFrames: [Int]) throws {
+        _ = try engine.render(text: "Ready.", voice: voice, seed: 1, maxFrames: 3, chunkFrames: chunkFrames,
+                              language: language, onAudio: { _ in })
+    }
+
+    /// What a switch cost, in seconds: encoding the clip (or reading it back), and warming the voice.
+    struct Switch: Sendable {
+        let clone: Double
+        let warm: Double
+    }
+
+    /// Reads the preset's language in `preset` from the next sentence asked for on. The sentence
+    /// being synthesized finishes first, in the old voice. Nil when it's the voice already.
+    func use(_ preset: VoicePreset) throws -> Switch? {
+        let language = Self.code(preset.language)
+        guard voices[language]?.preset.id != preset.id else { return nil }
+        var t = Date()
+        let clone = try Self.clone(preset, models: Self.modelDirectory)
+        let cloneTime = Date().timeIntervalSince(t)
+        t = Date()
+        try Self.warm(engine, clone.files, language: language, chunkFrames: chunkFrames)
+        voices[language] = clone
+        paces.withLock { $0[language] = preset.pace }
+        return Switch(clone: cloneTime, warm: Date().timeIntervalSince(t))
+    }
+
+    /// Characters a second at 1× in the voice that reads `language`.
+    nonisolated func pace(for language: NLLanguage) -> Double {
+        paces.withLock { $0[Self.code(language)] } ?? Self.pace
+    }
+
+    private static func code(_ language: NLLanguage) -> String { language == .french ? "fr" : "en" }
 
     /// One sentence's audio at 24 kHz, streamed as it's synthesized, starting ~50 ms before the
     /// voice. Sentences are synthesized in the order they're asked for. Cancelling the consuming
@@ -166,7 +184,7 @@ actor Narrator {
             let flag = CancelFlag()
             stream.onTermination = { _ in flag.cancel() }
             // Straight onto the actor's queue: a Task per call could reach the actor out of order.
-            queue.async { self.assumeIsolated { $0.synthesize(text, language: language == .french ? "fr" : "en", flag: flag, into: stream) } }
+            queue.async { self.assumeIsolated { $0.synthesize(text, language: Self.code(language), flag: flag, into: stream) } }
         }
     }
 
@@ -185,8 +203,9 @@ actor Narrator {
         let firstDecode = Mutex<Double?>(nil)
         engine.onDecode = { firstDecode.withLock { $0 = $0 ?? Date().timeIntervalSince(start) } }
         defer { engine.onDecode = nil }
+        let voice = (voices[language] ?? voices["en"]!).files
         let session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: text)
-        let parts = parts(of: text, language: language)
+        let parts = parts(of: text, voice: voice, language: language)
         var leading = 0.0, stop = ""
         do {
             for (i, part) in parts.enumerated() {
@@ -204,7 +223,7 @@ actor Narrator {
     }
 
     /// `text` whole, or in clause-sized parts when the talker's memory can't hold it.
-    private func parts(of text: String, language: String) -> [String] {
+    private func parts(of text: String, voice: QwenVoiceFiles, language: String) -> [String] {
         let needed = Int(Double(text.count) * Self.framesPerCharacter)
         if let room = try? engine.maxFrames(text: text, voice: voice, language: language), room >= needed { return [text] }
         return QwenReadRules.split(text, maxPartChars: Self.maxPartCharacters)

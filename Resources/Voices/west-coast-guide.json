@@ -1,0 +1,11 @@
+{
+  "name": "West Coast guide",
+  "language": "en",
+  "summary": "Young Californian, relaxed",
+  "description": "A young man in his twenties from California with a relaxed, friendly voice. Easygoing but clear, like explaining something he finds fascinating, at a natural, lively pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "west-coast-guide.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "west-coast-guide-preview.m4a",
+  "pace": 16.5
+}

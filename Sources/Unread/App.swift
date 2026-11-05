@@ -1,4 +1,5 @@
 import AppKit
+import NaturalLanguage
 import ApplicationServices
 import ServiceManagement
 
@@ -79,6 +80,7 @@ final class AppController: NSObject {
     override init() {
         super.init()
         setUpMenu()
+        NarratorVoices.shared.onChoose = { [weak self] in self?.narratorVoiceChosen($0.language) }
         hotkey.onPress = { [weak self] in self?.keyDown() }
         hotkey.onRelease = { [weak self] held in self?.keyUp(held: held) }
         hotkey.onCancel = { [weak self] in
@@ -197,14 +199,37 @@ final class AppController: NSObject {
         Task {
             let t = Date()
             do {
-                narratorState = .ready(try await Narrator.load(preset: VoicePreset.named("london-storyteller")))
+                let voices = NarratorVoices.shared
+                guard let english = voices.preset(for: .english) else { throw Narrator.Failure.voiceMissing("English") }
+                narratorState = .ready(try await Narrator.load(english: english, french: voices.preset(for: .french)))
                 print(String(format: "[unread] narrator ready in %.1fs", Date().timeIntervalSince(t)))
+                NarratorVoices.languages.forEach(narratorVoiceChosen) // picked while it loaded
             } catch {
                 narratorState = .failed
                 print("[unread] narrator unavailable, reading with Kokoro: \(error)")
             }
             updateVoiceMenu()
             session?.narrator = narrator
+        }
+    }
+
+    /// A narrator voice picked in Settings (#60): the narrator reads that language in it from the
+    /// next sentence. Each pass re-reads the choice, so the last of several quick picks wins.
+    private func narratorVoiceChosen(_ language: NLLanguage) {
+        updateVoiceMenu()
+        guard case .ready(let narrator) = narratorState else { return }
+        Task {
+            while let preset = NarratorVoices.shared.preset(for: language) {
+                do {
+                    guard let cost = try await narrator.use(preset) else { return }
+                    print(String(format: "[unread] narrator reads %@ as %@ (clip %.0f ms, warm-up %.0f ms)",
+                                 language.rawValue, preset.name, cost.clone * 1000, cost.warm * 1000))
+                    session?.narratorVoiceChanged(language)
+                } catch {
+                    print("[unread] narrator voice \(preset.id) unavailable: \(error)")
+                    return
+                }
+            }
         }
     }
 
@@ -428,6 +453,10 @@ final class AppController: NSObject {
             item.representedObject = choice.rawValue
             voiceChoiceMenu.addItem(item)
         }
+        voiceChoiceMenu.addItem(.separator())
+        let presetsItem = NSMenuItem(title: "Narrator Voices…", action: #selector(openVoiceSettings), keyEquivalent: "")
+        presetsItem.target = self
+        voiceChoiceMenu.addItem(presetsItem)
         readerItem.submenu = voiceChoiceMenu
         menu.addItem(readerItem)
         updateVoiceMenu()
@@ -469,14 +498,15 @@ final class AppController: NSObject {
     }
 
     private func updateVoiceMenu() {
+        let name = NarratorVoices.shared.preset(for: .english)?.name ?? "no voice"
         for item in voiceChoiceMenu.items {
-            let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
+            guard let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) else { continue }
             item.state = choice == voiceChoice ? .on : .off
             switch (choice, narratorState) {
             case (.kokoro, _): item.title = "Kokoro"
-            case (.narrator, .loading): item.title = "Narrator — London storyteller (loading…)"
-            case (.narrator, .failed): item.title = "Narrator — London storyteller (unavailable, see log)"
-            case (.narrator, _): item.title = "Narrator — London storyteller"
+            case (.narrator, .loading): item.title = "Narrator — \(name) (loading…)"
+            case (.narrator, .failed): item.title = "Narrator — \(name) (unavailable, see log)"
+            case (.narrator, _): item.title = "Narrator — \(name)"
             }
         }
     }
@@ -500,6 +530,7 @@ final class AppController: NSObject {
     }
 
     @objc private func openSettings() { SettingsWindow.shared.show() }
+    @objc private func openVoiceSettings() { SettingsWindow.shared.show(tab: .voices) }
 
     @objc private func quit() { NSApp.terminate(nil) }
 }

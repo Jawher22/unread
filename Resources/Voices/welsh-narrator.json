@@ -1,0 +1,11 @@
+{
+  "name": "Welsh narrator",
+  "language": "en",
+  "summary": "Welsh, warm with a lilt",
+  "description": "A Welsh man in his forties with a warm, melodic voice and a gentle Welsh lilt. Clear and kind, like a narrator reading a favourite book aloud, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "welsh-narrator.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "welsh-narrator-preview.m4a",
+  "pace": 15.8
+}

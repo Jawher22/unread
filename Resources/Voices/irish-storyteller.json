@@ -1,0 +1,11 @@
+{
+  "name": "Irish storyteller",
+  "language": "en",
+  "summary": "Musical and playful",
+  "description": "An Irish man in his sixties with a warm, musical voice and a lilting accent. Playful and expressive, like a pub storyteller who loves a good tale, speaking at a lively, natural pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "irish-storyteller.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "irish-storyteller-preview.m4a",
+  "pace": 18.4
+}

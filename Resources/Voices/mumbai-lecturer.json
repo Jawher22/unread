@@ -1,0 +1,11 @@
+{
+  "name": "Mumbai lecturer",
+  "language": "en",
+  "summary": "Indian English, crisp",
+  "description": "An Indian woman in her thirties with a crisp, articulate voice and an Indian English accent, like a university lecturer. Clear and warm, at a brisk, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "mumbai-lecturer.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "mumbai-lecturer-preview.m4a",
+  "pace": 18.1
+}

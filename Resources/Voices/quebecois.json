@@ -1,0 +1,11 @@
+{
+  "name": "Québécois",
+  "language": "fr",
+  "summary": "From Québec, warm and friendly",
+  "description": "Un homme québécois d'une quarantaine d'années avec l'accent du Québec, une voix chaleureuse et amicale. Naturel et souriant, à un rythme naturel et vivant.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "quebecois.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "quebecois-preview.m4a",
+  "pace": 17.4
+}

@@ -1,0 +1,11 @@
+{
+  "name": "Marseillais",
+  "language": "fr",
+  "summary": "Southern, sunny accent",
+  "description": "Un homme de Marseille d'une soixantaine d'années avec l'accent chantant du Midi, une voix chaleureuse et pleine d'humour. Vivant et expressif, comme un conteur sur une place de village, à un rythme naturel.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "marseillais.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "marseillais-preview.m4a",
+  "pace": 16.6
+}

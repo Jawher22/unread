@@ -1,0 +1,11 @@
+{
+  "name": "Cape Town narrator",
+  "language": "en",
+  "summary": "South African, rich and warm",
+  "description": "A South African man in his fifties with a rich, warm voice and a South African English accent. Confident and engaging, like a documentary narrator, at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "cape-town-narrator.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "cape-town-narrator-preview.m4a",
+  "pace": 18.1
+}

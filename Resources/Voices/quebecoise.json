@@ -1,0 +1,11 @@
+{
+  "name": "Québécoise",
+  "language": "fr",
+  "summary": "From Québec, bright and lively",
+  "description": "Une jeune femme québécoise d'une trentaine d'années avec l'accent du Québec, une voix claire et pétillante. Enjouée et chaleureuse, à un rythme naturel et vivant.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "quebecoise.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "quebecoise-preview.m4a",
+  "pace": 16.7
+}

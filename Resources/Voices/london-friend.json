@@ -1,0 +1,11 @@
+{
+  "name": "London friend",
+  "language": "en",
+  "summary": "Young Londoner, lively",
+  "description": "A young woman from London in her twenties with a friendly, lively voice and a light London accent. Natural and upbeat, like telling a friend something interesting, at an easy, quick pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "london-friend.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "london-friend-preview.m4a",
+  "pace": 17.8
+}

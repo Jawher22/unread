@@ -1,0 +1,11 @@
+{
+  "name": "Delhi professor",
+  "language": "en",
+  "summary": "Indian English, warm and wise",
+  "description": "An Indian man in his fifties with a warm, measured voice and an Indian English accent, like a kind professor. Thoughtful and clear, at a natural, steady pace, not slow.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "delhi-professor.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "delhi-professor-preview.m4a",
+  "pace": 17.5
+}

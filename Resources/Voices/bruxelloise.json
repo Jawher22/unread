@@ -1,0 +1,11 @@
+{
+  "name": "Bruxelloise",
+  "language": "fr",
+  "summary": "Belgian, calm and kind",
+  "description": "Une femme belge de Bruxelles d'une cinquantaine d'années avec un léger accent belge, une voix calme et bienveillante. Posée et claire, à un rythme naturel et régulier.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "bruxelloise.wav",
+  "transcript": "La plupart du temps, si un système nous semble rapide, c'est grâce à une mémoire cache bien pensée.",
+  "preview": "bruxelloise-preview.m4a",
+  "pace": 20.2
+}

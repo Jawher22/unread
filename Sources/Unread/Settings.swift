@@ -1,9 +1,95 @@
 import AppKit
+import NaturalLanguage
 import SwiftUI
 
 // MARK: - Settings window
 
+enum SettingsTab: String, CaseIterable {
+    case voices, highlight
+    static let key = "settingsTab"
+    var title: String { self == .voices ? "Narrator Voices" : "Highlight" }
+}
+
 struct SettingsView: View {
+    @AppStorage(SettingsTab.key) private var tab = SettingsTab.voices
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Settings", selection: $tab) {
+                ForEach(SettingsTab.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.top, 14)
+            switch tab {
+            case .voices: VoiceSettingsView()
+            case .highlight: HighlightSettingsView()
+            }
+        }
+        .frame(width: 760)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// The narrator's voices (#60), one choice per language. Play buttons play a recording the
+/// narrator made in that voice, so they work before it has loaded.
+private struct VoiceSettingsView: View {
+    @ObservedObject private var voices = NarratorVoices.shared
+    @ObservedObject private var preview = VoicePreview.shared
+
+    var body: some View {
+        Form {
+            ForEach(NarratorVoices.languages, id: \.self) { language in
+                Section {
+                    ForEach(NarratorVoices.presets(language)) { row($0, chosen: voices.preset(for: language) == $0) }
+                } header: {
+                    Text(language == .french ? "French" : "English")
+                } footer: {
+                    Text(language == .french
+                         ? "French sentences are read in the French voice. These voices are synthetic, designed from a description; none is a real person's."
+                         : "Used when the menu's Voice is Narrator. A new voice starts at the next sentence.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(height: 640)
+        .onDisappear { preview.stop() }
+    }
+
+    private func row(_ preset: VoicePreset, chosen: Bool) -> some View {
+        let playing = preview.playing == preset.id
+        return HStack(spacing: 10) {
+            Button { preview.toggle(preset) } label: {
+                Image(systemName: playing ? "stop.circle.fill" : "play.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(playing ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            }
+            .buttonStyle(.borderless)
+            .disabled(preset.preview == nil)
+            .accessibilityLabel(playing ? "Stop \(preset.name)" : "Play \(preset.name)")
+            Text(preset.name)
+                .frame(width: 180, alignment: .leading)
+            Text(preset.summary)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer()
+            Image(systemName: "checkmark")
+                .foregroundStyle(.tint)
+                .fontWeight(.semibold)
+                .opacity(chosen ? 1 : 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { voices.choose(preset) }
+        .help(preset.description)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(named: "Choose") { voices.choose(preset) }
+    }
+}
+
+private struct HighlightSettingsView: View {
     @ObservedObject private var settings = HighlightSettings.shared
     @State private var darkPage = false
     @State private var previewSpeed = 1.3
@@ -57,7 +143,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 760)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -75,9 +160,12 @@ final class SettingsWindow {
     static let shared = SettingsWindow()
     private var window: NSWindow?
 
-    func show() {
+    func show(tab: SettingsTab? = nil) {
+        if let tab { UserDefaults.standard.set(tab.rawValue, forKey: SettingsTab.key) }
         if window == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+            let hosting = NSHostingController(rootView: SettingsView())
+            hosting.sizingOptions = .preferredContentSize // the window takes each pane's height
+            let w = NSWindow(contentViewController: hosting)
             w.title = "Unread Settings"
             w.styleMask = [.titled, .closable]
             w.isReleasedWhenClosed = false

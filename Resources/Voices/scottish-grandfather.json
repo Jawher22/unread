@@ -1,0 +1,11 @@
+{
+  "name": "Scottish grandfather",
+  "language": "en",
+  "summary": "Gentle Highland storyteller",
+  "description": "An old Scottish man with a gentle, slightly gravelly voice and a soft Highland accent. Kind and quietly humorous, like a grandfather telling a story, at a natural conversational pace, not slow.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "scottish-grandfather.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "scottish-grandfather-preview.m4a",
+  "pace": 17.0
+}

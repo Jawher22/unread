@@ -1,0 +1,11 @@
+{
+  "name": "Late-night radio",
+  "language": "en",
+  "summary": "British, soft and close",
+  "description": "A calm, soft-spoken British woman in her forties with a clear, intimate voice, like a late-night radio host. Warm and close to the microphone, speaking at a natural, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "late-night-radio.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "late-night-radio-preview.m4a",
+  "pace": 17.8
+}

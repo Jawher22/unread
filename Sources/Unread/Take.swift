@@ -17,11 +17,14 @@ final class NarratorTake {
     private(set) var samples: [Float] = []
     private(set) var isComplete = false
     let started = Date()
+    /// Characters a second at 1× in the voice saying it.
+    let pace: Double
     var onArrival: (() -> Void)?
     private var task: Task<Void, Never>?
 
     init(_ narrator: Narrator, text: String, language: NLLanguage) {
         let stream = narrator.speak(text, language: language)
+        pace = narrator.pace(for: language)
         task = Task { [weak self] in
             do {
                 for try await chunk in stream {

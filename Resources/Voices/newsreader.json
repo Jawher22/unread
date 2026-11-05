@@ -1,0 +1,11 @@
+{
+  "name": "Newsreader",
+  "language": "en",
+  "summary": "British RP, crisp and clear",
+  "description": "A British woman in her thirties with crisp received pronunciation, like a radio newsreader. Clear, composed and authoritative, reading at a brisk, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "newsreader.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "newsreader-preview.m4a",
+  "pace": 17.8
+}

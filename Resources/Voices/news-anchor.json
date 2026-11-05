@@ -1,0 +1,11 @@
+{
+  "name": "News anchor",
+  "language": "en",
+  "summary": "American, crisp and confident",
+  "description": "An American woman in her forties with a crisp, confident voice and a neutral General American accent, like an evening news anchor. Clear and polished, at a brisk, steady pace.",
+  "source": "Designed with Qwen3-TTS 1.7B VoiceDesign from the description above. A synthetic voice, not a real person's.",
+  "audio": "news-anchor.wav",
+  "transcript": "Most of the time, a cache is the reason a fast system feels so fast to the people using it.",
+  "preview": "news-anchor-preview.m4a",
+  "pace": 18.2
+}
