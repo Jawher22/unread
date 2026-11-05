@@ -43,13 +43,14 @@ struct VoicePreset: Sendable {
 /// its own serial queue rather than the cooperative pool.
 actor Narrator {
     enum Failure: Error, CustomStringConvertible {
-        case modelMissing(URL)
+        case modelMissing(URL, revision: String)
         case voiceMissing(String)
         case nothingToSay
 
         var description: String {
             switch self {
-            case .modelMissing(let dir): "narrator: no model in \(dir.path); run scripts/fetch-narrator.sh"
+            case .modelMissing(let dir, let revision):
+                "narrator: no model at revision \(revision.prefix(8)) in \(dir.path); run scripts/fetch-narrator.sh"
             case .voiceMissing(let name): "narrator: voice preset \(name) not found"
             case .nothingToSay: "narrator: no letters or digits to say"
             }
@@ -94,6 +95,9 @@ actor Narrator {
     private(set) var lastReport: Report?
 
     /// The model set from scripts/fetch-narrator.sh. `UNREAD_NARRATOR_MODEL` overrides the folder.
+    /// The revision scripts/fetch-narrator.sh downloads and writes to the set's `.complete`.
+    static let modelRevision = "552e9512c4618570df2b1b9c4a34373c018e0674"
+
     static var modelDirectory: URL {
         if let dir = ProcessInfo.processInfo.environment["UNREAD_NARRATOR_MODEL"] { return URL(fileURLWithPath: dir) }
         return FileManager.default.homeDirectoryForCurrentUser
@@ -110,8 +114,9 @@ actor Narrator {
     }
 
     private init(preset: VoicePreset, models: URL, chunkFrames: [Int]) throws {
-        guard FileManager.default.fileExists(atPath: models.appendingPathComponent(".complete").path) else {
-            throw Failure.modelMissing(models)
+        let complete = try? String(contentsOf: models.appendingPathComponent(".complete"), encoding: .utf8)
+        guard complete?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.modelRevision else {
+            throw Failure.modelMissing(models, revision: Self.modelRevision)
         }
         queue = DispatchSerialQueue(label: "unread.narrator", qos: .userInitiated)
         self.chunkFrames = chunkFrames
@@ -136,12 +141,14 @@ actor Narrator {
     }
 
     /// One sentence's audio at 24 kHz, streamed as it's synthesized, starting ~50 ms before the
-    /// voice. Cancelling the consuming task, or dropping the stream, stops synthesis within a frame.
+    /// voice. Sentences are synthesized in the order they're asked for. Cancelling the consuming
+    /// task, or dropping the stream, stops synthesis within a frame.
     nonisolated func speak(_ text: String, language: NLLanguage) -> AsyncThrowingStream<[Float], Error> {
         AsyncThrowingStream { stream in
             let flag = CancelFlag()
             stream.onTermination = { _ in flag.cancel() }
-            Task { await self.synthesize(text, language: language == .french ? "fr" : "en", flag: flag, into: stream) }
+            // Straight onto the actor's queue: a Task per call could reach the actor out of order.
+            queue.async { self.assumeIsolated { $0.synthesize(text, language: language == .french ? "fr" : "en", flag: flag, into: stream) } }
         }
     }
 
@@ -150,6 +157,7 @@ actor Narrator {
 
     private func synthesize(_ text: String, language: String, flag: CancelFlag,
                             into stream: AsyncThrowingStream<[Float], Error>.Continuation) {
+        lastReport = nil
         guard text.contains(where: { $0.isLetter || $0.isNumber }) else {
             stream.finish(throwing: Failure.nothingToSay)
             return

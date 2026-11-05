@@ -8,17 +8,21 @@
 #
 # Every file is checked against scripts/narrator-model.sha256 (size and
 # sha256). Interrupted downloads resume. Running it again only fetches files
-# that are missing or don't match. `.complete` is written last; Unread won't
-# load the set without it.
+# that are missing or don't match. `.complete` is written last and holds the
+# revision; Unread loads the set only if it's `Narrator.modelRevision`, so a
+# new REVISION here needs that changed too.
 set -euo pipefail
+FROM=""
+if [[ "${1:-}" == "--from" ]]; then
+    [[ -d "${2:-}" ]] || { echo "error: --from needs a folder" >&2; exit 1; }
+    FROM="$(cd "$2" && pwd)"
+fi
 cd "$(dirname "$0")/.."
 
 REPO="tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE"
 REVISION="552e9512c4618570df2b1b9c4a34373c018e0674"
 MANIFEST="scripts/narrator-model.sha256"
 DEST="${UNREAD_NARRATOR_MODEL:-$HOME/Library/Application Support/Unread/models/Qwen3-TTS-1.7B-Base-ANE}"
-FROM=""
-if [[ "${1:-}" == "--from" ]]; then FROM="${2:?--from needs a folder}"; fi
 
 matches() { [[ -f "$1" && "$(stat -f %z "$1")" == "$2" && "$(shasum -a 256 "$1" | cut -d' ' -f1)" == "$3" ]]; }
 
@@ -35,7 +39,7 @@ while read -r sha size rel; do
         copied=$((copied + 1))
         continue
     fi
-    part="$target.part"
+    part="$target.$REVISION.part"
     have=$([[ -f "$part" ]] && stat -f %z "$part" || echo 0)
     if (( have > size )); then rm -f "$part"; have=0; fi
     if (( have < size )); then

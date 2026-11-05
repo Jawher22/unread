@@ -17,6 +17,6 @@ Each is marked `Unread:` in the source.
 
 - `QwenEngineFilesKind.swift` is new: the `QwenEngineFiles.Kind` type from GVoiceKit's `QwenEngineFiles.swift`, without the pack code around it.
 - `QwenVoicePrep.swift`: no `import GVoiceKit` / `GVoiceProductionKit` (one module now). A reference must be mono 24 kHz PCM16 or float32; other formats are refused instead of converted.
-- `CoreMLVocoder.swift`: the upsampler (`upMall`) runs on the CPU. On the Neural Engine each call waits behind the talker's: 85–130 ms a chunk instead of 27 ms on this M4 Pro, which delays first audio by ~100 ms and makes short chunks expensive. The GPU stays unused either way.
+- `CoreMLVocoder.swift`: the upsampler (`upMall`) runs on the CPU. On the Neural Engine each call waits behind the talker's: 85–130 ms a chunk instead of 27 ms on this M4 Pro, which delays first audio by ~100 ms and makes short chunks expensive. An older single-function `upMall` (enumerated shapes, which trap on the CPU) stays on the Neural Engine. The GPU stays unused either way.
 - `CoreMLVocoder.swift`, `QwenStreamTrim.swift`, `QwenANEEngine.swift`: when streaming, the chunk schedule holds its first size until the stream has heard speech (`ANEVocoder.speechStarted`, `QwenStreamTrimmer.hasStarted`), so the chunk with the voice's onset is a short one. The model starts most lines with 0.1–0.6 s of quiet.
 - `QwenANEEngine.swift`: `onDecode`, called for every decoded chunk before trimming, so `--narrate` can time the first chunk.

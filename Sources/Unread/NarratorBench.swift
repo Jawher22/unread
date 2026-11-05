@@ -176,6 +176,20 @@ private func cancelTest(_ narrator: Narrator) async {
     print(String(format: "  cancelled after %.2f s of audio: free again %.0f ms later (stop: %@)",
                  Double(heard) / Double(Narrator.sampleRate), Date().timeIntervalSince(cancelledAt) * 1000, report?.stop ?? "?"))
     if let r = await say("The next sentence still works.", language: .english, narrator) { print("  next: " + r.line) }
+
+    // Ask for three at once, as reading will (the next sentence while one plays): they must come in order.
+    let started = Date()
+    let streams = ["One.", "Two, a little longer.", "Three."].map { narrator.speak($0, language: .english) }
+    let finished = await withTaskGroup(of: (Int, Double).self) { group in
+        for (i, stream) in streams.enumerated() {
+            group.addTask {
+                do { for try await _ in stream {} } catch {}
+                return (i, Date().timeIntervalSince(started))
+            }
+        }
+        return await group.reduce(into: []) { $0.append($1) }.sorted { $0.1 < $1.1 }.map(\.0)
+    }
+    print("  three asked at once finished in order \(finished.map { $0 + 1 })")
 }
 
 /// A sentence too long for the talker's 1024-slot memory in one piece.

@@ -4,7 +4,7 @@ import Foundation
 /// Split streaming vocoder (the "final gated path" of render_fast.py --vocoder ane):
 ///   head     codes -> hidden, Swift/Accelerate on the CPU, exact streaming (VocoderHead)
 ///   upF      Core ML fp32, CPU only: hidden window (1,1024,W) -> (1,1536,4W)   [W = 12 first chunk, 20 after]
-///   upMall   Core ML fp16, CPU only (Unread: upstream runs it on the ANE): (1,1536,4W) -> waveform (1,1,W*1920)
+///   upMall   Core ML fp16, CPU only (Unread: upstream runs it on the ANE; an older single-function file still does)
 /// Both are fixed-shape multifunction models ("w12", "w20"). Core ML's CPU (BNNS) path traps on
 /// enumerated shapes, and the CPU is all the iOS Simulator has and what a device falls back to; an
 /// older enumerated-shape upMall (no functions) still loads, as one model serving both widths.
@@ -80,7 +80,8 @@ final class ANEVocoder {
             upMall12 = try load("upMall", .cpuOnly, function: "w12")
             upMall20 = try load("upMall", .cpuOnly, function: "w20")
         } else {
-            upMall12 = try load("upMall", .cpuOnly); upMall20 = upMall12
+            // An older single-function upMall has enumerated shapes, which the CPU path traps on.
+            upMall12 = try load("upMall", .cpuAndNeuralEngine); upMall20 = upMall12
         }
         in12 = try MLMultiArray(shape: [1, 1024, 12], dataType: .float32)
         in20 = try MLMultiArray(shape: [1, 1024, 20], dataType: .float32)
