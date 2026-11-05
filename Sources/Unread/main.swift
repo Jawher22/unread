@@ -56,6 +56,11 @@ if args.contains("--bench") {
     exit(0)
 }
 
+if args.contains("--stretch-check") {
+    // Silent: the narrator's time stretch at every menu speed. Exit 1 on failure.
+    exit(stretchCheck() ? 0 : 1)
+}
+
 if args.contains("--narrate") {
     // Silent: the narrator voice's load, first audio and speed per sentence (#62).
     // `--narrate ["sentence"…] [--out file.wav] [--runs N] [--chunks 2,3,4] [--cancel-test] [--long-test]`
