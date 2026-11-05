@@ -19,7 +19,8 @@ let saveTo = args.firstIndex(of: "--save").map { URL(fileURLWithPath: args[$0 + 
 let isRemote = arg.hasPrefix("http://") || arg.hasPrefix("https://") // live pages, for investigating
 let url = isRemote ? URL(string: arg)! : URL(fileURLWithPath: arg).standardizedFileURL
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory) // no Dock icon, never becomes frontmost
+// Hidden, the host must never take the keyboard (#66): see the native host.
+app.setActivationPolicy(hidden ? .prohibited : .accessory) // no Dock icon
 
 let window = NSWindow(contentRect: NSRect(x: 60, y: 60, width: 900, height: 1000),
                       styleMask: [.titled, .resizable], backing: .buffered, defer: false)
