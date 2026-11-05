@@ -56,6 +56,18 @@ if args.contains("--bench") {
     exit(0)
 }
 
+if args.contains("--narrate") {
+    // Silent: the narrator voice's load, first audio and speed per sentence (#62).
+    // `--narrate ["sentence"…] [--out file.wav] [--runs N] [--chunks 2,3,4] [--cancel-test] [--long-test]`
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        await benchNarrator(args)
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if let i = args.firstIndex(of: "--words") {
     // Silent: when each word of a sentence starts (#20), as the voice times it.
     // `--words ["sentence"…]`; without sentences, a built-in set of hard cases.

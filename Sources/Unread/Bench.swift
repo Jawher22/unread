@@ -82,8 +82,14 @@ func benchSplit(_ voice: Voice) async {
 /// Pitch contour of `range`, one estimate per 40 ms voiced frame
 /// (autocorrelation, 70–400 Hz; expect the odd octave error).
 private func pitch(_ x: [Float], _ range: Range<Int>) -> String {
+    let track = pitchTrack(x, range)
+    return track.isEmpty ? "–" : track.map(String.init).joined(separator: "→")
+}
+
+/// Pitch in Hz of each voiced 40 ms frame of `range`, at 24 kHz.
+func pitchTrack(_ x: [Float], _ range: Range<Int>) -> [Int] {
     let frame = 960, lo = 24_000 / 400, hi = 24_000 / 70
-    var out: [String] = []
+    var out: [Int] = []
     for f in stride(from: max(range.lowerBound, 0), to: min(range.upperBound, x.count) - frame - hi, by: frame) {
         let energy = x[f..<(f + frame)].reduce(0) { $0 + $1 * $1 }
         guard energy > 0.5 else { continue }
@@ -93,7 +99,7 @@ private func pitch(_ x: [Float], _ range: Range<Int>) -> String {
             for i in 0..<frame { r += x[f + i] * x[f + i + lag] }
             if r > bestR { bestR = r; best = lag }
         }
-        if bestR > 0.3 * energy { out.append(String(24_000 / best)) }
+        if bestR > 0.3 * energy { out.append(24_000 / best) }
     }
-    return out.isEmpty ? "–" : out.joined(separator: "→")
+    return out
 }
