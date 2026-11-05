@@ -7,7 +7,7 @@ import SwiftUI
 enum SettingsTab: String, CaseIterable {
     case voices, highlight
     static let key = "settingsTab"
-    var title: String { self == .voices ? "Narrator Voices" : "Highlight" }
+    var title: String { self == .voices ? "Voice" : "Highlight" }
 }
 
 struct SettingsView: View {
@@ -32,14 +32,24 @@ struct SettingsView: View {
     }
 }
 
-/// The narrator's voices (#60), one choice per language. Play buttons play a recording the
-/// narrator made in that voice, so they work before it has loaded.
+/// Which voice reads (#59), and the narrator's voices (#60), one choice per language. Play buttons
+/// play a recording the narrator made in that voice, so they work before it has loaded.
 private struct VoiceSettingsView: View {
+    @ObservedObject private var reading = ReadingVoice.shared
     @ObservedObject private var voices = NarratorVoices.shared
     @ObservedObject private var preview = VoicePreview.shared
 
     var body: some View {
         Form {
+            Section {
+                Picker("Read with", selection: Binding(get: { reading.choice }, set: { reading.choose($0) })) {
+                    Text("Narrator").tag(VoiceChoice.narrator)
+                    Text("Kokoro").tag(VoiceChoice.kokoro)
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(readWithNote).font(.caption).foregroundStyle(.secondary)
+            }
             ForEach(NarratorVoices.languages, id: \.self) { language in
                 Section {
                     ForEach(NarratorVoices.presets(language)) { row($0, chosen: voices.preset(for: language) == $0) }
@@ -48,7 +58,7 @@ private struct VoiceSettingsView: View {
                 } footer: {
                     Text(language == .french
                          ? "French sentences are read in the French voice. These voices are synthetic, designed from a description; none is a real person's."
-                         : "Used when the menu's Voice is Narrator. A new voice starts at the next sentence.")
+                         : "A new voice starts at the next sentence.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -56,6 +66,15 @@ private struct VoiceSettingsView: View {
         .formStyle(.grouped)
         .frame(height: 640)
         .onDisappear { preview.stop() }
+    }
+
+    private var readWithNote: String {
+        switch (reading.choice, reading.narratorStatus) {
+        case (.kokoro, _): "Kokoro starts sooner and uses less memory, in a plainer voice."
+        case (.narrator, .loading): "The narrator is loading. Kokoro reads until it's ready."
+        case (.narrator, .unavailable): "The narrator couldn't load (see the log), so Kokoro reads."
+        case (.narrator, _): "The narrator reads in the voices below. Kokoro reads in the seconds it takes to load."
+        }
     }
 
     private func row(_ preset: VoicePreset, chosen: Bool) -> some View {

@@ -63,6 +63,39 @@ struct VoicePreset: Sendable, Identifiable, Hashable {
     }
 }
 
+enum NarratorStatus {
+    case notLoaded, loading, ready, unavailable
+
+    /// What the menu says beside the narrator's name.
+    var note: String? {
+        switch self {
+        case .loading: "loading…"
+        case .unavailable: "unavailable, see log"
+        case .notLoaded, .ready: nil
+        }
+    }
+}
+
+/// Which voice reads (#59), shared by the menu and Settings and kept across launches. Until one is
+/// picked, the narrator if its model is installed, else Kokoro. While the narrator loads, or if it
+/// can't, Kokoro reads.
+@MainActor
+final class ReadingVoice: ObservableObject {
+    static let shared = ReadingVoice()
+    @Published private(set) var choice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init)
+        ?? (Narrator.isInstalled() ? .narrator : .kokoro)
+    @Published var narratorStatus = NarratorStatus.notLoaded
+    /// Called after a new choice.
+    var onChoose: ((VoiceChoice) -> Void)?
+
+    func choose(_ choice: VoiceChoice) {
+        guard choice != self.choice else { return }
+        self.choice = choice
+        UserDefaults.standard.set(choice.rawValue, forKey: VoiceChoice.key)
+        onChoose?(choice)
+    }
+}
+
 /// The narrator voice chosen for each language, kept across launches. English sentences are read
 /// in the English choice and French ones in the French choice.
 @MainActor

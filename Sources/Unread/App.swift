@@ -34,7 +34,7 @@ final class AppController: NSObject {
 
     private var session: ReadingSession?
     private var ready = false
-    private var voiceChoice = UserDefaults.standard.string(forKey: VoiceChoice.key).flatMap(VoiceChoice.init) ?? .kokoro
+    private var voiceChoice: VoiceChoice { ReadingVoice.shared.choice }
     private lazy var speed = voiceChoice.savedSpeed
     private var speedMenu: NSMenu!
     private enum NarratorState { case unloaded, loading, ready(Narrator), failed }
@@ -87,6 +87,7 @@ final class AppController: NSObject {
         super.init()
         setUpMenu()
         NarratorVoices.shared.onChoose = { [weak self] in self?.narratorVoiceChosen($0.language) }
+        ReadingVoice.shared.onChoose = { [weak self] _ in self?.voiceChoiceChanged() }
         hotkey.onPress = { [weak self] in self?.keyDown() }
         hotkey.onRelease = { [weak self] held in self?.keyUp(held: held) }
         hotkey.onCancel = { [weak self] in
@@ -514,18 +515,25 @@ final class AppController: NSObject {
         for item in voiceChoiceMenu.items {
             guard let choice = (item.representedObject as? String).flatMap(VoiceChoice.init) else { continue }
             item.state = choice == voiceChoice ? .on : .off
-            switch (choice, narratorState) {
-            case (.kokoro, _): item.title = "Kokoro"
-            case (.narrator, .loading): item.title = "Narrator — \(name) (loading…)"
-            case (.narrator, .failed): item.title = "Narrator — \(name) (unavailable, see log)"
-            case (.narrator, _): item.title = "Narrator — \(name)"
-            }
+            item.title = choice == .kokoro ? "Kokoro" : "Narrator — \(name)" + (narratorStatus.note.map { " (\($0))" } ?? "")
+        }
+        ReadingVoice.shared.narratorStatus = narratorStatus
+    }
+
+    private var narratorStatus: NarratorStatus {
+        switch narratorState {
+        case .unloaded: .notLoaded
+        case .loading: .loading
+        case .ready: .ready
+        case .failed: .unavailable
         }
     }
 
     @objc private func pickVoiceChoice(_ item: NSMenuItem) {
-        voiceChoice = (item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro
-        UserDefaults.standard.set(voiceChoice.rawValue, forKey: VoiceChoice.key)
+        ReadingVoice.shared.choose((item.representedObject as? String).flatMap(VoiceChoice.init) ?? .kokoro)
+    }
+
+    private func voiceChoiceChanged() {
         speed = voiceChoice.savedSpeed
         session?.speed = speed
         updateSpeedMenu()
