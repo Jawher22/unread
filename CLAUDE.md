@@ -25,10 +25,12 @@ scripts/build.sh                      # release build; Swift 6.2 toolchain; macO
 ./.build/release/Unread --words ["sentence"]  # silent: when each word starts, as the voice times it
 ./.build/release/Unread --settings-snapshot out.png [seconds]  # render the Settings window off-screen (no screen recording needed)
 ./.build/release/Unread --highlight-frames out.png|out.gif [from] [to] [--style mark=tail,motion=flow] [--zoom x,y,w,h]  # the demo frame by frame, to review motion
+./.build/release/Unread --narrate ["sentence"] [--out x.wav] [--runs N] [--cancel-test] [--kill-test]  # silent: the narrator helper's startup, first audio and speed per sentence; writes a WAV
 ```
 
 ```bash
-scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: copy to ~/Applications and restart it); logs: ~/Library/Logs/Unread/unread.log
+scripts/build-narrator.sh             # the narrator helper (#57): Narrator/.build/release/unread-narrator + mlx.metallib; needs Xcode
+scripts/bundle.sh [--install]         # signed Unread.app in build/, with the narrator helper when Xcode is installed (--install: copy to ~/Applications and restart it); logs: ~/Library/Logs/Unread/unread.log
 ```
 
 - The bundle is signed with the first "Apple Development" identity so the Accessibility grant survives rebuilds. Dev modes work from the bundle too: `build/Unread.app/Contents/MacOS/Unread --extract`.
@@ -37,6 +39,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: 
 - Never copy `.build` between folders: Swift's precompiled headers bake in absolute paths and the build fails.
 - The first launch of a new binary spends ~13 s preparing the CoreML models. After that, load is ~0.8 s.
 - Models (~360 MB) are cached in `~/.cache/fluidaudio`.
+- The narrator model (Qwen3-TTS 1.7B Base 8-bit, ~3 GB) is read from the Hugging Face cache (`~/.cache/huggingface/hub`); download it with `hf download mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit`. The helper's first launch of a new binary spends ~12 s compiling Metal shaders; after that it's ready in ~3 s.
 - **Build with `scripts/build.sh`, never a bare `swift build -c release`.** SwiftPM 6.2 emits FluidAudio's trait defines in random Set order, so a bare build can recompile FluidAudio (~60 s) with nothing changed, and costs the next scripted build the same. The script sets `SWIFT_DETERMINISTIC_HASHING=1`.
 - `scripts/test.sh` builds, then checks every fixture page in both web engines (WebKit and Electron windows that are invisible and click-through), and `.txt`/`.rtf` pages in a native text view, against its `<page>.expected.txt`, all in parallel: ~20 s, then ~10 s scoring the local corpus if one is saved; ~5 s with `--quick` (skips `rerender.html`, which pauses 1.6 s per sentence). Run it before and after any change to `Document.swift`. One page with full output: `scripts/extract-fixture.sh fixtures/pages/<page>.html`. See `fixtures/README.md`.
 - `scripts/score-corpus.sh` scores real pages (Anthropic, OpenAI, Cloudflare, Simon Willison, Dan Luu, Wikipedia) in both engines: sentence precision, recall and bounds per page, against a recorded baseline. The snapshots hold third-party text, so they're local only (`fixtures/corpus/`, gitignored); only the manifest `fixtures/corpus.txt` is committed, and `scripts/save-corpus.sh` saves them. `scripts/test.sh` prints the table; a fresh clone has none. Run it before and after an extraction change.
@@ -44,7 +47,9 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: 
 
 ## Code map
 
-`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers, `AXWorker` queue) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following, opening-clause split) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Highlight` (highlight style settings, word-mark logic, the layer renderer shared by the overlay and the Settings demo) · `Overlay` (click-through panels, one per screen) · `Settings` (Settings window with a live highlight demo) · `Words` (word timing from Kokoro durations, word boxes) · `Latency` (per-reading timing log + `--stats`) · `Bench` (`--bench --split`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
+`Sources/Unread/`: `Hotkey` (⌃ hold/tap/double-tap, chord cancel) · `AX` (Accessibility helpers, `AXWorker` queue) · `Document` (find text under the pointer, walk sentences) · `Session` (synthesis pipeline, playback queue, highlight following, opening-clause split) · `Audio` (Kokoro EN v3 + FR legacy, language detection, AVAudioEngine) · `Highlight` (highlight style settings, word-mark logic, the layer renderer shared by the overlay and the Settings demo) · `Overlay` (click-through panels, one per screen) · `Settings` (Settings window with a live highlight demo) · `Words` (word timing from Kokoro durations, word boxes) · `Latency` (per-reading timing log + `--stats`) · `Bench` (`--bench --split`) · `Narrator` (client for the narrator helper process, voice presets) · `NarratorBench` (`--narrate`) · `App` (menu bar, interaction state machine) · `main` (entry point + dev modes).
+
+`Narrator/`: the `unread-narrator` helper, its own Swift package: `Protocol` (the pipe protocol, both directions) · `Synthesizer` (Qwen3-TTS cloning a voice, one request at a time, cancel) · `ModelStaging` (the model folder the loader gets) · `main`. `Resources/Voices/`: voice presets (#60), a JSON file and its reference clip.
 
 ## Hard-won constraints (details in docs/design.md)
 
@@ -85,3 +90,7 @@ scripts/bundle.sh [--install]         # signed Unread.app in build/ (--install: 
 - **Kokoro pads every chunk with ~0.3 s of quiet before the voice and ~0.5 s after.** Joined as is, two pieces have a ~0.8 s hole. **A clause synthesized alone ends falling, like a sentence** (French "lire," 177→137 Hz where the whole sentence rises to 240 Hz). So the opening is synthesized with the next 3 words and cut at the pause the voice makes there (`Speech.cut`), and the rest's lead-in is trimmed. Check with `--bench --split`.
 - **Pauses are Unread's, not the voice's (#56).** Each piece's own lead-in and tail quiet is trimmed to 50 ms, and `Pacing` puts 0.5 s between sentences and 1.0 s after a paragraph, heading or list item (`Sentence.endsBlock`), divided by the speed. `--extract --blocks` marks block ends with " ¶".
 - Kokoro v3 (fast ANE path) supports English, Japanese and Mandarin only. French uses the legacy pipeline with a single voice, `ff_siwis`.
+- **The narrator runs in its own process, built outside `scripts/build.sh` (#57).** `Narrator/` is a separate package because mlx-swift needs Swift tools 6.3 (Xcode); Unread stays on 6.2. mlx's Metal shaders would need Xcode's Metal Toolchain, so `scripts/build-narrator.sh` takes `mlx.metallib` from PyPI's `mlx-metal` wheel of the mlx version mlx-swift embeds (0.32.4 for 0.33.0), pinned by sha256: bump them together. In the bundle the helper finds it in `Contents/Resources` (`GPU.metallib`).
+- **The narrator never loads the Hugging Face cache directly.** mlx-audio-swift's loader writes `tokenizer.json` into the folder it loads and deletes the whole folder if `speech_tokenizer` isn't a directory, so the helper loads a staged copy of symlinks (`~/Library/Application Support/Unread/narrator/model/<revision>`).
+- **mlx-audio-swift prints to stdout,** so the helper moves the protocol to a duplicate of fd 1 and points fd 1 at stderr before anything loads.
+- **A cancelled generation keeps running until its next step, then resets the shared speech decoder.** The library gives no handle on it, so the helper waits for it to exit (a task-local sentinel the library's task inherits and releases) before it answers `cancelled` or starts the next request. The helper exits when its stdin closes, so it never outlives Unread.

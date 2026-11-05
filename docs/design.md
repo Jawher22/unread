@@ -204,6 +204,22 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 
 **Narrator pacing (#56, 2026-11-05),** `--simulate … --speed 1.0 --record`. Before, every sentence was followed by ~0.9 s of quiet (Kokoro's ~0.3 s lead-in and ~0.5 s tail plus a 120 ms gap), paragraph or not. Now the padding is trimmed to 50 ms a side and `Pacing` sets the pause: measured in the recorded output of `fixtures/pages/notes.txt`, 0.49–0.51 s between sentences and 0.99–1.01 s at paragraph ends. The first sound comes 0.1 s after scheduling instead of ~0.3 s (also #48).
 
+**Narrator helper (#57, 2026-11-05),** `Unread --narrate --runs 3`: Qwen3-TTS 1.7B Base 8-bit cloning the London storyteller clip, in the `unread-narrator` process, streaming every 0.16 s. Six sentences (five English, one French), three passes per run: three runs from `.build`, and one from the bundle with two passes. First audio is timed from writing the request to reading the first audio frame.
+
+| What | Result |
+| --- | --- |
+| First audio, median | 212, 214 and 243 ms over 18 sentences each (bundle: 235 ms over 12). The in-process prototype: 240 ms |
+| First audio, p90 | 229, 246 and 523 ms (bundle: 511 ms). The prototype: 319 ms |
+| Speed | 0.40–0.44 s of compute per second of audio (2.3–2.5× real time); 11.7–16.8 characters per second of speech |
+| Startup to ready | 2.7–4.0 s (load 1.2–2.0 s, encode the voice for EN and FR 0.14–0.36 s, warm-up 1.1–1.7 s). A new binary's first launch: 12.4–12.9 s, Metal compiling its shaders |
+| Peak memory | 7.0–7.3 GB (the helper's physical footprint, GPU buffers included) |
+| Cancel after the first chunk | Stopped and confirmed in 22–29 ms, no chunk after it; the next request works (first audio 268–332 ms) |
+| Helper killed mid-sentence | The request fails 9 ms later; later requests fail at once. Killing Unread ends the helper (its stdin closes) |
+
+- The pipe costs nothing measurable: the helper wrote each first frame 0–2 ms before Unread read it. First audio is generation. The prototype's breakdown (median of 16): ~90 ms priming the speech decoder with the reference clip's codes, ~105 ms for the first step, ~37 ms to decode the first 2 codec frames.
+- What makes the p90: a few sentences take 570–680 ms. In the two runs printed sentence by sentence, the slowest was "The hard part isn't storing things." on its second pass (571 and 680 ms). The first sentence after a new binary's first launch also takes ~515 ms. The prototype had the same sentence slow (486 ms, priming 341 ms instead of ~85), so it comes from the library, not the pipe. Not yet explained.
+- The Metal library comes from the macOS 15 build of `mlx-metal` (Unread's minimum). The macOS 26 build the prototype used measured the same within noise (median 227–228 ms).
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -236,7 +252,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 **Phase 1.5: narrator voice** (added 2026-11-05, before Phase 2). The author tried ElevenReader's narration and wants that quality on-device. Open voices close to it are 0.5–4B parameters and run on MLX, not CoreML. Fish Audio Drama 3 is the closest to ElevenLabs on the Artificial Analysis arena (1272 vs Eleven v4's 1334), but needs ~26 GB. Real people's voices are cloned only with their consent.
 - **Listening test (#55):** Ming-3.0-tts 0.5B, Qwen3-TTS 1.7B (voice from a description), Voxtral 4B, Kyutai TTS and Kokoro on the same paragraphs; the author picks by ear, and first audio and speed are measured on this Mac.
 - **Narrator pacing (#56):** longer pauses at block breaks, and 2–3 sentences synthesized together after the first, so intonation carries across a paragraph. Helps Kokoro too.
-- **Narrator helper (#57):** the chosen voice in a Swift MLX helper process, warm and streaming.
+- **Narrator helper (#57):** the chosen voice in a Swift MLX helper process, warm and streaming. The helper, its client and `--narrate` are built (§7); reading with it, Settings and word timing come next.
 - **Word timing by forced alignment (#58):** Parakeet CTC (already in FluidAudio) aligns each sentence's text to its audio, for voices that report no durations.
 - **Voice presets (#60):** designed voices locked by a ~5 s clip the Base model clones, previewed in Settings from stored audio. The author's pick so far: "London storyteller" (Qwen3 VoiceDesign).
 - **Default voice (#59):** the narrator becomes the default if it meets ~300 ms to first audio; Kokoro covers model load, possibly French, and smaller Macs.
