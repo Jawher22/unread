@@ -59,6 +59,8 @@ Reading with it: the menu's Voice submenu picks Kokoro (the default until #59) o
 - **The hold.** Speculation starts the stream during the hold, so release plays what has arrived and the rest follows. The narrator says one sentence at a time, so a speculation dropped because the pointer moved stops its stream, and a reading that's playing stops synthesizing ahead while the user aims.
 - **No opening-clause split.** That's Kokoro's workaround for not streaming (#14). The narrator's first audible chunk doesn't depend on the sentence's length, and a clause said alone would lose the intonation of the whole sentence.
 - **Speed.** Qwen3 has no speed control, so its audio is time-stretched as it plays, pitch kept (WSOLA). A speed change doesn't redo the narrator's queued audio.
+- **Pace.** At 1× the London storyteller speaks 16.6 voiced characters a second and Kokoro 19.7 (§7), so the narrator starts at 1.2×, and the speed is kept per voice choice across launches. Cloning from a time-compressed clip speeds the voice itself up, but only ~60% of the compression carries over; that's for the listener to judge (§7).
+- **Waking.** After a while unused, the narrator's first sentence started 0.9–2.4 s after release in real use. ⌃ going down now reads its model pages back and warms the Neural Engine, so the hold's speculation starts warm (§7).
 - **Word mark.** Estimated from characters across the voiced part of each sentence until forced alignment (#58). The sentence highlight is the same as with Kokoro.
 
 ## 5. Interaction design
@@ -269,6 +271,39 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - **Switching** (`--narrate --switch-test`, all 34 presets): 332 ms median (max 655), all of it warming the voice, i.e. its prompt rows, talker memory prefix and vocoder priming, with a line nobody hears. The encoded clip is read back from `~/Library/Caches/Unread/narrator-voices` in 2 ms; encoding it the first time takes 0.5–1.7 s on the CPU (24 KB on disk). Nothing is compiled per voice. The sentence after a switch starts as fast as the next one (first audible 567 ms median both). The engine keeps 4 voice-language prompts in memory, least recently used out.
 - **First audio differs by voice** because the model generates 0.0–1.1 s of quiet before the voice (median 0.42 s; London 0.30–0.62): in the previews, first audible chunk 318–2540 ms (the slow ones while another process used the Neural Engine).
 
+**Narrator pace (#62, 2026-11-05),** `--pace`, one 5-sentence passage (452 characters), each sentence's own quiet left out, pauses inside sentences kept ("speaking") or left out too ("articulation", quiet of 150 ms or more):
+
+| At 1× | Speaking | Articulation | Pitch (median) |
+| --- | --- | --- | --- |
+| Kokoro (af_heart) | 19.7 c/s | 22.4 c/s | 193 Hz |
+| London storyteller, as shipped | 16.6 c/s | 17.9 c/s | 100 Hz |
+| cloned from its clip compressed 1.15× | 18.0 c/s | 19.6 c/s | 89 Hz |
+| cloned from its clip compressed 1.25× | 19.2 c/s | 20.5 c/s | 102 Hz |
+| the clip itself | 11.6 c/s | | 105 Hz |
+
+- **Default speed 1.2×:** 16.6 × 1.2 = 19.9 c/s, Kokoro's 19.7. It's added to the Speed menu. At 1.2× synthesis stays ahead of playback (it runs at ~1.4× real time), and the prebuffer costs ~0.1–0.15 s of first audio (§7, chunk size and prebuffer). Presets range 15.8–20.2 c/s, so 1.2× fits the storyteller, the slowest; a faster preset may want less.
+- **A compressed clip** (`TimeStretch`, the app's WSOLA) makes the clone faster by about 60% of the compression (1.15× → +8%, 1.25× → +16%), and the 1.25× clone pauses less inside sentences (1.48 s against 2.10). The speaker encoder rates both as close to the clip as the shipped clone (cosine 0.991 and 0.991 against 0.992; Kokoro, a different voice, 0.944, so the scale is narrow). Every sentence ended on the model's own stop. Whether it still sounds like the storyteller, and whether the stretch's artifacts came through, is a listening call: recordings in `~/Desktop/Unread voice test/Faster narrator/`. Nothing ships from this.
+
+**Narrator start after idle (#62, 2026-11-05).** In real use, three holds with the narrator started 1367, 2404 and 924 ms after release (the second after ~54 min idle, on a 17-character sentence), against 183 ms measured with `--simulate --primed 0.4`. `--narrate --idle` says one short sentence after each wait and reports its stages, page-ins and how much of the mapped model files is in memory. This Mac was swapping (22–25 GB of swap used, other agents building and running models), as the author's often is.
+
+- **Not the first sentence after load:** right after `Narrator.load`, the first sentence's first chunk is decoded in 263–279 ms, like later ones. The load's warm-up already takes Core ML's first calls.
+- **The Neural Engine goes cold:** after 10 s idle, prefill (8 prefill calls and 4 decode calls across the talker's 4 chunks) took 245 ms instead of 124, after 60 s 664 ms, with no page-ins. Each call takes ~2× as long (11–14 ms warm, 24–39 ms cold).
+- **macOS drops the mapped files:** the narrator maps 1.17 GB from disk: Core ML's compiled programs for the vocoder's upsamplers on the CPU (422 MB, all used), and the host's embedding tables (650 MB, of which the 311 MB text table is ~1% used). After 180 s idle, while a build ran, the next sentence took 22,026 page-ins (344 MB) and its first audible chunk came 2.4 s after asking. On this Mac, residency fell to 4–50% within 60 s of idle with nothing of ours running.
+- **Not a queue:** the reading never has more than one narrator sentence in flight, and the hold already stops it (`yieldNarrator`). The first slow hold (1367 ms) came 16 s after the narrator loaded while a Kokoro reading was being re-voiced; that mix wasn't reproduced.
+
+The fix, `Narrator.wake` on ⌃ down: read back the pages sentences used (`WorkingSet`, ~600 MB) with `madvise(WILLNEED)`, and say a 4-frame line nobody hears if it's been idle over 5 s. `--narrate --idle 30,… --evict --lead 0.3`: 30 s idle, the narrator's mapped pages dropped (`msync(MS_INVALIDATE)`, as memory pressure does), ⌃ down 0.3 s before the sentence is asked for; key-down to first audible chunk, 5 rounds of each, interleaved (the same sentences warm: 770–970 ms):
+
+| What ⌃ down does | Median | Range | Prefill |
+| --- | --- | --- | --- |
+| nothing | 1670 ms | 1243–1734 | 308–762 ms |
+| warm-up only | 1660 ms | 1415–2097 | 123–134 ms |
+| read back only | 1361 ms | 1096–1430 | 348–762 ms |
+| both | 1153 ms | 937–1429 | 120–127 ms |
+
+- The warm-up always restores prefill, but alone it faults the files back one page at a time ahead of the speculation. Read-back alone leaves the Neural Engine cold. Together they halve the excess over warm. Reading back all 1.17 GB instead of the used pages was slower (more reads in the way of the ones that matter).
+- **Through the hold** (`--simulate … --voice narrator --primed 0.4 --idle-before 30 --evict`, `notes.txt`, 5 interleaved pairs), release to first audio: 1034 ms median (706–1641) without waking, 542 ms (402–718) with it. With 30 s idle and the pages left to the system (4 pairs): 633–776 ms without, 378–627 ms with. With no idle it changes nothing (178 and 197 ms: nothing to wake).
+- **Left:** ~350 ms over a warm start when the pages were dropped. Keeping them in memory (`mlock`, ~600 MB wired) would remove it, at a cost the whole Mac pays; that's the author's call (§9). Kokoro's log shows the same pattern (a 12-character sentence took 506 ms after idle, 72 ms just after), unmeasured here.
+
 **Expected time to first audio:** ~150–300 ms after release, dominated by synthesizing the first sentence. Not yet measured with real hotkey use; the app logs it as `[unread] first audio … ms after release`.
 
 ## 8. Next steps (prioritized, revised 2026-11-03)
@@ -327,6 +362,8 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 - Tables: read row by row, or skip?
 - Languages beyond French: none planned. Arabic would need a different engine, since Kokoro has none.
 - **Sentence highlight in Chromium browsers (Aside, Chrome, Arc, Dia):** they give no text positions to Unread (no inline text boxes; `AXManualAccessibility` is Electron-only), so highlights fall back to the whole paragraph. Setting `AXEnhancedUserInterface` on the browser (what VoiceOver does) would give exact sentence boxes, at the cost of the window-animation side effects that made us ban it, plus some browser overhead. Opt-in per app? **Tested on Aside 1.0.1022 (2026-11-04): it refuses the flag** (setting it returns −25208, not implemented; it reads back 0), and text positions stay zero-size, so neither a brief flip nor an opt-in can work there. **What works: Chromium's own "Text metrics" mode** (formerly "Inline text boxes") on `chrome://accessibility`. Ticking it gave real text and word boxes in Aside at once (0×0 → 172×21). It lasts until the browser quits. To make it stick, launch the browser with `--force-renderer-accessibility=complete` (untested, and costs the browser some memory), or have Unread tell the user to tick it when a page gives no text positions.
+- **Keep the narrator's pages in memory?** On a Mac short of memory, macOS drops the narrator's mapped model files within a minute, and the first sentence after that starts ~350 ms later than a warm one even with the read-back on ⌃ down (§7, start after idle). `mlock` on its working set (~600 MB) would make it warm every time, but that memory then can't be reclaimed by anything else, on a Mac that's already swapping. Opt-in, always, or never?
+- **A faster storyteller:** keep the time stretch (1.2× by default), or clone from a compressed clip so the voice itself reads faster (§7, narrator pace)? Decided by ear.
 - License (MIT like Hex is the likely default).
 - When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03). Not before the author has used it daily for real reading.
 
