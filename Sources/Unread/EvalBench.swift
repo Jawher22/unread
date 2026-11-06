@@ -8,10 +8,11 @@ import QwenANE
 ///
 /// `--paragraph` gives the narrator each paragraph as one text (#79), split only where the talker can't hold it.
 /// `--temperature`, `--top-k`, `--repetition`: the first codebook's sampling (#76). `--voice id`: the preset.
+/// `--seed-salt S`: other takes of the same passages, for more blind pairs.
 func benchEval(_ args: [String]) async {
     func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
     guard let input = value("--eval"), let output = value("--out") else {
-        print("usage: --eval PASSAGES --out DIR [--paragraph] [--temperature T] [--top-k K] [--repetition R] [--voice id]")
+        print("usage: --eval PASSAGES --out DIR [--paragraph] [--temperature T] [--top-k K] [--repetition R] [--voice id] [--seed-salt S]")
         return
     }
     let defaults = QwenSampling()
@@ -27,7 +28,7 @@ func benchEval(_ args: [String]) async {
 
     let narrator: Narrator
     do {
-        narrator = try await Narrator.load(english: try VoicePreset.named(voice), french: nil, sampling: sampling)
+        narrator = try await Narrator.load(english: try VoicePreset.named(voice), french: nil, sampling: sampling, seedSalt: value("--seed-salt") ?? "")
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
     } catch { print("\(error)"); return }
 
@@ -62,7 +63,7 @@ func benchEval(_ args: [String]) async {
         passages.append(["id": id, "seconds": seconds, "synthesis": synthesis, "parts": parts, "stops": stops])
     }
     let run: [String: Any] = [
-        "voice": voice, "paragraph": wholeParagraphs, "date": ISO8601DateFormatter().string(from: Date()),
+        "voice": voice, "paragraph": wholeParagraphs, "seedSalt": value("--seed-salt") ?? "", "date": ISO8601DateFormatter().string(from: Date()),
         "sampling": ["temperature": sampling.temperature, "topK": sampling.topK, "repetition": Double(sampling.repetition)],
         "passages": passages,
     ]

@@ -308,6 +308,10 @@ def ab(a=None, b=None):
     if not a or not b:
         sys.exit("ab: name two runs")
     ids = sorted({w.stem for w in run_dir(a).glob("*.wav")} & {w.stem for w in run_dir(b).glob("*.wav")})
+    same = [pid for pid in ids if (run_dir(a) / f"{pid}.wav").read_bytes() == (run_dir(b) / f"{pid}.wav").read_bytes()]
+    if same:
+        print(f"left out, identical in both runs: {', '.join(same)}")
+    ids = [pid for pid in ids if pid not in same]
     rng = random.Random()
     order = {pid: rng.random() < 0.5 for pid in ids}   # True: A is run b
     rng.shuffle(ids)
