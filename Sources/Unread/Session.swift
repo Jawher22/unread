@@ -162,12 +162,37 @@ final class ReadingSession {
     /// ~0.3 s), and some apps report where things are late (Aside moves element frames only twice a second),
     /// so the highlight comes back only once measurements taken after the scroll have put it in the same
     /// place for `scrollSettle`, longer than Aside's half-second step.
+    ///
+    /// A trackpad says how far each event moves the page (momentum included), so when the movement stops the
+    /// highlight is drawn at once where it was, moved by as much (`predicted`), and a settled measurement then
+    /// confirms it or corrects it (at a page's top or bottom, the page moves less than the fingers).
     private var scrollMonitor: Any?
     private var lastScroll = Date.distantPast
-    private var heldForScroll = false
+    private var scrollState = ScrollState.steady
+    private enum ScrollState {
+        /// Measurements are drawn as they come.
+        case steady
+        /// The user is scrolling: hidden, and adding up how far the page has been moved since it was drawn.
+        case scrolling(Gesture)
+        /// Drawn from the gesture's distance, until a settled measurement takes over.
+        case predicted(range: AnyObject, lines: [CGRect])
+        /// Hidden until measurements settle (a mouse wheel's steps don't say how far the page moved).
+        case settling
+    }
+    private struct Gesture { let range: AnyObject; let from: [CGRect]; var dx: CGFloat = 0, dy: CGFloat = 0; var precise = true }
     /// Where the current sentence has measured since the scroll, and since when it has measured there.
     private var settling: (range: AnyObject, lines: [CGRect], since: Date)?
-    private static let scrollSettle: TimeInterval = 0.55
+    /// The last time a measurement moved, and the shortest gap seen between two moves: how often this app
+    /// updates where things are (Aside every 0.5 s; Electron and WebKit at every 0.1 s measurement).
+    private var lastMove: (range: AnyObject, lines: [CGRect], at: Date)?
+    private var updateStep: TimeInterval?
+    private static let gestureEnd: TimeInterval = 0.1
+    /// How long a position must hold before it's trusted after a scroll: past the app's update step, and
+    /// 0.55 s until a step has been seen.
+    private var scrollSettle: TimeInterval { updateStep.map { min(0.55, $0 + 0.15) } ?? 0.55 }
+    private var hiddenForScroll: Bool {
+        switch scrollState { case .scrolling, .settling: true; case .steady, .predicted: false }
+    }
     private var refreshStuckLogged = false
     /// Newer highlight requests win over older ones still in flight.
     private var highlightToken = 0
@@ -242,17 +267,45 @@ final class ReadingSession {
         overlay.setFrameHandler(self) { [weak self] t in self?.tickWord(at: t) }
         scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             let at = event.cgEvent?.location // global, top-left origin, like Accessibility's
-            MainActor.assumeIsolated { self?.userScrolled(at: at, moved: event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0) }
+            let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY, precise = event.hasPreciseScrollingDeltas
+            MainActor.assumeIsolated { self?.userScrolled(at: at, dx: dx, dy: dy, precise: precise) }
         }
     }
 
-    private func userScrolled(at point: CGPoint?, moved: Bool) {
-        guard moved, let point, let visible = shownLines?.visible, visible.contains(point) else { return }
+    private func userScrolled(at point: CGPoint?, dx: CGFloat, dy: CGFloat, precise: Bool) {
+        guard dx != 0 || dy != 0, let point, let shown = shownLines, shown.visible.contains(point) else { return }
         lastScroll = Date()
-        heldForScroll = true
         settling = nil
+        var gesture: Gesture
+        if case .scrolling(let g) = scrollState { gesture = g }
+        else if case .settling = scrollState { return }
+        else { gesture = Gesture(range: shown.range, from: shown.lines) }
+        gesture.dx += dx
+        gesture.dy += dy
+        gesture.precise = gesture.precise && precise
+        scrollState = .scrolling(gesture)
         overlay.hide()
         if markedWord != nil { markedWord = nil; overlay.hideWord() }
+    }
+
+    /// The gesture has stopped: draw the highlight where it was, moved as far as the page was.
+    private func endGesture() {
+        guard case .scrolling(let g) = scrollState, Date().timeIntervalSince(lastScroll) >= Self.gestureEnd else { return }
+        guard g.precise, let shown = shownLines, shown.range === g.range, queued.first?.sentence.range === g.range else {
+            scrollState = .settling
+            print("[unread] \(Self.clock()) scroll: \(g.precise ? "next sentence" : "wheel steps"), waiting for the place to settle")
+            return
+        }
+        let lines = g.from.map { $0.offsetBy(dx: g.dx, dy: g.dy) }
+        print("[unread] \(Self.clock()) scroll: drawn \(Int(g.dy)) px from where it was")
+        scrollState = .predicted(range: g.range, lines: lines)
+        shownLines = (g.range, lines, shown.visible)
+        draw(lines, in: shown.visible)
+    }
+
+    private func draw(_ lines: [CGRect], in visible: CGRect) {
+        let shown = lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
+        if shown.isEmpty { overlay.hide(); markedWord = nil } else { overlay.show(shown, style: .reading, id: sentenceNumber) }
     }
 
     func stop() {
@@ -694,6 +747,7 @@ final class ReadingSession {
             refreshStuckLogged = true
             print("[unread] \(Self.clock()) highlight: a refresh has waited over 1 s for the Accessibility worker")
         }
+        endGesture()
         guard !suspendHighlight, !refreshing, let current = queued.first?.sentence else { return }
         refreshing = true
         refreshStarted = Date()
@@ -748,20 +802,44 @@ final class ReadingSession {
             wordBoxes = nil // reflowed: measure the words again on the next refresh
         }
         if m.scrolled { entry = nil } // the page moved: there's no gliding from where the last word was
-        shownLines = (range, m.lines, visible)
-        if heldForScroll {
-            guard measuredAt > lastScroll else { return }
-            if let s = settling, s.range === range, Self.sameRects(s.lines, m.lines) {
-                guard Date().timeIntervalSince(s.since) >= Self.scrollSettle else { return }
-            } else {
-                settling = (range, m.lines, measuredAt)
-                return
-            }
-            heldForScroll = false
-            settling = nil
+        if let last = lastMove, last.range === range, !Self.sameRects(last.lines, m.lines) {
+            let gap = measuredAt.timeIntervalSince(last.at)
+            if gap > 0.05 { updateStep = min(updateStep ?? gap, gap) }
         }
-        let shown = m.lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
-        if shown.isEmpty { overlay.hide(); markedWord = nil } else { overlay.show(shown, style: .reading, id: sentenceNumber) }
+        if lastMove.map({ $0.range !== range || !Self.sameRects($0.lines, m.lines) }) ?? true { lastMove = (range, m.lines, measuredAt) }
+        switch scrollState {
+        case .steady: break
+        case .scrolling: return
+        case .predicted(let predictedRange, let predicted):
+            guard predictedRange === range else { // the next sentence: nothing predicted for it
+                scrollState = .settling
+                overlay.hide()
+                return show(m, in: visible, measuredAt: measuredAt)
+            }
+            guard measuredAt > lastScroll else { return }
+            let off = (Self.union(m.lines)?.minY ?? 0) - (Self.union(predicted)?.minY ?? 0)
+            if Self.sameRects(predicted, m.lines, within: 3) { // confirmed
+                print("[unread] \(Self.clock()) scroll: predicted place confirmed (\(Int(off)) px)")
+                break
+            }
+            guard settled(range, m.lines, measuredAt) else { return } // corrected once the app has caught up
+            print("[unread] \(Self.clock()) scroll: predicted place corrected by \(Int(off)) px after \(Int(Date().timeIntervalSince(lastScroll) * 1000)) ms")
+        case .settling:
+            guard measuredAt > lastScroll, settled(range, m.lines, measuredAt) else { return }
+        }
+        scrollState = .steady
+        settling = nil
+        shownLines = (range, m.lines, visible)
+        draw(m.lines, in: visible)
+    }
+
+    /// The sentence has measured in the same place for `scrollSettle`, longer than Aside's half-second step.
+    private func settled(_ range: AnyObject, _ lines: [CGRect], _ measuredAt: Date) -> Bool {
+        if let s = settling, s.range === range, Self.sameRects(s.lines, lines) {
+            return Date().timeIntervalSince(s.since) >= scrollSettle
+        }
+        settling = (range, lines, measuredAt)
+        return false
     }
 
     /// Mark the word being heard at display time `t`, styled as chosen in
@@ -771,7 +849,7 @@ final class ReadingSession {
         let raw = player.position
         let position = clock.position(raw, at: t)
         if debugMotion, let raw, let position { print(String(format: "[frame] %.4f raw %d smooth %d", t, raw, position)) }
-        guard !suspendHighlight, !heldForScroll, let playing = queued.first, let position,
+        guard !suspendHighlight, !hiddenForScroll, let playing = queued.first, let position,
               let words = wordBoxes, words.range === playing.sentence.range,
               let lines = shownLines, lines.range === playing.sentence.range,
               let from = words.lines.first, let to = lines.lines.first else { return }
@@ -808,8 +886,8 @@ final class ReadingSession {
         overlay.showWord(shown)
     }
 
-    nonisolated private static func sameRects(_ a: [CGRect], _ b: [CGRect]) -> Bool {
-        a.count == b.count && zip(a, b).allSatisfy { abs($0.minX - $1.minX) < 1 && abs($0.minY - $1.minY) < 1 && abs($0.height - $1.height) < 1 }
+    nonisolated private static func sameRects(_ a: [CGRect], _ b: [CGRect], within d: CGFloat = 1) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { abs($0.minX - $1.minX) < d && abs($0.minY - $1.minY) < d && abs($0.height - $1.height) < d }
     }
 
     /// Same number of lines, each the same size: moved, not reflowed.
