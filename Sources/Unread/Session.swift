@@ -180,7 +180,12 @@ final class ReadingSession {
         case settling
     }
     /// Vertical only: a swipe always drifts sideways a little, and pages don't scroll sideways.
-    private struct Gesture { let range: AnyObject; let from: [CGRect]; var dy: CGFloat = 0; var precise = true }
+    private struct Gesture {
+        let range: AnyObject; let from: [CGRect]; var dy: CGFloat = 0; var precise = true
+        /// A trackpad says when the fingers are on it and when the glide after them runs: the gesture isn't
+        /// over while either lasts, even when the fingers pause.
+        var touching = false, gliding = false
+    }
     /// How far the page moves on screen per point of trackpad distance: 0.9 on a page zoomed to 90%. Learned
     /// from each prediction a measurement settles, on lines that weren't cut by an edge.
     private var scrollScale: CGFloat = 1
@@ -277,12 +282,22 @@ final class ReadingSession {
         scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             let at = event.cgEvent?.location // global, top-left origin, like Accessibility's
             let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY, precise = event.hasPreciseScrollingDeltas
-            MainActor.assumeIsolated { self?.userScrolled(at: at, dx: dx, dy: dy, precise: precise) }
+            let phase = event.phase, momentum = event.momentumPhase
+            MainActor.assumeIsolated { self?.userScrolled(at: at, dx: dx, dy: dy, precise: precise, phase: phase, momentum: momentum) }
         }
     }
 
-    private func userScrolled(at point: CGPoint?, dx: CGFloat, dy: CGFloat, precise: Bool) {
-        guard dx != 0 || dy != 0, let point, let shown = shownLines, shown.visible.contains(point) else { return }
+    private func userScrolled(at point: CGPoint?, dx: CGFloat, dy: CGFloat, precise: Bool,
+                              phase: NSEvent.Phase, momentum: NSEvent.Phase) {
+        let moved = dx != 0 || dy != 0
+        // Fingers lifting, a glide ending: no distance, but they say when the gesture is over.
+        if !moved, case .scrolling(var g) = scrollState {
+            if phase.contains(.ended) || phase.contains(.cancelled) { g.touching = false }
+            if momentum.contains(.ended) || momentum.contains(.cancelled) { g.gliding = false }
+            scrollState = .scrolling(g)
+            return
+        }
+        guard moved, let point, let shown = shownLines, shown.visible.contains(point) else { return }
         lastScroll = Date()
         settling = nil
         var gesture: Gesture
@@ -291,6 +306,8 @@ final class ReadingSession {
         else { gesture = Gesture(range: shown.range, from: shown.lines) }
         gesture.dy += dy
         gesture.precise = gesture.precise && precise
+        if !phase.isEmpty { gesture.touching = !(phase.contains(.ended) || phase.contains(.cancelled)) }
+        if !momentum.isEmpty { gesture.gliding = !(momentum.contains(.ended) || momentum.contains(.cancelled)) }
         scrollState = .scrolling(gesture)
         overlay.hide()
         if markedWord != nil { markedWord = nil; overlay.hideWord() }
@@ -298,7 +315,9 @@ final class ReadingSession {
 
     /// The gesture has stopped: draw the highlight where it was, moved as far as the page was.
     private func endGesture() {
-        guard case .scrolling(let g) = scrollState, Date().timeIntervalSince(lastScroll) >= Self.gestureEnd else { return }
+        let still = Date().timeIntervalSince(lastScroll)
+        // Over when the fingers are off and the glide is done; or after 1.5 s without movement, if an end went missing.
+        guard case .scrolling(let g) = scrollState, still >= Self.gestureEnd, (!g.touching && !g.gliding) || still >= 1.5 else { return }
         guard g.precise, let shown = shownLines, shown.range === g.range, queued.first?.sentence.range === g.range else {
             scrollState = .settling
             print("[unread] \(Self.clock()) scroll: \(g.precise ? "next sentence" : "wheel steps"), waiting for the place to settle")
