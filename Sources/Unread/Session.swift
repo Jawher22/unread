@@ -156,16 +156,18 @@ final class ReadingSession {
     /// A 10 Hz refresh is in flight on the AX worker; skip ticks until it's back.
     private var refreshing = false
     private var refreshStarted = Date.distantPast
-    /// The user scrolling the page being read: the highlight is hidden from the first scroll event until
-    /// `scrollQuiet` after the last, and drawn again from a measurement taken after it. Measurements lag a
-    /// scroll by 100–400 ms (Aside: up to 200 ms each, at most 10 a second), so a highlight drawn during one
-    /// sits on whatever text slides under it.
+    /// The user scrolling the page being read: the highlight is hidden from the first scroll event, because
+    /// measurements lag a scroll (at most 10 a second), so a highlight drawn during one sits on whatever text
+    /// slides under it. The page goes on moving after the last event (Chromium animates a wheel scroll for
+    /// ~0.3 s), and some apps report where things are late (Aside moves element frames only twice a second),
+    /// so the highlight comes back only once measurements taken after the scroll have put it in the same
+    /// place for `scrollSettle`, longer than Aside's half-second step.
     private var scrollMonitor: Any?
     private var lastScroll = Date.distantPast
-    /// When the measurement the highlight is drawn from was started.
-    private var shownMeasuredAt = Date.distantPast
-    private static let scrollQuiet: TimeInterval = 0.2
-    private var scrollHeld: Bool { shownMeasuredAt < lastScroll || Date().timeIntervalSince(lastScroll) < Self.scrollQuiet }
+    private var heldForScroll = false
+    /// Where the current sentence has measured since the scroll, and since when it has measured there.
+    private var settling: (range: AnyObject, lines: [CGRect], since: Date)?
+    private static let scrollSettle: TimeInterval = 0.55
     private var refreshStuckLogged = false
     /// Newer highlight requests win over older ones still in flight.
     private var highlightToken = 0
@@ -247,6 +249,8 @@ final class ReadingSession {
     private func userScrolled(at point: CGPoint?, moved: Bool) {
         guard moved, let point, let visible = shownLines?.visible, visible.contains(point) else { return }
         lastScroll = Date()
+        heldForScroll = true
+        settling = nil
         overlay.hide()
         if markedWord != nil { markedWord = nil; overlay.hideWord() }
     }
@@ -745,8 +749,17 @@ final class ReadingSession {
         }
         if m.scrolled { entry = nil } // the page moved: there's no gliding from where the last word was
         shownLines = (range, m.lines, visible)
-        shownMeasuredAt = measuredAt
-        if scrollHeld { return } // drawn again after the scroll, from a fresh measurement
+        if heldForScroll {
+            guard measuredAt > lastScroll else { return }
+            if let s = settling, s.range === range, Self.sameRects(s.lines, m.lines) {
+                guard Date().timeIntervalSince(s.since) >= Self.scrollSettle else { return }
+            } else {
+                settling = (range, m.lines, measuredAt)
+                return
+            }
+            heldForScroll = false
+            settling = nil
+        }
         let shown = m.lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
         if shown.isEmpty { overlay.hide(); markedWord = nil } else { overlay.show(shown, style: .reading, id: sentenceNumber) }
     }
@@ -758,7 +771,7 @@ final class ReadingSession {
         let raw = player.position
         let position = clock.position(raw, at: t)
         if debugMotion, let raw, let position { print(String(format: "[frame] %.4f raw %d smooth %d", t, raw, position)) }
-        guard !suspendHighlight, !scrollHeld, let playing = queued.first, let position,
+        guard !suspendHighlight, !heldForScroll, let playing = queued.first, let position,
               let words = wordBoxes, words.range === playing.sentence.range,
               let lines = shownLines, lines.range === playing.sentence.range,
               let from = words.lines.first, let to = lines.lines.first else { return }
@@ -793,6 +806,10 @@ final class ReadingSession {
         }
         markedWord = (playing.sentence.range, shown, style)
         overlay.showWord(shown)
+    }
+
+    nonisolated private static func sameRects(_ a: [CGRect], _ b: [CGRect]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { abs($0.minX - $1.minX) < 1 && abs($0.minY - $1.minY) < 1 && abs($0.height - $1.height) < 1 }
     }
 
     /// Same number of lines, each the same size: moved, not reflowed.
