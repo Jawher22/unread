@@ -155,6 +155,18 @@ final class ReadingSession {
     private var markedWord: (range: AnyObject, frame: WordMarkFrame?, style: HighlightStyle)?
     /// A 10 Hz refresh is in flight on the AX worker; skip ticks until it's back.
     private var refreshing = false
+    private var refreshStarted = Date.distantPast
+    /// The user scrolling the page being read: the highlight is hidden from the first scroll event until
+    /// `scrollQuiet` after the last, and drawn again from a measurement taken after it. Measurements lag a
+    /// scroll by 100–400 ms (Aside: up to 200 ms each, at most 10 a second), so a highlight drawn during one
+    /// sits on whatever text slides under it.
+    private var scrollMonitor: Any?
+    private var lastScroll = Date.distantPast
+    /// When the measurement the highlight is drawn from was started.
+    private var shownMeasuredAt = Date.distantPast
+    private static let scrollQuiet: TimeInterval = 0.2
+    private var scrollHeld: Bool { shownMeasuredAt < lastScroll || Date().timeIntervalSince(lastScroll) < Self.scrollQuiet }
+    private var refreshStuckLogged = false
     /// Newer highlight requests win over older ones still in flight.
     private var highlightToken = 0
     private let startedAt: Date
@@ -226,6 +238,17 @@ final class ReadingSession {
         }
         // Every display frame, paced by the screen.
         overlay.setFrameHandler(self) { [weak self] t in self?.tickWord(at: t) }
+        scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            let at = event.cgEvent?.location // global, top-left origin, like Accessibility's
+            MainActor.assumeIsolated { self?.userScrolled(at: at, moved: event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0) }
+        }
+    }
+
+    private func userScrolled(at point: CGPoint?, moved: Bool) {
+        guard moved, let point, let visible = shownLines?.visible, visible.contains(point) else { return }
+        lastScroll = Date()
+        overlay.hide()
+        if markedWord != nil { markedWord = nil; overlay.hideWord() }
     }
 
     func stop() {
@@ -233,6 +256,8 @@ final class ReadingSession {
         ready.forEach { $0.take.cancel() }
         live?.take.cancel()
         refresh?.invalidate()
+        if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+        scrollMonitor = nil
         overlay.clearFrameHandler(self)
         player.stop()
         overlay.hide()
@@ -634,6 +659,7 @@ final class ReadingSession {
         highlightToken += 1
         let token = highlightToken
         let scrollIfNeeded = scroll && following
+        let measuredAt = Date()
         Task { [weak self] in
             guard let m = await self?.measure(current, relocate: true, scrollIfNeeded: scrollIfNeeded, wantWords: true), let self else { return }
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
@@ -655,13 +681,18 @@ final class ReadingSession {
                 let words = m.words.map { w in ", \(w.compactMap { $0 }.count)/\(w.count) word boxes" } ?? ""
                 print("[highlight] \(label) → \(m.lines.count) line(s)\(words)")
             }
-            self.show(m, in: visible)
+            self.show(m, in: visible, measuredAt: measuredAt)
         }
     }
 
     private func refreshHighlight() {
+        if refreshing, Date().timeIntervalSince(refreshStarted) > 1, !refreshStuckLogged {
+            refreshStuckLogged = true
+            print("[unread] \(Self.clock()) highlight: a refresh has waited over 1 s for the Accessibility worker")
+        }
         guard !suspendHighlight, !refreshing, let current = queued.first?.sentence else { return }
         refreshing = true
+        refreshStarted = Date()
         let token = highlightToken
         // Relocating walks the tree; not more than twice a second.
         let mayRelocate = Date().timeIntervalSince(lastRelocateAttempt) > 0.5
@@ -669,6 +700,9 @@ final class ReadingSession {
         Task { [weak self] in
             guard let m = await self?.measure(current, relocate: mayRelocate, scrollIfNeeded: false, wantWords: wantWords), let self else { return }
             self.refreshing = false
+            self.refreshStuckLogged = false
+            let started = self.refreshStarted
+            self.logRefresh(m, took: Date().timeIntervalSince(started), current: current)
             if m.triedRelocate { self.lastRelocateAttempt = Date() }
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
                   self.queued.first?.sentence.range === current.range else { return }
@@ -677,13 +711,32 @@ final class ReadingSession {
             // If the user scrolled the sentence away, stop dragging the page
             // back; resume following once it's on screen again.
             if Date() > self.followGraceUntil { self.following = visible.intersects(bounds) }
-            self.show(m, in: visible)
+            self.show(m, in: visible, measuredAt: started)
         }
+    }
+
+    /// Scrolling investigation (Aside): each refresh that moves the highlight, loses it, or is slow, with the time.
+    private func logRefresh(_ m: Measured, took: TimeInterval, current: Sentence) {
+        let before = shownLines.flatMap { $0.range === current.range ? Self.union($0.lines) : nil }
+        let now = Self.union(m.lines)
+        let ms = Int(took * 1000)
+        switch (before, now) {
+        case (_, nil): print("[unread] \(Self.clock()) highlight refresh: no box (\(ms) ms)")
+        case (let b?, let n?) where abs(b.minY - n.minY) > 2 || abs(b.height - n.height) > 2:
+            print("[unread] \(Self.clock()) highlight refresh: \(Int(b.minY))→\(Int(n.minY)), \(Int(n.height)) tall, visible \(m.visible.map { "\(Int($0.minY))–\(Int($0.maxY))" } ?? "?") (\(ms) ms)")
+        default: if ms > 250 { print("[unread] \(Self.clock()) highlight refresh: slow, \(ms) ms") }
+        }
+    }
+
+    nonisolated static func clock() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f.string(from: Date())
     }
 
     /// Draw the sentence's lines, clipped to the visible part of the
     /// document, and keep the word boxes in step with them.
-    private func show(_ m: Measured, in visible: CGRect) {
+    private func show(_ m: Measured, in visible: CGRect, measuredAt: Date) {
         guard let range = queued.first?.sentence.range else { return }
         if let words = m.words {
             wordBoxes = (range, words, m.lines)
@@ -692,6 +745,8 @@ final class ReadingSession {
         }
         if m.scrolled { entry = nil } // the page moved: there's no gliding from where the last word was
         shownLines = (range, m.lines, visible)
+        shownMeasuredAt = measuredAt
+        if scrollHeld { return } // drawn again after the scroll, from a fresh measurement
         let shown = m.lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
         if shown.isEmpty { overlay.hide(); markedWord = nil } else { overlay.show(shown, style: .reading, id: sentenceNumber) }
     }
@@ -703,7 +758,7 @@ final class ReadingSession {
         let raw = player.position
         let position = clock.position(raw, at: t)
         if debugMotion, let raw, let position { print(String(format: "[frame] %.4f raw %d smooth %d", t, raw, position)) }
-        guard !suspendHighlight, let playing = queued.first, let position,
+        guard !suspendHighlight, !scrollHeld, let playing = queued.first, let position,
               let words = wordBoxes, words.range === playing.sentence.range,
               let lines = shownLines, lines.range === playing.sentence.range,
               let from = words.lines.first, let to = lines.lines.first else { return }
