@@ -1,0 +1,6 @@
+It worked!
+After six weeks of failed builds, the test suite finally ran green from start to finish.
+Priya actually stood up and cheered, and someone in the corner started clapping.
+We had been so sure the bug lived in the network layer, and it turned out to be a single misplaced comma in a config file.
+Nobody minded.
+We ordered pizza, pushed the release, and went home before dark for the first time in a month.

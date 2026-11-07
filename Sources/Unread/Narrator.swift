@@ -86,6 +86,7 @@ actor Narrator {
     private var voices: [String: Clone]
     private let paces: Mutex<[String: Double]>
     private let chunkFrames: [Int]
+    private let seedSalt: String
     nonisolated let startup: Startup
     nonisolated let workingSet: WorkingSet
     /// Times its English words (#58): the model reports none. Nil if it couldn't load; words are then estimated.
@@ -111,11 +112,14 @@ actor Narrator {
 
     /// Loads the model, encodes each preset's clip (cached after the first time) and warms both languages.
     /// Loads the aligner alongside (~0.2 s; its first load downloads ~100 MB and compiles for about 50 s).
-    static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames) async throws -> Narrator {
+    /// `sampling`: the first codebook's draw (`--eval` sweeps it, #76). `seedSalt`: mixed into every paragraph's
+    /// seed, for other takes of the same text (`--eval --seed-salt`).
+    static func load(english: VoicePreset, french: VoicePreset?, chunkFrames: [Int] = chunkFrames,
+                     sampling: QwenSampling = QwenSampling(), seedSalt: String = "") async throws -> Narrator {
         async let aligner = loadAligner()
         let narrator = try await withCheckedThrowingContinuation { done in
             DispatchQueue.global(qos: .userInitiated).async {
-                done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames) })
+                done.resume(with: Result { try Narrator(english: english, french: french, models: modelDirectory, chunkFrames: chunkFrames, sampling: sampling, seedSalt: seedSalt) })
             }
         }
         let loaded = await aligner
@@ -130,13 +134,15 @@ actor Narrator {
         }
     }
 
-    private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int]) throws {
+    private init(english: VoicePreset, french: VoicePreset?, models: URL, chunkFrames: [Int], sampling: QwenSampling, seedSalt: String) throws {
         guard Self.isInstalled(at: models) else { throw Failure.modelMissing(models, revision: Self.modelRevision) }
         queue = DispatchSerialQueue(label: "unread.narrator", qos: .userInitiated)
         self.chunkFrames = chunkFrames
+        self.seedSalt = seedSalt
         let mappedBefore = Set(MappedFiles.regions().map(\.address))
         var t = Date()
         engine = try QwenANEEngine(modelsDirectory: models)
+        engine.options.sampling = sampling
         let engineTime = Date().timeIntervalSince(t)
         t = Date()
         var voices = ["en": try Self.clone(english, models: models)]
@@ -269,7 +275,7 @@ actor Narrator {
         if let previous, let carried, carried.text == previous, carried.language == language, carried.voice == clone.preset.id {
             session = carried.session
         } else {
-            session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: text)
+            session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: seedSalt + text)
         }
         let parts = parts(of: text, voice: voice, language: language)
         var leading = 0.0, stop = "", timings: QwenTimings?, frames = 0

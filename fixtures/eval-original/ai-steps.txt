@@ -1,0 +1,9 @@
+Here's how to set it up.
+
+Run the fetch script to download the model.
+
+Open Settings and pick a voice.
+
+Point at a paragraph and hold Control.
+
+If nothing happens, check that Unread has Accessibility permission.

@@ -1,0 +1,4 @@
+The plan, as plans go, was simple: fix one small bug before lunch.
+By three o'clock I had rewritten the logger, upgraded two dependencies (one of which I had never heard of), and broken the build in a way that felt almost artistic.
+The original bug, of course, was still there.
+It had been waiting patiently the whole time — like a cat that knows you'll come back to the kitchen eventually.
