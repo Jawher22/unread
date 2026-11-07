@@ -7,7 +7,7 @@ import QwenANE
 /// Writes `DIR/<id>.wav` and `DIR/run.json`. Silent.
 ///
 /// `--paragraph` gives the narrator each paragraph as one text (#79), split only where the talker can't hold it.
-/// `--temperature`, `--top-k`, `--repetition`: the first codebook's sampling (#76). `--voice id`: the preset.
+/// `--temperature`, `--top-k`, `--repetition`: the first codebook's sampling (#76). `--voice id`: the preset, or a preset's JSON anywhere (a voice being tried, #78).
 /// `--seed-salt S`: other takes of the same passages, for more blind pairs.
 /// `--speed X`: played at X the way reading plays it (each take time-stretched, `Pacing`'s pauses divided by X).
 /// `--reference-stretch R`: the voice cloned from its clip time-compressed R×, which makes the model itself faster.
@@ -36,7 +36,7 @@ func benchEval(_ args: [String]) async {
     let narrator: Narrator
     do {
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        var preset = try VoicePreset.named(voice)
+        var preset = voice.hasSuffix(".json") ? try VoicePreset.load(URL(fileURLWithPath: voice)) : try VoicePreset.named(voice)
         if referenceStretch != 1 {
             let clips = out.appendingPathComponent("reference")
             try FileManager.default.createDirectory(at: clips, withIntermediateDirectories: true)
