@@ -230,6 +230,7 @@ final class AppController: NSObject {
     private func keyDown() {
         guard let narrator else { NSSound.beep(); return }
         player.warm() // open the audio device now, not on release
+        overlay.claimActiveSpace() // the highlight lives on the Space the reading is on
         narrator.wake() // after a while idle, its first sentence is slow; the hold's speculation starts ~0.3 s from now
         aimTarget = nil
         aimDocument = nil

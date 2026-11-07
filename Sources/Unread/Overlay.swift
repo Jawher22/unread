@@ -34,7 +34,9 @@ final class Overlay {
             panel.backgroundColor = .clear
             panel.hasShadow = false
             panel.ignoresMouseEvents = true
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+            // On one Space, the one it was made on: swiping to another desktop slides the highlight away with
+            // the page it's on, instead of leaving it over the new one. `claimActiveSpace` moves it where a hold starts.
+            panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
             let view = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
             view.wantsLayer = true
             panel.contentView = view
@@ -47,6 +49,12 @@ final class Overlay {
         // Frames paced by the main screen's display (120 Hz on ProMotion).
         ticker = panels.first.map { p in DisplayTicker(view: p.panel.contentView!) { [weak self] t in self?.frame(t) } }
         if running { ticker?.start() }
+    }
+
+    /// Puts the panels on the current Space (a hold starting there), making them afresh if they're on another.
+    func claimActiveSpace() {
+        guard panels.contains(where: { !$0.panel.isOnActiveSpace }) else { return }
+        rebuild()
     }
 
     /// Called every frame until `clearFrameHandler`, with the frame's display time.

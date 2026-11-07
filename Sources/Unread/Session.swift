@@ -172,7 +172,6 @@ final class ReadingSession {
     /// user moves to another Space, or the window is minimized or hidden, the highlight hides until it's back.
     private var windowID: CGWindowID?
     private var windowOnScreen = true
-    private var lastWindowCheck = Date.distantPast
     /// The page was left (navigated away, closed): the sentence can't be found, so the highlight hides.
     private var pageGone = false
     private var scrollState = ScrollState.steady
@@ -338,10 +337,9 @@ final class ReadingSession {
         draw(lines, in: shown.visible)
     }
 
-    /// Twice a second: is the window being read on screen (this Space, not minimized or hidden)?
+    /// Each refresh: is the window being read on screen (this Space, not minimized or hidden)? About 0.1 ms.
     private func checkWindow() {
-        guard let windowID, Date().timeIntervalSince(lastWindowCheck) >= 0.5 else { return }
-        lastWindowCheck = Date()
+        guard let windowID else { return }
         let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first
         let onScreen = info?[kCGWindowIsOnscreen as String] as? Bool ?? false
         guard onScreen != windowOnScreen else { return }
