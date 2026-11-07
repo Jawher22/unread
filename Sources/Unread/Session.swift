@@ -442,7 +442,8 @@ final class ReadingSession {
         if first {
             l.voiced = Speech(samples: said).leadingQuiet
         } else if start != l.timeline(l.said) {
-            if debugSession { print(String(format: "[session] underrun: #%d waited %.0f ms for audio", piece.seq, Double(start - l.timeline(l.said)) / 24)) }
+            print(String(format: "[unread] underrun: sentence #%d at %.2g× waited %.0f ms for audio, %.1f s in", piece.seq, l.speed,
+                         Double(start - l.timeline(l.said)) / 24, Double(l.said) / 24_000))
         }
         if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }
         l.said += said.count

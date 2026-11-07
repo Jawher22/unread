@@ -118,7 +118,7 @@ private func medianPitch(_ samples: [Float]) -> String {
 }
 
 /// The preset with its clip time-compressed by `rate` (pitch kept), written to `dir`.
-private func stretchedPreset(_ preset: VoicePreset, rate: Double, in dir: URL) throws -> VoicePreset {
+func stretchedPreset(_ preset: VoicePreset, rate: Double, in dir: URL) throws -> VoicePreset {
     var stretch = TimeStretch(rate: rate)
     let clip = try readWAV(preset.audio)
     let audio = dir.appendingPathComponent(String(format: "%@-%gx.wav", preset.audio.deletingPathExtension().lastPathComponent, rate))

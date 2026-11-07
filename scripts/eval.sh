@@ -3,7 +3,8 @@
 #
 #   scripts/eval.sh passages                 assemble fixtures/eval/passages/ from fixtures/eval.txt
 #   scripts/eval.sh render NAME [flags…]     read them with the narrator into fixtures/eval/runs/NAME/
-#                                            (flags go to `Unread --eval`: --paragraph, --temperature T, --top-k K, --repetition R, --voice id)
+#                                            (flags go to `Unread --eval`: --paragraph, --temperature T, --top-k K, --repetition R, --voice id,
+#                                            --seed-salt S, --speed X, --stretch Y, --squeeze P, --reference-stretch R)
 #   scripts/eval.sh elevenlabs [models]      the ElevenLabs references (ELEVENLABS_API_KEY; fixtures/eval/elevenlabs.json names model and voice)
 #   scripts/eval.sh score NAME…              Whisper word errors, pitch spread, pauses ("elevenlabs" is the references)
 #   scripts/eval.sh ab A B                   blind A/B page for two runs
