@@ -38,25 +38,21 @@ struct PrimedSentence {
     }
 }
 
-/// The quiet between sentences, as a narrator leaves it (#56): short inside
-/// a paragraph, longer where one ends. The narrator's own quiet before and
-/// after the voice is trimmed to `edge` on each side and this pause put
-/// between, shorter at faster speeds.
+/// The quiet between sentences, as a narrator leaves it (#56). The narrator's own quiet before and
+/// after the voice is trimmed to `edge` on each side and this pause put between, shorter at faster
+/// speeds. The same after a paragraph, heading or list item: a longer pause there lost every blind
+/// pair against this one (#80).
 enum Pacing {
     /// Seconds from one sentence's last sound to the next one's first, at 1×.
-    static let sentence = 0.5, block = 1.0
+    static let sentence = 0.5
     /// Quiet kept on each side of the voice, so onsets and tails aren't clipped.
     static let edge = 0.05
     /// The player schedules the next sentence during this pause, so it never goes below this.
     static let minPause = 0.12
 
-    /// The pause to put after `sentence`, in samples at 24 kHz.
-    static func pause(after sentence: Sentence, speed: Float) -> Int {
-        pause(endsBlock: sentence.endsBlock, speed: speed)
-    }
-
-    static func pause(endsBlock: Bool, speed: Float) -> Int {
-        let quiet = (endsBlock ? block : self.sentence) / Double(speed) - 2 * edge
+    /// The pause to put after a sentence, in samples at 24 kHz.
+    static func pause(speed: Float) -> Int {
+        let quiet = sentence / Double(speed) - 2 * edge
         return Int(max(quiet, minPause) * 24_000)
     }
 
@@ -320,7 +316,7 @@ final class ReadingSession {
             return
         }
         let previous = lastNarrated.flatMap { p in
-            p.seq == pending.seq - 1 && !p.sentence.endsBlock && p.language == pending.language ? p.sentence.text : nil
+            p.seq == pending.seq - 1 && p.language == pending.language ? p.sentence.text : nil
         }
         enqueue(pending, take: NarratorTake(narrator, words: pending.sentence.words[...], language: pending.language, after: previous))
     }
@@ -371,9 +367,8 @@ final class ReadingSession {
             let samples = speech.trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
             let ending = sentenceEnding(piece, speed: speed)
             if debugSession {
-                print(String(format: "[session] playing #%d at %.2g× (%.1fs +%.2fs%@) %@", piece.seq, speed, Double(samples.count) / 24_000,
-                             Double(Pacing.pause(after: piece.sentence, speed: speed)) / 24_000, piece.sentence.endsBlock ? " ¶" : "",
-                             piece.sentence.text.prefix(40).debugDescription))
+                print(String(format: "[session] playing #%d at %.2g× (%.1fs +%.2fs) %@", piece.seq, speed, Double(samples.count) / 24_000,
+                             Double(Pacing.pause(speed: speed)) / 24_000, piece.sentence.text.prefix(40).debugDescription))
             }
             let start = player.schedule(samples, ending: ending, consumed: consumedCallback())
             logScheduled(piece, from: start, to: start + samples.count, ending: ending)
@@ -384,7 +379,7 @@ final class ReadingSession {
     }
 
     private func sentenceEnding(_ piece: Pending, speed: Float) -> Player.Ending {
-        .sentence(pause: Pacing.pause(after: piece.sentence, speed: speed), played: { [weak self] in
+        .sentence(pause: Pacing.pause(speed: speed), played: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
         })
     }
@@ -500,7 +495,7 @@ final class ReadingSession {
         case .sentence(let pause, _): pause
         case .more(let pause): pause.count
         }
-        print("[sched] #\(piece.seq) speech \(from)..\(to) pause \(pause)\(piece.sentence.endsBlock ? " ¶" : "")")
+        print("[sched] #\(piece.seq) speech \(from)..\(to) pause \(pause)")
     }
 
     private func speechConsumed() {

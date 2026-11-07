@@ -392,7 +392,6 @@ if args.contains("--extract") {
     //   --extract --pid N --from-start  any app's main window (no focus needed), whole document
     //   --limit N                     stop after N sentences
     //   --lines                       also print each sentence's line boxes
-    //   --blocks                      mark a sentence that ends its paragraph with " ¶" (#56)
     //   --word-boxes                  also print each word's box (#20)
     //   --from-text "…"               point at the first visible text containing this, and start at the sentence holding it
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
@@ -459,7 +458,7 @@ if args.contains("--extract") {
             }
             last = s
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
-            print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))\(args.contains("--blocks") && s.endsBlock ? " ¶" : "")")
+            print("  \(n). \(b)  \(fromStart ? Substring(s.text) : s.text.prefix(90))")
             if args.contains("--word-boxes") {
                 // Each display word with its box (#20); "?" where it has none.
                 _ = doc.lines(of: s)

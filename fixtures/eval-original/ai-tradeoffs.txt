@@ -1,0 +1,13 @@
+Option one: keep the current pauses.
+
+• Simple, nothing to change
+
+• Lists sound choppy
+
+Option two: carry the voice across list items.
+
+• Smoother flow between bullets
+
+• A jump into the middle of a list sounds a little different
+
+I'd go with option two and measure it.

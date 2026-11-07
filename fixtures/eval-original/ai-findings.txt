@@ -1,0 +1,9 @@
+I found three problems in the session.
+
+• The first sentence is scheduled twice when you jump early.
+
+• Speed changes reset the word mark to the start of the sentence.
+
+• The prebuffer ignores the voice's pace, so fast voices wait too long.
+
+The first one causes the crash, so I'd fix it before the others.

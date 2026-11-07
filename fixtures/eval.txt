@@ -20,3 +20,6 @@ t3-answer            original
 long-sentence        original
 numbers              original
 wry                  original
+ai-findings          original
+ai-steps             original
+ai-tradeoffs         original

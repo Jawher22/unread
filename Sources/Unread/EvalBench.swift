@@ -3,7 +3,7 @@ import QwenANE
 
 /// `--eval PASSAGES --out DIR`: each passage (`PASSAGES/<id>.txt`: a sentence a line, a blank line between
 /// paragraphs) read at 1× the way a reading says it (#75): sayable text (#18), each sentence carried on from
-/// the one before in its paragraph (#56), its quiet trimmed to `Pacing.edge`, `Pacing`'s pauses between.
+/// the one before (#56), its quiet trimmed to `Pacing.edge`, `Pacing`'s pause between.
 /// Writes `DIR/<id>.wav` and `DIR/run.json`. Silent.
 ///
 /// `--paragraph` gives the narrator each paragraph as one text (#79), split only where the talker can't hold it.
@@ -54,10 +54,10 @@ func benchEval(_ args: [String]) async {
             .filter { !$0.isEmpty }
         var audio: [Float] = [], parts = 0, stops: [String] = []
         let start = Date()
+        var previous: String?
         for paragraph in paragraphs {
             let said = (wholeParagraphs ? [paragraph.joined(separator: " ")] : paragraph).map { Speakable($0, language: .english).text }
-            var previous: String?
-            for (i, sentence) in said.enumerated() {
+            for sentence in said {
                 var samples: [Float] = []
                 do {
                     for try await chunk in narrator.speak(sentence, language: .english, after: previous) { samples += chunk }
@@ -71,7 +71,7 @@ func benchEval(_ args: [String]) async {
                 }
                 audio += Speech(samples: samples).trimmingLeadingQuiet(keep: Pacing.edgeSamples)
                     .trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
-                audio += [Float](repeating: 0, count: Pacing.pause(endsBlock: i == said.count - 1, speed: speed))
+                audio += [Float](repeating: 0, count: Pacing.pause(speed: speed))
             }
         }
         let synthesis = Date().timeIntervalSince(start), seconds = Double(audio.count) / Double(Narrator.sampleRate)

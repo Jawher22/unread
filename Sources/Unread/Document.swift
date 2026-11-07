@@ -9,9 +9,6 @@ struct Sentence {
     let range: AnyObject
     /// Where the following sentence starts, or nil at the end of the document.
     let next: AnyObject?
-    /// The last sentence of its paragraph, heading or list item: a narrator
-    /// pauses longer after it (#56).
-    var endsBlock = false
 }
 
 /// Something on screen we can read aloud, regardless of which app owns it.
@@ -409,18 +406,8 @@ final class WebDocument: ReadableDocument {
                 at = gap
             }
             said += chunkNS.substring(with: NSRange(location: at, length: length - at))
-            // Cut at a block break, followed by a line break (WebKit's `<br>`),
-            // or the window's last sentence with the next text in another block.
-            func endsBlock() -> Bool {
-                if length >= blockEnd { return true }
-                let rest = chunkNS.substring(from: length)
-                let next = (rest as NSString).rangeOfCharacter(from: Self.blank.inverted).location
-                guard next == NSNotFound else { return (rest as NSString).substring(to: next).contains("\n") }
-                guard let n = step(past: chunkEnd) else { return true }
-                return !sameBlock(chunkEnd, n)
-            }
             if var r = range(cursor, sentenceEnd), var text = SpeechText.clean(said) {
-                guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd, endsBlock: endsBlock()) }
+                guard let scope else { return Sentence(text: text, range: r, next: sentenceEnd) }
                 // A heading's permalink or "edit" link, a title's site name:
                 // say, highlight and judge only what's left (WebKit's "Historyedit"
                 // ends in the link). The walk still goes on after the furniture.
@@ -437,7 +424,7 @@ final class WebDocument: ReadableDocument {
                     text = own
                 }
                 switch own == "" ? .skip("furniture") : verdict(text: text, endingAt: judgeAt, leaf: endLeaf, in: scope) {
-                case .read: return Sentence(text: text, range: r, next: sentenceEnd, endsBlock: endsBlock())
+                case .read: return Sentence(text: text, range: r, next: sentenceEnd)
                 case .end:
                     if debugWalk { print("    end of scope at \(text.prefix(40).debugDescription)") }
                     return nil
@@ -490,7 +477,7 @@ final class WebDocument: ReadableDocument {
         guard let fresh, fresh.text.hasPrefix(String(needle.prefix(8))) || s.text.hasPrefix(String(fresh.text.prefix(8))) else {
             return nil
         }
-        return Sentence(text: s.text, range: fresh.range, next: fresh.next, endsBlock: s.endsBlock)
+        return Sentence(text: s.text, range: fresh.range, next: fresh.next)
     }
 
     /// The marker `target` UTF-16 units after `from`, or as close as it gets
@@ -1501,13 +1488,7 @@ final class NativeDocument: ReadableDocument {
             if r.location < start { r = NSRange(location: start, length: NSMaxRange(r) - start) }
             let next: AnyObject? = i + 1 < sentences.count ? self.position(sentences[i + 1].location) : nil
             if let t = SpeechText.clean(text.substring(with: r)) {
-                // A paragraph ends at a line break between this sentence's last
-                // character (the tokenizer keeps a trailing "\n") and the next sentence.
-                let last = NSMaxRange(sentences[i]) - 1
-                let nextStart = i + 1 < sentences.count ? sentences[i + 1].location : text.length
-                let between = text.substring(with: NSRange(location: last, length: max(nextStart - last, 1)))
-                let endsBlock = i + 1 == sentences.count || between.rangeOfCharacter(from: .newlines) != nil
-                return Sentence(text: t, range: handle(r), next: next, endsBlock: endsBlock)
+                return Sentence(text: t, range: handle(r), next: next)
             }
             i += 1
         }

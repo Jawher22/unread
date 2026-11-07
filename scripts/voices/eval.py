@@ -307,19 +307,26 @@ def serve(title, help_text, mode, items, files, save):
 def ab(a=None, b=None):
     if not a or not b:
         sys.exit("ab: name two runs")
-    ids = sorted({w.stem for w in run_dir(a).glob("*.wav")} & {w.stem for w in run_dir(b).glob("*.wav")})
-    same = [pid for pid in ids if (run_dir(a) / f"{pid}.wav").read_bytes() == (run_dir(b) / f"{pid}.wav").read_bytes()]
+    # "x+y" on each side: other takes of the same reading (--seed-salt), paired in order, one page.
+    sides = list(zip(a.split("+"), b.split("+")))
+    if len(a.split("+")) != len(b.split("+")):
+        sys.exit("ab: give both sides the same number of runs")
+    pairs = {}   # item id -> (passage, wav of side a, wav of side b)
+    for k, (ra, rb) in enumerate(sides):
+        for pid in sorted({w.stem for w in run_dir(ra).glob("*.wav")} & {w.stem for w in run_dir(rb).glob("*.wav")}):
+            pairs[pid if k == 0 else f"{pid}~{k + 1}"] = (pid, run_dir(ra) / f"{pid}.wav", run_dir(rb) / f"{pid}.wav")
+    same = [i for i, (_, wa, wb) in pairs.items() if wa.read_bytes() == wb.read_bytes()]
     if same:
         print(f"left out, identical in both runs: {', '.join(same)}")
-    ids = [pid for pid in ids if pid not in same]
+    ids = [i for i in pairs if i not in same]
     rng = random.Random()
-    order = {pid: rng.random() < 0.5 for pid in ids}   # True: A is run b
+    order = {i: rng.random() < 0.5 for i in ids}   # True: A is side b
     rng.shuffle(ids)
     files, items = {}, []
-    for pid in ids:
-        first, second = (b, a) if order[pid] else (a, b)
-        files[f"/{pid}/A.wav"], files[f"/{pid}/B.wav"] = run_dir(first) / f"{pid}.wav", run_dir(second) / f"{pid}.wav"
-        items.append({"id": pid, "text": spoken(pid), "audio": [["A", f"/{pid}/A.wav"], ["B", f"/{pid}/B.wav"]]})
+    for i in ids:
+        pid, wa, wb = pairs[i]
+        files[f"/{i}/A.wav"], files[f"/{i}/B.wav"] = (wb, wa) if order[i] else (wa, wb)
+        items.append({"id": i, "text": spoken(pid), "audio": [["A", f"/{i}/A.wav"], ["B", f"/{i}/B.wav"]]})
 
     def save(picks):
         votes = {a: 0, b: 0, "same": 0}
