@@ -195,6 +195,12 @@ final class ReadingSession {
     /// How far the page moves on screen per point of trackpad distance: 0.9 on a page zoomed to 90%. Learned
     /// from each prediction a measurement settles, on lines that weren't cut by an edge.
     private var scrollScale: CGFloat = 1
+    /// How far the page can go, as the lowest and highest the current sentence's top can sit on screen (page
+    /// scrolled to its bottom, to its top). Nothing says where a page ends, but a prediction that ran past it
+    /// shows it; it's carried to each next sentence by how far apart the two measured.
+    private var limits: (range: AnyObject, minTop: CGFloat?, maxTop: CGFloat?)?
+    /// When the measurement `shownLines` came from was started.
+    private var shownAt = Date.distantPast
     /// The first position measured after the gesture ended: maybe still from before it (Aside's half-second step).
     /// A different one after that is the app catching up, so it's trusted at once.
     private var afterGesture: [CGRect]?
@@ -329,11 +335,17 @@ final class ReadingSession {
             print("[unread] \(Self.clock()) scroll: \(g.precise ? "next sentence" : "wheel steps"), waiting for the place to settle")
             return
         }
-        let lines = g.from.map { $0.offsetBy(dx: 0, dy: g.dy * scrollScale) }
-        print("[unread] \(Self.clock()) scroll: drawn \(Int(g.dy * scrollScale)) px from where it was (\(Int(g.dy)) × \(String(format: "%.2f", scrollScale)))")
+        var shift = g.dy * scrollScale
+        if let l = limits, l.range === g.range, let top = Self.union(g.from)?.minY {
+            if let most = l.maxTop, top + shift > most { shift = max(most - top, 0) }
+            if let least = l.minTop, top + shift < least { shift = min(least - top, 0) }
+        }
+        let lines = g.from.map { $0.offsetBy(dx: 0, dy: shift) }
+        print("[unread] \(Self.clock()) scroll: drawn \(Int(shift)) px from where it was (\(Int(g.dy)) × \(String(format: "%.2f", scrollScale))\(abs(shift - g.dy * scrollScale) > 1 ? ", stopped at the page's end" : ""))")
         scrollState = .predicted(range: g.range, lines: lines, from: g.from, dy: g.dy, ended: Date())
         afterGesture = nil
         shownLines = (g.range, lines, shown.visible)
+        shownAt = Date()
         draw(lines, in: shown.visible)
     }
 
@@ -888,6 +900,7 @@ final class ReadingSession {
                 // Corrected once the app has caught up: it moved since the gesture ended, or it has held still.
                 guard (caughtUp && measuredAt.timeIntervalSince(ended) >= Self.bounce) || settled(range, m.lines, measuredAt) else { return }
                 print("[unread] \(Self.clock()) scroll: predicted place corrected by \(Int(off)) px after \(Int(Date().timeIntervalSince(lastScroll) * 1000)) ms")
+                learnLimit(range, predicted: predicted, measured: m.lines, dy: dy, visible: visible)
             }
             learnScale(from: from, to: m.lines, dy: dy, visible: visible)
         case .settling:
@@ -895,8 +908,31 @@ final class ReadingSession {
         }
         scrollState = .steady
         settling = nil
+        carryLimits(to: range, at: m.lines, visible: visible)
         shownLines = (range, m.lines, visible)
+        shownAt = measuredAt
         draw(m.lines, in: visible)
+    }
+
+    /// A prediction that went further than the page did ran into the page's top (scrolling up) or bottom.
+    private func learnLimit(_ range: AnyObject, predicted: [CGRect], measured: [CGRect], dy: CGFloat, visible: CGRect) {
+        guard let p = Self.union(predicted), let m = Self.union(measured), m.minY > visible.minY + 1, m.maxY < visible.maxY - 1 else { return }
+        var l: (range: AnyObject, minTop: CGFloat?, maxTop: CGFloat?) = limits.flatMap { $0.range === range ? $0 : nil } ?? (range, nil, nil)
+        if dy > 0, m.minY < p.minY - 3 { l.maxTop = m.minY }
+        else if dy < 0, m.minY > p.minY + 3 { l.minTop = m.minY }
+        else { return }
+        limits = l
+        print("[unread] \(Self.clock()) scroll: the page ends where this sentence's top is at \(Int(m.minY)) px")
+    }
+
+    /// The next sentence: the page's limits move by how far below the last one it measured, with no scroll between.
+    private func carryLimits(to range: AnyObject, at lines: [CGRect], visible: CGRect) {
+        guard let l = limits, l.range !== range else { return }
+        guard let old = shownLines, old.range === l.range, shownAt > lastScroll,
+              let a = Self.union(old.lines), let b = Self.union(lines),
+              b.minY > visible.minY + 1, b.maxY < visible.maxY - 1 else { limits = nil; return }
+        let d = b.minY - a.minY
+        limits = (range, l.minTop.map { $0 + d }, l.maxTop.map { $0 + d })
     }
 
     private func learnScale(from: [CGRect], to: [CGRect], dy: CGFloat, visible: CGRect) {
