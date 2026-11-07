@@ -175,7 +175,7 @@ final class ReadingSession {
         /// The user is scrolling: hidden, and adding up how far the page has been moved since it was drawn.
         case scrolling(Gesture)
         /// Drawn from the gesture's distance, until a settled measurement takes over.
-        case predicted(range: AnyObject, lines: [CGRect], from: [CGRect], dy: CGFloat)
+        case predicted(range: AnyObject, lines: [CGRect], from: [CGRect], dy: CGFloat, ended: Date)
         /// Hidden until measurements settle (a mouse wheel's steps don't say how far the page moved).
         case settling
     }
@@ -184,6 +184,11 @@ final class ReadingSession {
     /// How far the page moves on screen per point of trackpad distance: 0.9 on a page zoomed to 90%. Learned
     /// from each prediction a measurement settles, on lines that weren't cut by an edge.
     private var scrollScale: CGFloat = 1
+    /// The first position measured after the gesture ended: maybe still from before it (Aside's half-second step).
+    /// A different one after that is the app catching up, so it's trusted at once.
+    private var afterGesture: [CGRect]?
+    /// A page that hits its top or bottom bounces back for about this long after the gesture.
+    private static let bounce: TimeInterval = 0.35
     /// Where the current sentence has measured since the scroll, and since when it has measured there.
     private var settling: (range: AnyObject, lines: [CGRect], since: Date)?
     /// The last time a measurement moved, and the shortest gap seen between two moves: how often this app
@@ -301,7 +306,8 @@ final class ReadingSession {
         }
         let lines = g.from.map { $0.offsetBy(dx: 0, dy: g.dy * scrollScale) }
         print("[unread] \(Self.clock()) scroll: drawn \(Int(g.dy * scrollScale)) px from where it was (\(Int(g.dy)) × \(String(format: "%.2f", scrollScale)))")
-        scrollState = .predicted(range: g.range, lines: lines, from: g.from, dy: g.dy)
+        scrollState = .predicted(range: g.range, lines: lines, from: g.from, dy: g.dy, ended: Date())
+        afterGesture = nil
         shownLines = (g.range, lines, shown.visible)
         draw(lines, in: shown.visible)
     }
@@ -813,7 +819,7 @@ final class ReadingSession {
         switch scrollState {
         case .steady: break
         case .scrolling: return
-        case .predicted(let predictedRange, let predicted, let from, let dy):
+        case .predicted(let predictedRange, let predicted, let from, let dy, let ended):
             guard predictedRange === range else { // the next sentence: nothing predicted for it
                 scrollState = .settling
                 overlay.hide()
@@ -821,10 +827,13 @@ final class ReadingSession {
             }
             guard measuredAt > lastScroll else { return }
             let off = (Self.union(m.lines)?.minY ?? 0) - (Self.union(predicted)?.minY ?? 0)
+            let caughtUp = afterGesture.map { !Self.sameRects($0, m.lines) } ?? false
+            if afterGesture == nil { afterGesture = m.lines }
             if Self.sameRects(predicted, m.lines, within: 3) { // confirmed
                 print("[unread] \(Self.clock()) scroll: predicted place confirmed (\(Int(off)) px)")
             } else {
-                guard settled(range, m.lines, measuredAt) else { return } // corrected once the app has caught up
+                // Corrected once the app has caught up: it moved since the gesture ended, or it has held still.
+                guard (caughtUp && measuredAt.timeIntervalSince(ended) >= Self.bounce) || settled(range, m.lines, measuredAt) else { return }
                 print("[unread] \(Self.clock()) scroll: predicted place corrected by \(Int(off)) px after \(Int(Date().timeIntervalSince(lastScroll) * 1000)) ms")
             }
             learnScale(from: from, to: m.lines, dy: dy, visible: visible)
@@ -840,9 +849,10 @@ final class ReadingSession {
     private func learnScale(from: [CGRect], to: [CGRect], dy: CGFloat, visible: CGRect) {
         guard abs(dy) >= 40, let a = Self.union(from), let b = Self.union(to), abs(a.height - b.height) < 2,
               a.minY > visible.minY + 1, a.maxY < visible.maxY - 1, b.minY > visible.minY + 1, b.maxY < visible.maxY - 1 else { return }
+        // A page zoomed between 75% and 125%; anything else ran into the page's top or bottom.
         let scale = (b.minY - a.minY) / dy
-        guard scale > 0.4, scale < 2.5 else { return }
-        scrollScale = scale
+        guard scale > 0.75, scale < 1.25 else { return }
+        scrollScale = (scrollScale + scale) / 2
         print("[unread] \(Self.clock()) scroll: the page moves \(String(format: "%.2f", scale))× the trackpad's distance")
     }
 
