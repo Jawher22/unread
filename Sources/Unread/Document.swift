@@ -44,6 +44,19 @@ protocol ReadableDocument: AnyObject {
     func scrollIntoView(_ sentence: Sentence)
 }
 
+/// The window an Accessibility element is in, as the window server knows it (private, but long stable).
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ window: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+extension ReadableDocument {
+    /// The window server's id for the window the document is in. AXWorker only.
+    func windowID() -> CGWindowID? {
+        guard let window = AX.element(AX.attr(element, kAXWindowAttribute)) else { return nil }
+        var id: CGWindowID = 0
+        return _AXUIElementGetWindow(window, &id) == .success && id != 0 ? id : nil
+    }
+}
+
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
     func words(of sentence: Sentence) -> [CGRect?] { [] }
@@ -1307,6 +1320,13 @@ final class WebDocument: ReadableDocument {
     /// and ends in: the coarse fallback when the app gives no text positions.
     /// The start is judged from inside the first word (the start marker sits
     /// on the boundary with the previous block).
+    ///
+    /// Chromium clips element frames to the scroll container, so a block scrolled
+    /// out of view comes back as a 0–1 px sliver on the edge it left by. It's
+    /// reported as a line just past that edge: off screen, which is what the
+    /// reading needs to know to hide the highlight, stop following, or scroll.
+    /// A block cut by an edge is clipped to look whole, so one touching an edge
+    /// is reported as reaching past it, and gets scrolled into view.
     private func elementFrames(of range: AnyObject) -> [CGRect] {
         let begin = start(of: range)
         let firstWord = p("AXNextWordEndTextMarkerForTextMarker", begin) ?? begin
@@ -1314,8 +1334,15 @@ final class WebDocument: ReadableDocument {
         for m in [firstWord, end(of: range)] {
             guard let leaf = leaf(endingAt: m) else { continue }
             let box = block(containing: leaf).flatMap(AX.frame) ?? AX.frame(leaf)
-            guard let f = box, f.width >= 4, f.height >= 4, !frames.contains(f) else { continue }
-            frames.append(f)
+            guard var f = box, f.width >= 4, let visible = visibleRect() else { continue }
+            if f.height < 4 {
+                let above = abs(f.minY - visible.minY) <= abs(f.maxY - visible.maxY)
+                f = CGRect(x: f.minX, y: above ? visible.minY - 21 : visible.maxY + 1, width: f.width, height: 20)
+            } else {
+                if abs(f.minY - visible.minY) < 1 { f = CGRect(x: f.minX, y: f.minY - 2, width: f.width, height: f.height + 2) }
+                if abs(f.maxY - visible.maxY) < 1 { f.size.height += 2 }
+            }
+            if !frames.contains(f) { frames.append(f) }
         }
         return frames
     }
