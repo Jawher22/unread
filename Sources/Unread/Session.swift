@@ -168,6 +168,13 @@ final class ReadingSession {
     /// confirms it or corrects it (at a page's top or bottom, the page moves less than the fingers).
     private var scrollMonitor: Any?
     private var lastScroll = Date.distantPast
+    /// The window being read, and whether it's on screen. The highlight's panels are on every Space, so when the
+    /// user moves to another Space, or the window is minimized or hidden, the highlight hides until it's back.
+    private var windowID: CGWindowID?
+    private var windowOnScreen = true
+    private var lastWindowCheck = Date.distantPast
+    /// The page was left (navigated away, closed): the sentence can't be found, so the highlight hides.
+    private var pageGone = false
     private var scrollState = ScrollState.steady
     private enum ScrollState {
         /// Measurements are drawn as they come.
@@ -331,7 +338,20 @@ final class ReadingSession {
         draw(lines, in: shown.visible)
     }
 
+    /// Twice a second: is the window being read on screen (this Space, not minimized or hidden)?
+    private func checkWindow() {
+        guard let windowID, Date().timeIntervalSince(lastWindowCheck) >= 0.5 else { return }
+        lastWindowCheck = Date()
+        let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first
+        let onScreen = info?[kCGWindowIsOnscreen as String] as? Bool ?? false
+        guard onScreen != windowOnScreen else { return }
+        windowOnScreen = onScreen
+        print("[unread] \(Self.clock()) the window being read is \(onScreen ? "back on screen" : "off screen (another Space, minimized or hidden)")")
+        if !onScreen { overlay.hide(); if markedWord != nil { markedWord = nil; overlay.hideWord() } }
+    }
+
     private func draw(_ lines: [CGRect], in visible: CGRect) {
+        guard windowOnScreen, !pageGone else { overlay.hide(); return }
         let shown = lines.map { $0.intersection(visible) }.filter { !$0.isNull && !$0.isEmpty }
         if shown.isEmpty { overlay.hide(); markedWord = nil } else { overlay.show(shown, style: .reading, id: sentenceNumber) }
     }
@@ -708,12 +728,13 @@ final class ReadingSession {
         var triedRelocate = false
         var scrolled = false
         var diagnosis: String?
+        var window: CGWindowID?
     }
 
     /// `wantWords`: also measure each word's box (once per sentence, and
     /// again if the text reflowed).
     private func measure(_ sentence: Sentence, relocate: Bool, scrollIfNeeded: Bool, wantWords: Bool) async -> Measured {
-        let doc = document
+        let doc = document, needWindow = windowID == nil
         return await AXWorker.shared.run {
             var m = Measured()
             var current = sentence
@@ -730,6 +751,7 @@ final class ReadingSession {
                 let moved = doc.lines(of: current)
                 if !moved.isEmpty { m.lines = moved }
             }
+            if needWindow { m.window = doc.windowID() }
             if m.lines.isEmpty { m.diagnosis = doc.linesDiagnosis(of: current) }
             else if wantWords || m.relocated != nil || m.scrolled { m.words = doc.words(of: current) }
             return m
@@ -750,10 +772,12 @@ final class ReadingSession {
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
                   self.queued.first?.sentence.range === current.range else { return }
             let label = current.text.prefix(40).debugDescription
+            if let window = m.window { self.windowID = window }
             if let fresh = m.relocated {
                 self.queued[0].sentence = fresh
                 print("[highlight] \(label): page re-rendered, found it again")
             }
+            self.notePage(m)
             if m.scrolled { self.followGraceUntil = Date().addingTimeInterval(0.8) }
             guard let bounds = Self.union(m.lines), let visible = m.visible else {
                 print("[highlight] \(label) → no box: \(m.diagnosis ?? "")")
@@ -776,6 +800,7 @@ final class ReadingSession {
             print("[unread] \(Self.clock()) highlight: a refresh has waited over 1 s for the Accessibility worker")
         }
         endGesture()
+        checkWindow()
         guard !suspendHighlight, !refreshing, let current = queued.first?.sentence else { return }
         refreshing = true
         refreshStarted = Date()
@@ -790,15 +815,26 @@ final class ReadingSession {
             let started = self.refreshStarted
             self.logRefresh(m, took: Date().timeIntervalSince(started), current: current)
             if m.triedRelocate { self.lastRelocateAttempt = Date() }
+            if let window = m.window { self.windowID = window }
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
                   self.queued.first?.sentence.range === current.range else { return }
             if let fresh = m.relocated { self.queued[0].sentence = fresh }
+            self.notePage(m)
             guard let bounds = Self.union(m.lines), let visible = m.visible else { return }
             // If the user scrolled the sentence away, stop dragging the page
             // back; resume following once it's on screen again.
             if Date() > self.followGraceUntil { self.following = visible.intersects(bounds) }
             self.show(m, in: visible, measuredAt: started)
         }
+    }
+
+    /// The sentence can't be measured and can't be found again: the page was left. Hide until it's back.
+    private func notePage(_ m: Measured) {
+        let gone = m.lines.isEmpty && (m.triedRelocate ? m.relocated == nil : pageGone)
+        guard gone != pageGone else { return }
+        pageGone = gone
+        print("[unread] \(Self.clock()) \(gone ? "the sentence being read is gone from the page; highlight hidden" : "the sentence being read is back")")
+        if gone { overlay.hide(); if markedWord != nil { markedWord = nil; overlay.hideWord() } }
     }
 
     /// Scrolling investigation (Aside): each refresh that moves the highlight, loses it, or is slow, with the time.
@@ -891,7 +927,7 @@ final class ReadingSession {
         let raw = player.position
         let position = clock.position(raw, at: t)
         if debugMotion, let raw, let position { print(String(format: "[frame] %.4f raw %d smooth %d", t, raw, position)) }
-        guard !suspendHighlight, !hiddenForScroll, let playing = queued.first, let position,
+        guard !suspendHighlight, !hiddenForScroll, windowOnScreen, !pageGone, let playing = queued.first, let position,
               let words = wordBoxes, words.range === playing.sentence.range,
               let lines = shownLines, lines.range === playing.sentence.range,
               let from = words.lines.first, let to = lines.lines.first else { return }

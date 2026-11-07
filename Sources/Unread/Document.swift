@@ -44,6 +44,19 @@ protocol ReadableDocument: AnyObject {
     func scrollIntoView(_ sentence: Sentence)
 }
 
+/// The window an Accessibility element is in, as the window server knows it (private, but long stable).
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ window: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+extension ReadableDocument {
+    /// The window server's id for the window the document is in. AXWorker only.
+    func windowID() -> CGWindowID? {
+        guard let window = AX.element(AX.attr(element, kAXWindowAttribute)) else { return nil }
+        var id: CGWindowID = 0
+        return _AXUIElementGetWindow(window, &id) == .success && id != 0 ? id : nil
+    }
+}
+
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
     func words(of sentence: Sentence) -> [CGRect?] { [] }
