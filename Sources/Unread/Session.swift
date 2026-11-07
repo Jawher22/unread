@@ -169,6 +169,22 @@ final class ReadingSession {
     /// rebuilds its elements under us.
     private var lastExtracted: Sentence?
     private var lastRelocateAttempt = Date.distantPast
+    /// What the page has shown of an answer still being written (#17).
+    private var growth = Growth()
+    private struct Growth {
+        /// When text last changed under this reading: a sentence found again after the page rebuilt it, a last
+        /// sentence still growing, or new text after the end. Never: the page is static, and the end is the end.
+        var changedAt: Date?
+        /// The last sentence, held back while it may still be being written, and since when it has read the same.
+        var held: (text: String, since: Date)?
+        /// Reading reached the end of the text, and is waiting for more.
+        var atEnd = false
+    }
+    /// A last sentence that doesn't end like one is read once it has stayed the same this long.
+    private static let settle: TimeInterval = 0.7
+    /// After the end of a page that changed, how long to wait for more text since it last changed.
+    private static let streamWait: TimeInterval = 6
+    private static let recheck: TimeInterval = 0.35
     private(set) var suspendHighlight = false
 
     var isPaused: Bool { player.isPaused }
@@ -277,21 +293,42 @@ final class ReadingSession {
         let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
         Task { [weak self] in
             let extractStart = Date()
-            let (found, newScope) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?) in
+            let (found, newScope, rebuilt, open) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool) in
                 var sc = needScope ? doc.scope(from: position) : scopeNow
                 var s = doc.sentence(from: position, in: sc)
-                if s == nil, let last { s = doc.sentence(after: last, scope: &sc) } // page re-rendered?
-                return (s, sc)
+                var rebuilt = false
+                if s == nil, let last { s = doc.sentence(after: last, scope: &sc); rebuilt = s != nil } // page re-rendered?
+                // The last text on the page, not ending like a sentence: it may still be being written.
+                let open = s.map { !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
+                return (s, sc, rebuilt, open)
             }
             guard let self, !self.cancelled else { return }
             self.scope = newScope
             self.scopeResolved = true
+            let now = Date()
             guard let sentence = found else {
                 self.producing = false
+                self.growth.atEnd = true
+                if let changed = self.growth.changedAt, now.timeIntervalSince(changed) < Self.streamWait {
+                    self.fillAgain() // the answer may still be coming
+                    return
+                }
                 self.cursor = nil
                 if self.queued.isEmpty, self.ready.isEmpty, self.backlog.isEmpty { self.finish() }
                 return
             }
+            if rebuilt || self.growth.atEnd { self.growth.changedAt = now }
+            self.growth.atEnd = false
+            if open {
+                if let held = self.growth.held, held.text != sentence.text { self.growth.changedAt = now }
+                if self.growth.held?.text != sentence.text { self.growth.held = (sentence.text, now) }
+                if let held = self.growth.held, now.timeIntervalSince(held.since) < Self.settle {
+                    self.producing = false
+                    self.fillAgain()
+                    return
+                }
+            }
+            self.growth.held = nil
             self.lastExtracted = sentence
             self.cursor = sentence.next
             if self.timing != nil, self.timing?.extractMs == nil {
@@ -299,6 +336,17 @@ final class ReadingSession {
             }
             self.synthesize(self.pending(sentence, language: self.language.language(for: sentence.text)))
         }
+    }
+
+    private func fillAgain() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recheck) { [weak self] in self?.fill() }
+    }
+
+    /// Ends like a finished sentence: ".", "!", "?", "…" or ":", maybe inside closing quotes or brackets.
+    nonisolated static func endsLikeSentence(_ text: String) -> Bool {
+        let closers: Set<Character> = ["\"", "'", "”", "’", ")", "]", "»"]
+        guard let last = text.reversed().first(where: { !$0.isWhitespace && !closers.contains($0) }) else { return false }
+        return ".!?…:".contains(last)
     }
 
     /// Number the next sentence.
@@ -437,7 +485,8 @@ final class ReadingSession {
         if first {
             l.voiced = Speech(samples: said).leadingQuiet
         } else if start != l.timeline(l.said) {
-            print(String(format: "[unread] underrun: sentence #%d at %.2g× waited %.0f ms for audio, %.1f s in", piece.seq, l.speed,
+            print(String(format: "[unread] %@ underrun: sentence #%d at %.2g× waited %.0f ms for audio, %.1f s in",
+                         Date.now.formatted(date: .omitted, time: .standard), piece.seq, l.speed,
                          Double(start - l.timeline(l.said)) / 24, Double(l.said) / 24_000))
         }
         if first || start != l.timeline(l.said) { l.runs.append((l.said, start)) }

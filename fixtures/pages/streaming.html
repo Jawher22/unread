@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Streaming answer</title>
+<style>body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; } main { max-width: 680px; padding: 16px 24px; }</style></head>
+<body>
+<!-- An agent's answer arriving as it's written (#17), the way a chat app shows it: words are
+     added to the last paragraph or list item (React keeps the elements already there and
+     updates the last one's text), at about the pace it's read (3 words a second), with a
+     few seconds' stop between paragraphs, as an agent does between steps. Read it with
+     --simulate --pid while it streams: reading should go on to the end of the answer,
+     sentence by sentence, without stopping early or reading half a sentence. Not in
+     scripts/test.sh: it has no expected file. -->
+<main>
+  <div id="msg"></div>
+</main>
+<script>
+const blocks = [
+  ['p', 'I looked at why the highlight stops after one sentence.'],
+  ['p', 'The session measures each sentence once, when it starts. After that, the page can move under it, and the box stays where it was.'],
+  ['li', 'The first fix measures the box again ten times a second.'],
+  ['li', 'The second fix hides it when the text scrolls away.'],
+  ['p', 'Both are small, so I made them together. Shall I open the pull request?'],
+];
+// Pauses before a block, in seconds, as an agent thinks between steps.
+const pauses = [0, 2.5, 3, 0.4, 3];
+const msg = document.getElementById('msg');
+const words = blocks.map(([, text]) => text.split(' '));
+let block = 0, shown = 0, current = null, list = null;
+function open(b) {
+  const [tag] = blocks[b];
+  if (tag === 'li') { if (!list) { list = document.createElement('ul'); msg.append(list); } }
+  else list = null;
+  current = document.createElement(tag);
+  (tag === 'li' ? list : msg).append(current);
+}
+function step() {
+  if (shown < words[block].length) {
+    current.textContent = words[block].slice(0, ++shown).join(' ');
+    setTimeout(step, 333);
+    return;
+  }
+  if (++block >= blocks.length) return;
+  shown = 0;
+  setTimeout(() => { open(block); step(); }, 1000 * pauses[block]);
+}
+// The first sentence is there when reading starts.
+open(0);
+shown = words[0].length;
+current.textContent = blocks[0][1];
+setTimeout(step, 333);
+</script>
+</body>
+</html>
