@@ -26,6 +26,8 @@ final class NarratorTake {
     /// Samples the latest alignment covered, and whether one is running on a stream.
     private var alignedThrough = 0, aligning = false
     private var task: Task<Void, Never>?
+    /// A cue's sound (#24): the same length at every speed.
+    private let fixedLength: Bool
 
     /// `words`: the sentence's display words; the narrator is given them made sayable (`Speakable`).
     /// `after`: the sentence before it in the same paragraph, for the narrator to carry on from (#56).
@@ -36,6 +38,7 @@ final class NarratorTake {
         self.words = Array(words)
         self.spoken = spoken
         aligner = language == .english ? narrator.aligner : nil
+        fixedLength = false
         task = Task { [weak self] in
             do {
                 for try await chunk in stream {
@@ -57,6 +60,18 @@ final class NarratorTake {
             self.isComplete = true
             self.onArrival?()
         }
+    }
+
+    /// A cue: nothing said, its sound complete from the start.
+    init(cue sound: [Float]) {
+        samples = sound
+        streamed = true
+        isComplete = true
+        pace = Narrator.pace
+        words = []
+        spoken = Speakable([], language: .english)
+        aligner = nil
+        fixedLength = true
     }
 
     func cancel() {
@@ -99,7 +114,7 @@ final class NarratorTake {
 
     func speech(speed: Float) -> Speech {
         var samples = self.samples
-        if speed != 1 {
+        if speed != 1, !fixedLength {
             var stretch = TimeStretch(rate: Double(speed))
             samples = stretch.push(samples) + stretch.finish()
         }

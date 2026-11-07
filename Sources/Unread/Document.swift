@@ -9,6 +9,9 @@ struct Sentence {
     let range: AnyObject
     /// Where the following sentence starts, or nil at the end of the document.
     let next: AnyObject?
+    /// A cue (#24, #26): in place of a run of code, a table, or before a figure's caption, a soft sound is
+    /// played and nothing is said; `range` covers what it stands for, for the highlight. "code", "table", "figure".
+    var cue: String? = nil
 }
 
 /// Something on screen we can read aloud, regardless of which app owns it.
@@ -290,6 +293,9 @@ final class WebDocument: ReadableDocument {
     private var flowsMemo: [AXKey: Bool] = [:]
     private var roleMemo: [AXKey: (role: String?, subrole: String?)] = [:]
     private var figureMemo: [AXKey: Bool] = [:]
+    private var oneLinerMemo: [AXKey: Bool] = [:]
+    /// Captions whose cue has been given: the next walk reads them.
+    private var cuedCaptions: Set<AXKey> = []
     private var piecesMemo: [TextUnit.Key: [Piece]] = [:]
     private var unitTextMemo: [TextUnit.Key: UnitText] = [:]
     private var nextParagraphMemo: [Lookahead: TextUnit] = [:]
@@ -353,12 +359,17 @@ final class WebDocument: ReadableDocument {
 
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
+        // A run of code or table text walked past: one cue stands for it, given before what follows.
+        var cue: (start: AnyObject, end: AnyObject, kind: String)?
+        func cueSentence(next: AnyObject?) -> Sentence? {
+            cue.flatMap { c in range(c.start, c.end).map { Sentence(text: "", range: $0, next: next, cue: c.kind) } }
+        }
         for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
-            guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
+            guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return cueSentence(next: nil) }
             let chunk = string(chunkRange)
             let chunkNS = chunk as NSString
             guard chunkNS.length > 0, !chunk.trimmingCharacters(in: Self.blank).isEmpty else {
-                guard let next = step(past: chunkEnd), !CFEqual(next, cursor) else { return nil }
+                guard let next = step(past: chunkEnd), !CFEqual(next, cursor) else { return cueSentence(next: nil) }
                 cursor = next
                 continue
             }
@@ -437,24 +448,38 @@ final class WebDocument: ReadableDocument {
                     text = own
                 }
                 switch own == "" ? .skip("furniture") : verdict(text: text, endingAt: judgeAt, leaf: endLeaf, in: scope) {
-                case .read: return Sentence(text: text, range: r, next: sentenceEnd)
+                case .read:
+                    if cue != nil { return cueSentence(next: cursor) } // the cue first; this sentence on the next walk
+                    return Sentence(text: text, range: r, next: sentenceEnd)
+                case .cueThenRead(let kind):
+                    let key = endLeaf.map(AXKey.init(element:))
+                    if cue == nil, let key, !cuedCaptions.contains(key) {
+                        cuedCaptions.insert(key)
+                        cue = (start(of: r), end(of: r), kind)
+                    }
+                    if cue != nil { return cueSentence(next: cursor) }
+                    return Sentence(text: text, range: r, next: sentenceEnd)
                 case .end:
                     if debugWalk { print("    end of scope at \(text.prefix(40).debugDescription)") }
-                    return nil
+                    return cueSentence(next: nil)
+                case .cue(let kind):
+                    if debugWalk { print("    cue (\(kind)) \(text.prefix(40).debugDescription)") }
+                    cue = (cue?.start ?? start(of: r), sentenceEnd, cue?.kind ?? kind)
                 case .skip(let why):
                     if debugWalk { print("    skip (\(why)) \(text.prefix(40).debugDescription)") }
                 }
             }
-            if CFEqual(sentenceEnd, cursor) { return nil }
+            if CFEqual(sentenceEnd, cursor) { return cueSentence(next: nil) }
             cursor = sentenceEnd
         }
-        return nil
+        return cueSentence(next: nil)
     }
 
     // MARK: Surviving re-renders
 
     /// Stale markers point at deleted nodes and read as nothing.
     private func isStale(_ s: Sentence) -> Bool {
+        if s.cue != nil { return false } // nothing said, nothing to find again
         let now = SpeechText.clean(string(s.range)) ?? ""
         if debugWalk { print("    stale? \(s.text.prefix(24).debugDescription) range now reads \(now.prefix(24).debugDescription)") }
         return now.isEmpty || !now.hasPrefix(String(s.text.prefix(12)))
@@ -530,7 +555,8 @@ final class WebDocument: ReadableDocument {
         return ReadingScope(container: container, pointedInto: pointedInto, startLeaf: leaf)
     }
 
-    private enum Verdict { case read, skip(String), end }
+    /// `cue`: walked past, with a sound in its place (code, tables). `cueThenRead`: a sound, then read (a caption).
+    private enum Verdict { case read, skip(String), end, cue(String), cueThenRead(String) }
 
     /// The text leaf a sentence ending at `marker` belongs to. The end marker
     /// itself sits on the boundary with whatever follows, and which side it
@@ -555,6 +581,8 @@ final class WebDocument: ReadableDocument {
         guard let leaf else { return .read }
         let chain = ancestry(of: leaf)
         if let c = scope.container, !chain.contains(where: { CFEqual($0, c) }) { return .end }
+        // Code and tables are a sound, not read (#24, #26), even pointed at; a one-line command is read.
+        if let cue = cueVerdict(chain, leaf: leaf, in: scope) { return cue }
         if let pointed = scope.pointedInto, chain.contains(where: { CFEqual($0, pointed) }) { return .read }
         // Visually hidden ("sr-only") text is ~1 px *wide*: Chromium gives the
         // text a 0–1 px frame, WebKit gives its container 1 px. Don't judge by
@@ -570,16 +598,14 @@ final class WebDocument: ReadableDocument {
         }
         for e in chain {
             if let c = scope.container, CFEqual(e, c) { break }
-            if let kind = chromeKind(e) { return .skip(kind) }
+            if let kind = chromeKind(e) { return kind == "caption" ? .cueThenRead("figure") : .skip(kind) }
         }
         if SpeechText.isTimestamp(text) { return .skip("timestamp") }
         guard let unit = unit(of: leaf) else { return .read }
         let t = self.text(of: unit)
         if t.isLinkRow { return .skip("links") }
         // The text layer (#11), around the article's main text. Pointing means
-        // "read this", a page without a paragraph keeps the rules above, and
-        // tables are left as they are (#26).
-        if t.kind == .cell { return .read }
+        // "read this", and a page without a paragraph keeps the rules above.
         if scope.startUnit == nil, let start = scope.startLeaf { scope.startUnit = self.unit(of: start)?.key }
         if scope.startUnit == unit.key { return .read }
         guard let main = mainText(of: scope) else { return .read }
@@ -600,9 +626,29 @@ final class WebDocument: ReadableDocument {
         if !t.reads || !t.within(main.column) {
             let next = paragraph(after: section(of: unit, kind: t.kind), in: scope, column: main.column)
             if next.paragraph == nil { return next.moreText ? .end : .read }
-            if t.inFigure, !t.reads { return .skip("caption") }
+            if t.inFigure, !t.reads { return .cueThenRead("figure") }
         }
         return .read
+    }
+
+    /// Code (a `<pre>`) and table cells: a cue instead of their text. A code block of one short line (a
+    /// command, 60 characters or less) is read: "Run this:" followed by it is common in an agent's answer.
+    private func cueVerdict(_ chain: [AXUIElement], leaf: AXUIElement, in scope: ReadingScope) -> Verdict? {
+        for e in chain {
+            if let c = scope.container, CFEqual(e, c) { break }
+            if chromeKind(e) == "code" { return isOneLiner(e) ? .read : .cue("code") }
+        }
+        if let unit = unit(of: leaf), text(of: unit).kind == .cell { return .cue("table") }
+        return nil
+    }
+
+    private func isOneLiner(_ code: AXUIElement) -> Bool {
+        let key = AXKey(element: code)
+        if let known = oneLinerMemo[key] { return known }
+        let text = p("AXTextMarkerRangeForUIElement", code).map(string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let one = !text.isEmpty && text.count <= 60 && !text.contains("\n")
+        oneLinerMemo[key] = one
+        return one
     }
 
     /// Where the article's ending is judged from: a list item's list, a

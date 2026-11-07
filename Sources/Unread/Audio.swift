@@ -26,6 +26,22 @@ final class Player {
     private let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
     private var idleTimer: Timer?
     private(set) var isPaused = false
+    /// The cue for what a reading walks past without saying (#24, #26): two soft, muted taps on one low
+    /// note (G4), the second quieter, 0.24 s. Picked by ear from three; nothing like the chime's rising bell.
+    static let cueSound: [Float] = {
+        let rate = 24_000.0
+        var samples = [Float](repeating: 0, count: Int(rate * 0.24))
+        for (start, amp) in [(0.0, 0.11), (0.09, 0.07)] {
+            let first = Int(start * rate)
+            for i in first..<min(first + Int(rate * 0.14), samples.count) {
+                let t = Double(i - first) / rate
+                let envelope = min(t / 0.004, 1) * exp(-t / 0.03)
+                samples[i] += Float(amp * envelope * (sin(2 * .pi * 392 * t) + 0.2 * sin(2 * .pi * 784 * t)))
+            }
+        }
+        return samples
+    }()
+
     /// Two soft, overlapping bell-like notes (E5 → B5), quiet and short.
     private lazy var chimeBuffer: AVAudioPCMBuffer? = {
         let rate = 24_000.0, length = Int(rate * 0.6)

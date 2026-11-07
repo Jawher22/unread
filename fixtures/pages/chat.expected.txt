@@ -6,3 +6,8 @@ Then I checked the overlay.
 It draws every line separately now.
 • The first fix covers the boxes.
 • The second fix covers pointing.
+Run this to check it:
+scripts/test.sh --quick
+The change itself is small:
+♪ code
+Both fixes are in the pull request.
