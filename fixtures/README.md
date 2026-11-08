@@ -60,7 +60,7 @@ Useful while investigating:
 
 - `UNREAD_DEBUG_WALK=1` traces each chunk, sentence range and word box.
 - `scripts/extract-fixture.sh <page> --word-boxes` prints each display word's box (#20); `?` marks a word without one.
-- `Unread --simulate 0,0 12 --pid <pid>` reads a fixture window from the top, muted, with the real overlay; with `UNREAD_DEBUG_OVERLAY=1` it logs each word mark against its due time. `UNREAD_DEBUG_MOTION=1` logs the voice clock every display frame, raw and smoothed, to check motion smoothness.
+- `Unread --simulate 0,0 12 --pid <pid>` reads a fixture window from the top, muted, with the real overlay drawn invisibly (`--show-highlight` to see it); with `UNREAD_DEBUG_OVERLAY=1` it logs each word mark against its due time. `UNREAD_DEBUG_MOTION=1` logs the voice clock every display frame, raw and smoothed, to check motion smoothness.
 - `Unread --axtree <pid>` dumps the web area's roles and subroles; with `--frames`, also each element's frame and role description.
 - The hosts also accept an `https://` URL instead of a file, to investigate a live page: `build/fixture-host-webkit https://…`, then `Unread --extract --pid <pid> --from-start` or `Unread --at x,y --pid <pid>`.
 

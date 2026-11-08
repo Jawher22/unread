@@ -278,7 +278,8 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
 if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
     // Read from a point exactly like a hold does, but muted, then quit:
     // `--simulate 700,450 [seconds] [--pid N]`. With UNREAD_DEBUG_OVERLAY=1 it
-    // logs every highlight and word-mark change. Draws the real highlight on screen.
+    // logs every highlight and word-mark change. The highlight is drawn invisibly unless `--show-highlight`,
+    // so a test run never shows on the user's screen.
     // `--record out.wav` writes what the player outputs, pauses included; `--speed X` reads at X (default 1.3);
     // `--voice id` reads English in that preset (default: the London storyteller, not the one chosen in Settings).
     let xy = args[i + 1].split(separator: ",").compactMap { Double($0) }
@@ -298,7 +299,7 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             if gap > 50 { over50 += 1 }
         }
         func report() { print(String(format: "[stall] main thread: worst %.0f ms, %d ticks > 16 ms, %d > 50 ms; the worst %.1f s in", worst, over16, over50, worstAt)) }
-        let overlay = Overlay(), player = Player(muted: true)
+        let overlay = Overlay(visible: args.contains("--show-highlight")), player = Player(muted: true)
         func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
         let speed = value(after: "--speed").flatMap(Float.init) ?? 1.3
         if let path = value(after: "--record") {
