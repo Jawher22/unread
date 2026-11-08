@@ -186,8 +186,8 @@ enum SpeechText {
         return timestamp.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
     }
 
-    /// "[12]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
-    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
+    /// "[12]", "[38, 24, 15]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
+    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+(,\s*\d+)*|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
     /// Screen-reader-only link hints. Clipped to 1 px, but their text frame is
     /// full size in both engines, so geometry can't tell; the idiom can.
@@ -1725,6 +1725,7 @@ enum DocumentFinder {
         for _ in 0..<40 {
             guard let cur = e, let role = AX.role(cur) else { break }
             if role == "AXWebArea" { return WebDocument(area: cur) }
+            if role == "AXPage", let doc = PDFKitDocument(page: cur) { return doc } // PDFKit (Preview, Safari; #86)
             if textRoles.contains(role), let doc = NativeDocument(element: cur) { return doc }
             if role == kAXWindowRole || role == kAXApplicationRole { break }
             e = AX.parent(cur)
@@ -1737,7 +1738,7 @@ enum DocumentFinder {
         let hit = AX.element(at: point)
         let app = hit.map { NSRunningApplication(processIdentifier: AX.pid($0))?.localizedName ?? "pid \(AX.pid($0))" } ?? "?"
         let what = hit.map { "\(AX.role($0) ?? "?")\(AX.subrole($0).map { "/\($0)" } ?? "")" } ?? "nothing (hit test failed or timed out)"
-        if doc == nil { return "no web area or text view under the pointer in \(app) (hit: \(what))" }
+        if doc == nil { return "no web area, PDF page or text view under the pointer in \(app) (hit: \(what))" }
         return "\(type(of: doc!)) in \(app) has no readable paragraph at the pointer (hit: \(what))"
     }
 
@@ -1757,9 +1758,13 @@ enum DocumentFinder {
                 ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute))
                 ?? (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first else { return nil }
         let found = AX.find(in: window) { e, role in
-            role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
+            role == "AXWebArea" || role == "AXPage" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }
         guard let e = found ?? AX.wakeWebArea(in: window) else { return nil }
-        return AX.role(e) == "AXWebArea" ? WebDocument(area: e) : NativeDocument(element: e)
+        switch AX.role(e) {
+        case "AXWebArea": return WebDocument(area: e)
+        case "AXPage": return PDFKitDocument(page: e)
+        default: return NativeDocument(element: e)
+        }
     }
 }

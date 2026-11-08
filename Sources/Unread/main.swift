@@ -459,6 +459,7 @@ if args.contains("--extract") {
             }
             last = s
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
+            if b == "no bounds" { let why = doc.linesDiagnosis(of: s); if !why.isEmpty { print("     no bounds: \(why)") } }
             print("  \(n). \(b)  \(s.cue.map { "♪ \($0)" } ?? (fromStart ? s.text : String(s.text.prefix(90))))")
             if args.contains("--word-boxes") {
                 // Each display word with its box (#20); "?" where it has none.

@@ -22,7 +22,7 @@
 # The expected file may begin with header lines:
 #   # start: <text>   start reading at the first sentence containing <text>, as if the user pointed there
 #   # flags: <flags>  extra --extract flags the page needs (rerender.html: --slow)
-#   # pending: <engines>  engines not expected to pass yet: their result is shown, marked PENDING, and never fails
+#   # pending: <engines>  engines (WebKit, Chromium, Preview) not expected to pass yet: their result is shown, marked PENDING, and never fails
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PAGE="$1"; shift
@@ -34,6 +34,7 @@ ELECTRON=fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Content
 
 case "$PAGE" in
     *.txt | *.rtf) ENGINES=(Native) ;;
+    *.pdf) ENGINES=(WebKit Chromium Preview) ;;
     *) ENGINES=(WebKit Chromium) ;;
 esac
 host() { # name: build the Swift host if it's missing or older than its source
@@ -42,6 +43,7 @@ host() { # name: build the Swift host if it's missing or older than its source
 }
 if [[ ${ENGINES[0]} == Native ]]; then host native; else
     host webkit
+    [[ "$PAGE" == *.pdf ]] && host native
     [[ -x "$ELECTRON" ]] || {
         echo "Electron host not installed: (cd fixtures/hosts/electron && npm install)" >&2; exit 1; }
 fi
@@ -68,7 +70,7 @@ launch() { # engine: start its host on the page, logging to $OUT/<engine>.log
         # Shells inside Electron apps (VS Code, T3 Code…) export ELECTRON_RUN_AS_NODE, which would run Electron as plain Node.
         # The binary is launched directly (not through node_modules/.bin) so $! is the window's process.
         Chromium) exec env -u ELECTRON_RUN_AS_NODE "$ELECTRON" fixtures/hosts/electron --hidden --profile "$OUT/profile" "$PAGE" ;;
-        Native) exec build/fixture-host-native --hidden "$PAGE" ;;
+        Native | Preview) exec build/fixture-host-native --hidden "$PAGE" ;;
     esac >"$OUT/$1.log" 2>&1 &
     HOSTS+=($!)
 }
