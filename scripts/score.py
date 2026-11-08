@@ -44,7 +44,7 @@ def extracted(path):
     out = []
     for line in open(path, encoding="utf-8", errors="replace"):
         m = SENTENCE.match(line.rstrip("\n"))
-        if m:
+        if m and not m.group(2).startswith("♪ "):  # a cue (#24): a sound in place of code or a table, not text
             out.append((norm(m.group(2)), m.group(1) != "no bounds"))
     return out
 

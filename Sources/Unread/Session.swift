@@ -27,8 +27,8 @@ struct PrimedSentence {
             }
             guard let (sentence, scope, extractMs) = found else { return nil }
             let lang = LanguageTracker().language(for: sentence.text) // what a fresh session would pick
-            return Prepared(sentence: sentence, scope: scope, extractMs: extractMs,
-                            take: NarratorTake(narrator, words: sentence.words[...], language: lang))
+            let take = sentence.cue != nil ? NarratorTake(cue: Player.cueSound) : NarratorTake(narrator, words: sentence.words[...], language: lang)
+            return Prepared(sentence: sentence, scope: scope, extractMs: extractMs, take: take)
         })
     }
 
@@ -49,6 +49,10 @@ enum Pacing {
     static let edge = 0.05
     /// The player schedules the next sentence during this pause, so it never goes below this.
     static let minPause = 0.12
+
+    /// After a cue's sound, at every speed: with the sentence's pause before it, about 0.8 s between two
+    /// sentences at 1.2× instead of 0.42 s.
+    static let cuePause = Int(0.15 * 24_000)
 
     /// The pause to put after a sentence, in samples at 24 kHz.
     static func pause(speed: Float) -> Int {
@@ -108,6 +112,8 @@ final class ReadingSession {
     private var inFlight: NarratorTake?
     /// The last sentence the narrator was asked for: the next one of its paragraph carries on from it (#56).
     private var lastNarrated: Pending?
+    /// The cues queued so far, by number.
+    private var cueSeqs: Set<Int> = []
     /// #15: a buffer on the player can't be taken back, so only the sentence playing streams into it.
     private var live: Live?
     private struct Live {
@@ -439,7 +445,7 @@ final class ReadingSession {
                 var rebuilt = false
                 if s == nil, let last { s = doc.sentence(after: last, scope: &sc); rebuilt = s != nil } // page re-rendered?
                 // The last text on the page, not ending like a sentence: it may still be being written.
-                let open = s.map { !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
+                let open = s.map { $0.cue == nil && !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
                 return (s, sc, rebuilt, open)
             }
             guard let self, !self.cancelled else { return }
@@ -503,8 +509,14 @@ final class ReadingSession {
             backlog = (backlog + [pending]).sorted { $0.seq < $1.seq }
             return
         }
+        if pending.sentence.cue != nil {
+            producing = false
+            enqueue(pending, take: NarratorTake(cue: Player.cueSound))
+            return
+        }
+        // The sentence just said, cues between not counting: the performance goes on past a skipped block.
         let previous = lastNarrated.flatMap { p in
-            p.seq == pending.seq - 1 && p.language == pending.language ? p.sentence.text : nil
+            (p.seq + 1 ..< pending.seq).allSatisfy(cueSeqs.contains) && p.language == pending.language ? p.sentence.text : nil
         }
         enqueue(pending, take: NarratorTake(narrator, words: pending.sentence.words[...], language: pending.language, after: previous))
     }
@@ -513,7 +525,7 @@ final class ReadingSession {
         guard !cancelled else { take.cancel(); return }
         ready.append(Ready(pending: pending, take: take))
         ready.sort { $0.pending.seq < $1.pending.seq }
-        lastNarrated = pending
+        if pending.sentence.cue != nil { cueSeqs.insert(pending.seq) } else { lastNarrated = pending }
         take.onArrival = { [weak self, weak take] in if let self, let take { self.arrived(take) } }
         if !take.streamed { inFlight = take; producing = true }
         scheduleNext()
@@ -556,7 +568,7 @@ final class ReadingSession {
             let ending = sentenceEnding(piece, speed: speed)
             if debugSession {
                 print(String(format: "[session] playing #%d at %.2g× (%.1fs +%.2fs) %@", piece.seq, speed, Double(samples.count) / 24_000,
-                             Double(Pacing.pause(speed: speed)) / 24_000, piece.sentence.text.prefix(40).debugDescription))
+                             Double(pause(after: piece.sentence, speed: speed)) / 24_000, Self.label(piece.sentence)))
             }
             let start = player.schedule(samples, ending: ending, consumed: consumedCallback())
             logScheduled(piece, from: start, to: start + samples.count, ending: ending)
@@ -566,8 +578,15 @@ final class ReadingSession {
         }
     }
 
+    private func pause(after sentence: Sentence, speed: Float) -> Int {
+        sentence.cue != nil ? Pacing.cuePause : Pacing.pause(speed: speed)
+    }
+
+    /// For the log: a sentence's start, or the cue it is.
+    nonisolated static func label(_ s: Sentence) -> String { s.cue.map { "♪ \($0)" } ?? s.text.prefix(40).debugDescription }
+
     private func sentenceEnding(_ piece: Pending, speed: Float) -> Player.Ending {
-        .sentence(pause: Pacing.pause(speed: speed), played: { [weak self] in
+        .sentence(pause: pause(after: piece.sentence, speed: speed), played: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.sentenceFinished() } }
         })
     }
@@ -781,7 +800,7 @@ final class ReadingSession {
             guard let m = await self?.measure(current, relocate: true, scrollIfNeeded: scrollIfNeeded, wantWords: true), let self else { return }
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
                   self.queued.first?.sentence.range === current.range else { return }
-            let label = current.text.prefix(40).debugDescription
+            let label = Self.label(current)
             if let window = m.window { self.windowID = window }
             if let fresh = m.relocated {
                 self.queued[0].sentence = fresh

@@ -9,6 +9,11 @@ struct Sentence {
     let range: AnyObject
     /// Where the following sentence starts, or nil at the end of the document.
     let next: AnyObject?
+    /// A cue (#24, #26): in place of a run of code, a table, or before a figure's caption, a soft sound is
+    /// played and nothing is said; `range` covers what it stands for, for the highlight. "code", "table", "figure".
+    var cue: String? = nil
+    /// The figure, video or picture a "figure" cue stands for: the highlight covers it while the cue plays.
+    var shows: AXUIElement? = nil
 }
 
 /// Something on screen we can read aloud, regardless of which app owns it.
@@ -290,6 +295,10 @@ final class WebDocument: ReadableDocument {
     private var flowsMemo: [AXKey: Bool] = [:]
     private var roleMemo: [AXKey: (role: String?, subrole: String?)] = [:]
     private var figureMemo: [AXKey: Bool] = [:]
+    private var oneLinerMemo: [AXKey: Bool] = [:]
+    /// Figures (or captions without one) whose cue has been given: the next walk reads what follows.
+    private var cuedFigures: Set<AXKey> = []
+    private var mediaMemo: [TextUnit.Key: AXUIElement?] = [:]
     private var piecesMemo: [TextUnit.Key: [Piece]] = [:]
     private var unitTextMemo: [TextUnit.Key: UnitText] = [:]
     private var nextParagraphMemo: [Lookahead: TextUnit] = [:]
@@ -353,12 +362,17 @@ final class WebDocument: ReadableDocument {
 
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
+        // A run of code or table text walked past: one cue stands for it, given before what follows.
+        var cue: (start: AnyObject, end: AnyObject, kind: String, shows: AXUIElement?)?
+        func cueSentence(next: AnyObject?) -> Sentence? {
+            cue.flatMap { c in range(c.start, c.end).map { Sentence(text: "", range: $0, next: next, cue: c.kind, shows: c.shows) } }
+        }
         for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
-            guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return nil }
+            guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return cueSentence(next: nil) }
             let chunk = string(chunkRange)
             let chunkNS = chunk as NSString
             guard chunkNS.length > 0, !chunk.trimmingCharacters(in: Self.blank).isEmpty else {
-                guard let next = step(past: chunkEnd), !CFEqual(next, cursor) else { return nil }
+                guard let next = step(past: chunkEnd), !CFEqual(next, cursor) else { return cueSentence(next: nil) }
                 cursor = next
                 continue
             }
@@ -437,24 +451,43 @@ final class WebDocument: ReadableDocument {
                     text = own
                 }
                 switch own == "" ? .skip("furniture") : verdict(text: text, endingAt: judgeAt, leaf: endLeaf, in: scope) {
-                case .read: return Sentence(text: text, range: r, next: sentenceEnd)
+                case let v where v.reads:
+                    // A caption, or the first text after a drawing, video or picture: its cue, on this text, then the text.
+                    var figure: (key: AXKey, kind: String, shows: AXUIElement?)?
+                    if case .cueThenRead(let kind) = v, let endLeaf {
+                        let around = ancestry(of: endLeaf).first(where: isFigure)
+                        figure = (AXKey(element: around ?? endLeaf), kind, around)
+                    } else if let endLeaf, let media = media(before: endLeaf, in: scope) {
+                        figure = (AXKey(element: media), "figure", media)
+                    }
+                    if cue == nil, let figure, !cuedFigures.contains(figure.key) {
+                        cuedFigures.insert(figure.key)
+                        cue = (start(of: r), end(of: r), figure.kind, figure.shows)
+                    }
+                    if cue != nil { return cueSentence(next: cursor) } // the cue first; this sentence on the next walk
+                    return Sentence(text: text, range: r, next: sentenceEnd)
                 case .end:
                     if debugWalk { print("    end of scope at \(text.prefix(40).debugDescription)") }
-                    return nil
+                    return cueSentence(next: nil)
+                case .cue(let kind):
+                    if debugWalk { print("    cue (\(kind)) \(text.prefix(40).debugDescription)") }
+                    cue = (cue?.start ?? start(of: r), sentenceEnd, cue?.kind ?? kind, nil)
                 case .skip(let why):
                     if debugWalk { print("    skip (\(why)) \(text.prefix(40).debugDescription)") }
+                default: break
                 }
             }
-            if CFEqual(sentenceEnd, cursor) { return nil }
+            if CFEqual(sentenceEnd, cursor) { return cueSentence(next: nil) }
             cursor = sentenceEnd
         }
-        return nil
+        return cueSentence(next: nil)
     }
 
     // MARK: Surviving re-renders
 
     /// Stale markers point at deleted nodes and read as nothing.
     private func isStale(_ s: Sentence) -> Bool {
+        if s.cue != nil { return false } // nothing said, nothing to find again
         let now = SpeechText.clean(string(s.range)) ?? ""
         if debugWalk { print("    stale? \(s.text.prefix(24).debugDescription) range now reads \(now.prefix(24).debugDescription)") }
         return now.isEmpty || !now.hasPrefix(String(s.text.prefix(12)))
@@ -530,7 +563,11 @@ final class WebDocument: ReadableDocument {
         return ReadingScope(container: container, pointedInto: pointedInto, startLeaf: leaf)
     }
 
-    private enum Verdict { case read, skip(String), end }
+    /// `cue`: walked past, with a sound in its place (code, tables). `cueThenRead`: a sound, then read (a caption).
+    private enum Verdict {
+        case read, skip(String), end, cue(String), cueThenRead(String)
+        var reads: Bool { switch self { case .read, .cueThenRead: true; default: false } }
+    }
 
     /// The text leaf a sentence ending at `marker` belongs to. The end marker
     /// itself sits on the boundary with whatever follows, and which side it
@@ -555,6 +592,8 @@ final class WebDocument: ReadableDocument {
         guard let leaf else { return .read }
         let chain = ancestry(of: leaf)
         if let c = scope.container, !chain.contains(where: { CFEqual($0, c) }) { return .end }
+        // Code and tables are a sound, not read (#24, #26), even pointed at; a one-line command is read.
+        if let cue = cueVerdict(chain, leaf: leaf, in: scope) { return cue }
         if let pointed = scope.pointedInto, chain.contains(where: { CFEqual($0, pointed) }) { return .read }
         // Visually hidden ("sr-only") text is ~1 px *wide*: Chromium gives the
         // text a 0–1 px frame, WebKit gives its container 1 px. Don't judge by
@@ -570,16 +609,14 @@ final class WebDocument: ReadableDocument {
         }
         for e in chain {
             if let c = scope.container, CFEqual(e, c) { break }
-            if let kind = chromeKind(e) { return .skip(kind) }
+            if let kind = chromeKind(e) { return kind == "caption" ? .cueThenRead("figure") : .skip(kind) }
         }
         if SpeechText.isTimestamp(text) { return .skip("timestamp") }
         guard let unit = unit(of: leaf) else { return .read }
         let t = self.text(of: unit)
         if t.isLinkRow { return .skip("links") }
         // The text layer (#11), around the article's main text. Pointing means
-        // "read this", a page without a paragraph keeps the rules above, and
-        // tables are left as they are (#26).
-        if t.kind == .cell { return .read }
+        // "read this", and a page without a paragraph keeps the rules above.
         if scope.startUnit == nil, let start = scope.startLeaf { scope.startUnit = self.unit(of: start)?.key }
         if scope.startUnit == unit.key { return .read }
         guard let main = mainText(of: scope) else { return .read }
@@ -600,9 +637,29 @@ final class WebDocument: ReadableDocument {
         if !t.reads || !t.within(main.column) {
             let next = paragraph(after: section(of: unit, kind: t.kind), in: scope, column: main.column)
             if next.paragraph == nil { return next.moreText ? .end : .read }
-            if t.inFigure, !t.reads { return .skip("caption") }
+            if t.inFigure, !t.reads { return .cueThenRead("figure") }
         }
         return .read
+    }
+
+    /// Code (a `<pre>`) and table cells: a cue instead of their text. A code block of one short line (a
+    /// command, 60 characters or less) is read: "Run this:" followed by it is common in an agent's answer.
+    private func cueVerdict(_ chain: [AXUIElement], leaf: AXUIElement, in scope: ReadingScope) -> Verdict? {
+        for e in chain {
+            if let c = scope.container, CFEqual(e, c) { break }
+            if chromeKind(e) == "code" { return isOneLiner(e) ? .read : .cue("code") }
+        }
+        if let unit = unit(of: leaf), text(of: unit).kind == .cell { return .cue("table") }
+        return nil
+    }
+
+    private func isOneLiner(_ code: AXUIElement) -> Bool {
+        let key = AXKey(element: code)
+        if let known = oneLinerMemo[key] { return known }
+        let text = p("AXTextMarkerRangeForUIElement", code).map(string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let one = !text.isEmpty && text.count <= 60 && !text.contains("\n")
+        oneLinerMemo[key] = one
+        return one
     }
 
     /// Where the article's ending is judged from: a list item's list, a
@@ -666,8 +723,8 @@ final class WebDocument: ReadableDocument {
         if sub == "AXPreformattedStyleGroup" { return "code" }
         let kids = AX.children(e)
         if sub == nil, kids.count == 1, AX.subrole(kids[0]) == "AXCodeStyleGroup" { return "code" }
-        // <figcaption>: a text group beside an image in a small figure group.
-        if let parent = AX.parent(e), AX.role(parent) == kAXGroupRole {
+        // <figcaption>: a group of text (one block, not a header's columns of metadata) beside an image in a small figure group.
+        if holdsOnlyInline(e), let parent = AX.parent(e), AX.role(parent) == kAXGroupRole {
             let siblings = AX.children(parent)
             if siblings.count <= 3, siblings.contains(where: { AX.role($0) == kAXImageRole }),
                !kids.contains(where: { AX.role($0) == kAXImageRole }) { return "caption" }
@@ -772,8 +829,7 @@ final class WebDocument: ReadableDocument {
             : parentRole == kAXListRole ? .listItem
             : ancestry(of: b).prefix(4).contains(where: { ["AXCell", "AXRow", "AXTable"].contains(roles($0).role ?? "") }) ? .cell
             : .text
-        var frame: CGRect?
-        for m in unit.members { if let f = AX.frame(m), f.width > 0 { frame = frame.map { $0.union(f) } ?? f } }
+        let frame = self.frame(of: unit)
         // The article's <header>, a <figure>.
         var inHeader = false, inFigure = false
         for e in ancestry(of: b).prefix(8) {
@@ -793,6 +849,55 @@ final class WebDocument: ReadableDocument {
                          isTimestamp: SpeechText.isTimestamp(trimmed))
         unitTextMemo[unit.key] = t
         return t
+    }
+
+    /// A unit's box: its block's, or the union of its run's (a `<sub>` loose in the
+    /// article is a run, and its block is the whole article).
+    private func frame(of unit: TextUnit) -> CGRect? {
+        var frame: CGRect?
+        for m in unit.members { if let f = AX.frame(m), f.width > 0 { frame = frame.map { $0.union(f) } ?? f } }
+        return frame
+    }
+
+    /// The drawing, video or picture right before `leaf`'s unit, when nothing
+    /// in it is read: a `<figure>` without a `<figcaption>` (raphaelsalaja.com
+    /// puts the caption in a `<sub>` after it), a video, an image. Pointing at
+    /// the text after one reads that text, with no cue.
+    private func media(before leaf: AXUIElement, in scope: ReadingScope) -> AXUIElement? {
+        if scope.startUnit == nil, let start = scope.startLeaf { scope.startUnit = self.unit(of: start)?.key }
+        guard let unit = unit(of: leaf), scope.startUnit != unit.key else { return nil }
+        if let known = mediaMemo[unit.key] { return known }
+        var before: AXUIElement?
+        if unit.first > 0 {
+            before = children(of: unit.block)[unit.first - 1]
+        } else if unit.first < 0, let parent = ancestry(of: unit.block).dropFirst().first {
+            let kids = children(of: parent)
+            if let i = kids.firstIndex(where: { CFEqual($0, unit.block) }), i > 0 { before = kids[i - 1] }
+        }
+        let media = before.flatMap { isMedia($0) ? $0 : nil }
+        mediaMemo[unit.key] = media
+        return media
+    }
+
+    /// Something shown with nothing to read in it. WebKit says "figure", "video
+    /// playback" or gives an empty group; Chromium's `<video>` is an empty group
+    /// (beside its play button), and it drops an `alt=""` image.
+    private func isMedia(_ e: AXUIElement) -> Bool {
+        var budget = 40
+        var shown = false
+        func visit(_ x: AXUIElement, depth: Int) -> Bool { // false: there's text to read
+            budget -= 1
+            guard budget > 0, depth < 4 else { return false }
+            let (role, subrole) = roles(x)
+            if role == kAXStaticTextRole { return ((AX.attr(x, kAXValueAttribute) as? String) ?? "").trimmingCharacters(in: Self.blank).isEmpty }
+            if let role, Self.controlRoles.contains(role) { return true }
+            let kids = children(of: x)
+            let wide = (AX.frame(x)?.width ?? 0) >= 100
+            if role == kAXImageRole || isFigure(x) || subrole == "AXEmptyGroup" || (role == kAXGroupRole && kids.isEmpty) { shown = shown || wide }
+            if role == kAXImageRole { return true }
+            return kids.allSatisfy { visit($0, depth: depth + 1) }
+        }
+        return visit(e, depth: 0) && shown
     }
 
     /// A `<figure>`. Both engines expose it as a plain group whose role
@@ -1209,6 +1314,7 @@ final class WebDocument: ReadableDocument {
     /// taller than a line and are re-measured or dropped. WebKit is precise
     /// either way.
     func lines(of sentence: Sentence) -> [CGRect] {
+        if let shown = sentence.shows { return AX.frame(shown).flatMap(onScreen).map { [$0] } ?? [] }
         if let cached = layouts.first(where: { $0.range === sentence.range }) {
             if let now = rect(cached.anchor), abs(now.width - cached.anchorRect.width) < 1, abs(now.height - cached.anchorRect.height) < 1 {
                 let dx = now.minX - cached.anchorRect.minX, dy = now.minY - cached.anchorRect.minY
@@ -1333,18 +1439,26 @@ final class WebDocument: ReadableDocument {
         var frames: [CGRect] = []
         for m in [firstWord, end(of: range)] {
             guard let leaf = leaf(endingAt: m) else { continue }
-            let box = block(containing: leaf).flatMap(AX.frame) ?? AX.frame(leaf)
-            guard var f = box, f.width >= 4, let visible = visibleRect() else { continue }
-            if f.height < 4 {
-                let above = abs(f.minY - visible.minY) <= abs(f.maxY - visible.maxY)
-                f = CGRect(x: f.minX, y: above ? visible.minY - 21 : visible.maxY + 1, width: f.width, height: 20)
-            } else {
-                if abs(f.minY - visible.minY) < 1 { f = CGRect(x: f.minX, y: f.minY - 2, width: f.width, height: f.height + 2) }
-                if abs(f.maxY - visible.maxY) < 1 { f.size.height += 2 }
-            }
+            guard let f = (unit(of: leaf).flatMap(frame(of:)) ?? AX.frame(leaf)).flatMap(onScreen) else { continue }
             if !frames.contains(f) { frames.append(f) }
         }
         return frames
+    }
+
+    /// An element frame as the highlight takes it. Chromium clips frames to the
+    /// scroll container: one scrolled away is a sliver on the edge it left by,
+    /// reported just past that edge; one touching an edge, as reaching past it.
+    private func onScreen(_ frame: CGRect) -> CGRect? {
+        var f = frame
+        guard f.width >= 4, let visible = visibleRect() else { return nil }
+        if f.height < 4 {
+            let above = abs(f.minY - visible.minY) <= abs(f.maxY - visible.maxY)
+            f = CGRect(x: f.minX, y: above ? visible.minY - 21 : visible.maxY + 1, width: f.width, height: 20)
+        } else {
+            if abs(f.minY - visible.minY) < 1 { f = CGRect(x: f.minX, y: f.minY - 2, width: f.width, height: f.height + 2) }
+            if abs(f.maxY - visible.maxY) < 1 { f.size.height += 2 }
+        }
+        return f
     }
 
     /// Measure a word from up to three characters in (past a leaf boundary
