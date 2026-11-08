@@ -12,6 +12,8 @@ struct Sentence {
     /// A cue (#24, #26): in place of a run of code, a table, or before a figure's caption, a soft sound is
     /// played and nothing is said; `range` covers what it stands for, for the highlight. "code", "table", "figure".
     var cue: String? = nil
+    /// The figure, video or picture a "figure" cue stands for: the highlight covers it while the cue plays.
+    var shows: AXUIElement? = nil
 }
 
 /// Something on screen we can read aloud, regardless of which app owns it.
@@ -361,9 +363,9 @@ final class WebDocument: ReadableDocument {
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
         var cursor = position
         // A run of code or table text walked past: one cue stands for it, given before what follows.
-        var cue: (start: AnyObject, end: AnyObject, kind: String)?
+        var cue: (start: AnyObject, end: AnyObject, kind: String, shows: AXUIElement?)?
         func cueSentence(next: AnyObject?) -> Sentence? {
-            cue.flatMap { c in range(c.start, c.end).map { Sentence(text: "", range: $0, next: next, cue: c.kind) } }
+            cue.flatMap { c in range(c.start, c.end).map { Sentence(text: "", range: $0, next: next, cue: c.kind, shows: c.shows) } }
         }
         for _ in 0..<400 { // skip empty fragments (images, separators, icons) and page chrome
             guard let (chunkEnd, blockBreaks, lostSpaces) = chunk(from: cursor), let chunkRange = range(cursor, chunkEnd) else { return cueSentence(next: nil) }
@@ -451,15 +453,16 @@ final class WebDocument: ReadableDocument {
                 switch own == "" ? .skip("furniture") : verdict(text: text, endingAt: judgeAt, leaf: endLeaf, in: scope) {
                 case let v where v.reads:
                     // A caption, or the first text after a drawing, video or picture: its cue, on this text, then the text.
-                    var figure: (key: AXKey, kind: String)?
+                    var figure: (key: AXKey, kind: String, shows: AXUIElement?)?
                     if case .cueThenRead(let kind) = v, let endLeaf {
-                        figure = (AXKey(element: ancestry(of: endLeaf).first(where: isFigure) ?? endLeaf), kind)
+                        let around = ancestry(of: endLeaf).first(where: isFigure)
+                        figure = (AXKey(element: around ?? endLeaf), kind, around)
                     } else if let endLeaf, let media = media(before: endLeaf, in: scope) {
-                        figure = (AXKey(element: media), "figure")
+                        figure = (AXKey(element: media), "figure", media)
                     }
                     if cue == nil, let figure, !cuedFigures.contains(figure.key) {
                         cuedFigures.insert(figure.key)
-                        cue = (start(of: r), end(of: r), figure.kind)
+                        cue = (start(of: r), end(of: r), figure.kind, figure.shows)
                     }
                     if cue != nil { return cueSentence(next: cursor) } // the cue first; this sentence on the next walk
                     return Sentence(text: text, range: r, next: sentenceEnd)
@@ -468,7 +471,7 @@ final class WebDocument: ReadableDocument {
                     return cueSentence(next: nil)
                 case .cue(let kind):
                     if debugWalk { print("    cue (\(kind)) \(text.prefix(40).debugDescription)") }
-                    cue = (cue?.start ?? start(of: r), sentenceEnd, cue?.kind ?? kind)
+                    cue = (cue?.start ?? start(of: r), sentenceEnd, cue?.kind ?? kind, nil)
                 case .skip(let why):
                     if debugWalk { print("    skip (\(why)) \(text.prefix(40).debugDescription)") }
                 default: break
@@ -1311,6 +1314,7 @@ final class WebDocument: ReadableDocument {
     /// taller than a line and are re-measured or dropped. WebKit is precise
     /// either way.
     func lines(of sentence: Sentence) -> [CGRect] {
+        if let shown = sentence.shows { return AX.frame(shown).flatMap(onScreen).map { [$0] } ?? [] }
         if let cached = layouts.first(where: { $0.range === sentence.range }) {
             if let now = rect(cached.anchor), abs(now.width - cached.anchorRect.width) < 1, abs(now.height - cached.anchorRect.height) < 1 {
                 let dx = now.minX - cached.anchorRect.minX, dy = now.minY - cached.anchorRect.minY
@@ -1435,18 +1439,26 @@ final class WebDocument: ReadableDocument {
         var frames: [CGRect] = []
         for m in [firstWord, end(of: range)] {
             guard let leaf = leaf(endingAt: m) else { continue }
-            let box = unit(of: leaf).flatMap(frame(of:)) ?? AX.frame(leaf)
-            guard var f = box, f.width >= 4, let visible = visibleRect() else { continue }
-            if f.height < 4 {
-                let above = abs(f.minY - visible.minY) <= abs(f.maxY - visible.maxY)
-                f = CGRect(x: f.minX, y: above ? visible.minY - 21 : visible.maxY + 1, width: f.width, height: 20)
-            } else {
-                if abs(f.minY - visible.minY) < 1 { f = CGRect(x: f.minX, y: f.minY - 2, width: f.width, height: f.height + 2) }
-                if abs(f.maxY - visible.maxY) < 1 { f.size.height += 2 }
-            }
+            guard let f = (unit(of: leaf).flatMap(frame(of:)) ?? AX.frame(leaf)).flatMap(onScreen) else { continue }
             if !frames.contains(f) { frames.append(f) }
         }
         return frames
+    }
+
+    /// An element frame as the highlight takes it. Chromium clips frames to the
+    /// scroll container: one scrolled away is a sliver on the edge it left by,
+    /// reported just past that edge; one touching an edge, as reaching past it.
+    private func onScreen(_ frame: CGRect) -> CGRect? {
+        var f = frame
+        guard f.width >= 4, let visible = visibleRect() else { return nil }
+        if f.height < 4 {
+            let above = abs(f.minY - visible.minY) <= abs(f.maxY - visible.maxY)
+            f = CGRect(x: f.minX, y: above ? visible.minY - 21 : visible.maxY + 1, width: f.width, height: 20)
+        } else {
+            if abs(f.minY - visible.minY) < 1 { f = CGRect(x: f.minX, y: f.minY - 2, width: f.width, height: f.height + 2) }
+            if abs(f.maxY - visible.maxY) < 1 { f.size.height += 2 }
+        }
+        return f
     }
 
     /// Measure a word from up to three characters in (past a leaf boundary
