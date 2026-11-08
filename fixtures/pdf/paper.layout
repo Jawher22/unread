@@ -1,0 +1,96 @@
+# A two-column paper (#85, #86): line-end hyphens that join a word ("para-graph") and
+# hyphens that belong to it ("task-specific", "state-of-the-art"), a link-dense
+# citation line and a link split over two lines, a footnote, a figure whose labels are
+# short runs of text, a sentence crossing from the left column to the right and one
+# crossing the page break, a running header, a proceedings footer and page numbers.
+# The text is original. Rebuild the PDF with
+#   swift scripts/make-pdf-fixture.swift fixtures/pdf/paper.layout fixtures/pages/paper.pdf
+page
+title Listening to Documents Without Selecting Them
+gap 4
+center Ada Moreau        Ilan Park        Noor Haddad
+center Unread Lab, Lyon
+center ada@unread.example    ilan@unread.example
+gap 18
+column
+heading Abstract
+para
+| We introduce a reading tool that speaks the para-
+| graph under the pointer, with no selection and no
+| copying. Unlike earlier readers ({Moreau and}
+| {Kline, 2021}; {Park et al., 2019}; {Haddad, 2020}),
+| it finds sentences in the page’s own text and fol-
+| lows them with a highlight. It needs no task-
+| specific setup, and it reads two-column papers in
+| the order a person would.
+heading 1 Introduction
+para
+| Most papers a researcher reads arrive as PDF files,
+| and most of those are set in two columns. A voice
+| that reads them aloud has to follow the columns,
+| skip the running header and the page number, and
+| join the words a typesetter broke at the end of a
+| line. Screen readers already walk a PDF line by
+| line, and they read it the way it was drawn.^1
+para
+| Reading the way a person does means undoing the
+| layout. Lines become paragraphs again, a hyphen
+| at a line end becomes part of its word or disap-
+| pears, and the figures, whose labels are only short
+| runs of text, are announced rather than read. Each
+| of these steps is small, but together they decide
+| whether the reading sounds like the paper or like
+footnote ^1VoiceOver, for one, reads each line as it was drawn.
+column
+| its source file.
+heading 2 Method
+para
+| The tool reads what the viewer exposes to assis-
+| tive technology. A PDF viewer built on PDFium
+| gives one group per paragraph and keeps the line
+| ends, while one built on PDFKit gives each page’s
+| text whole and measures only the runs between
+| its links. Figure 1 shows the steps from the page
+| to the voice.
+figure 50 Page;Tree;Sentences;Voice
+para flush
+| Figure 1: From the page to the voice, one sentence
+| at a time.
+para
+| Sentences are cut where a period ends them, not
+| where a line ends. When a page ends in the middle
+| of a sentence, the walk carries the sen-
+footer 52 Proceedings of the Workshop on Reading Aloud, pages 17–18
+footer 36 17
+page
+header Listening to Documents Without Selecting Them
+column
+| tence across the break and leaves the running
+| header and the page number out.
+heading 3 Results
+para
+| We read 12 papers in both viewers. In the best
+| case, 96% of sentences came out whole and in or-
+| der, and every figure was announced instead of
+| read. Hyphens that belong to their word, such as
+| the ones in a well-known and often cited state-of-
+| the-art result, were kept.
+heading 4 Conclusion
+para
+| A paper can be listened to without selecting a
+| word of it. The layout is undone once, ahead of
+| the voice, so the first sentence starts as quickly
+| as it does on a web page.
+column
+heading References
+dest refs
+para flush
+| Noor Haddad. 2020. Columns and the reading order.
+| In Proceedings of Layout Day, pages 1–9.
+para flush
+| Ada Moreau and Tom Kline. 2021. Reading without
+| selecting. Journal of Quiet Tools, 4(2):33–41.
+para flush
+| Ilan Park, Ada Moreau, and Noor Haddad. 2019. The
+| page as a tree. In Proceedings of Layout Day.
+footer 36 18

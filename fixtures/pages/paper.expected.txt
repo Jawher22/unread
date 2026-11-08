@@ -1,0 +1,28 @@
+# pending: WebKit Chromium
+Listening to Documents Without Selecting Them
+Abstract
+We introduce a reading tool that speaks the paragraph under the pointer, with no selection and no copying.
+Unlike earlier readers (Moreau and Kline, 2021; Park et al., 2019; Haddad, 2020), it finds sentences in the page’s own text and follows them with a highlight.
+It needs no task-specific setup, and it reads two-column papers in the order a person would.
+1 Introduction
+Most papers a researcher reads arrive as PDF files, and most of those are set in two columns.
+A voice that reads them aloud has to follow the columns, skip the running header and the page number, and join the words a typesetter broke at the end of a line.
+Screen readers already walk a PDF line by line, and they read it the way it was drawn.
+Reading the way a person does means undoing the layout.
+Lines become paragraphs again, a hyphen at a line end becomes part of its word or disappears, and the figures, whose labels are only short runs of text, are announced rather than read.
+Each of these steps is small, but together they decide whether the reading sounds like the paper or like its source file.
+2 Method
+The tool reads what the viewer exposes to assistive technology.
+A PDF viewer built on PDFium gives one group per paragraph and keeps the line ends, while one built on PDFKit gives each page’s text whole and measures only the runs between its links.
+Figure 1 shows the steps from the page to the voice.
+♪ figure
+Figure 1: From the page to the voice, one sentence at a time.
+Sentences are cut where a period ends them, not where a line ends.
+When a page ends in the middle of a sentence, the walk carries the sentence across the break and leaves the running header and the page number out.
+3 Results
+We read 12 papers in both viewers.
+In the best case, 96% of sentences came out whole and in order, and every figure was announced instead of read.
+Hyphens that belong to their word, such as the ones in a well-known and often cited state-of-the-art result, were kept.
+4 Conclusion
+A paper can be listened to without selecting a word of it.
+The layout is undone once, ahead of the voice, so the first sentence starts as quickly as it does on a web page.
