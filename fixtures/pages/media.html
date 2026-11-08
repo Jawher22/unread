@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Media</title>
+<style>body { font: 15px/1.5 -apple-system, sans-serif; margin: 0; } main { max-width: 640px; margin: 24px auto; }
+figure, section { margin: 24px 0; } svg, video, img { display: block; width: 100%; } sub { display: block; text-align: center; color: #666; vertical-align: baseline; }</style></head>
+<body>
+<!-- Modelled on raphaelsalaja.com/library/information-should-be-free: drawings, a video
+     and a picture between paragraphs, each with no <figcaption>, its caption a <sub>
+     right after it, loose in the article. Each gets the cue before what follows
+     (#24). In Chromium browsers (no text positions) the caption's box covered the whole
+     article: it was measured from the article, the block around the loose <sub>. -->
+<main>
+  <article>
+    <h1>Free to learn</h1>
+    <p>Almost everything I know, I learned for free. Nobody charged me to read the source.</p>
+    <figure aria-label="One dot branches into two, then four.">
+      <svg viewBox="0 0 480 160" height="160"><circle cx="40" cy="80" r="4"/><circle cx="140" cy="40" r="4"/><circle cx="140" cy="120" r="4"/></svg>
+    </figure>
+    <sub>One dot branches into two, then four, while the first dot stays as it was.</sub>
+    <p>Most things don't work like that. If I give someone my chair, I no longer have a chair.</p>
+    <section aria-label="Pay It Forward">
+      <video width="640" height="360" preload="none" playsinline></video>
+      <button type="button" aria-label="Play Pay It Forward"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 18 18"><path d="M4 2l12 7-12 7z"/></svg></button>
+    </section>
+    <sub>In <em>Pay It Forward</em>, Trevor draws his idea on a chalkboard. Each person helps three more.</sub>
+    <p>Thomas Jefferson put it well, more than two hundred years ago.</p>
+    <div><img width="640" height="240" alt="A candle lighting another candle" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='240'%3E%3Crect width='640' height='240' fill='%23ddd'/%3E%3C/svg%3E"></div>
+    <p>Someone who lights a candle from yours gets light without leaving you in the dark.</p>
+  </article>
+</main>
+</body>
+</html>
