@@ -439,14 +439,14 @@ final class ReadingSession {
         let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
         Task { [weak self] in
             let extractStart = Date()
-            let (found, newScope, rebuilt, open) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool) in
+            let (found, newScope, rebuilt, open, more) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool, Bool) in
                 var sc = needScope ? doc.scope(from: position) : scopeNow
                 var s = doc.sentence(from: position, in: sc)
                 var rebuilt = false
                 if s == nil, let last { s = doc.sentence(after: last, scope: &sc); rebuilt = s != nil } // page re-rendered?
                 // The last text on the page, not ending like a sentence: it may still be being written.
                 let open = s.map { $0.cue == nil && !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
-                return (s, sc, rebuilt, open)
+                return (s, sc, rebuilt, open, s == nil && doc.moreComing())
             }
             guard let self, !self.cancelled else { return }
             self.scope = newScope
@@ -455,8 +455,8 @@ final class ReadingSession {
             guard let sentence = found else {
                 self.producing = false
                 self.growth.atEnd = true
-                if let changed = self.growth.changedAt, now.timeIntervalSince(changed) < Self.streamWait {
-                    self.fillAgain() // the answer may still be coming
+                if more || self.growth.changedAt.map({ now.timeIntervalSince($0) < Self.streamWait }) == true {
+                    self.fillAgain() // the answer may still be coming, or the next page is turned once this one is read
                     return
                 }
                 self.cursor = nil

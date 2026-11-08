@@ -47,6 +47,9 @@ protocol ReadableDocument: AnyObject {
     func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
     func scrollIntoView(_ sentence: Sentence)
+    /// The text ends here for now, but more follows once what's shown has been read (a book's
+    /// next chapter, on the page after this one): ask again in a moment.
+    func moreComing() -> Bool
 }
 
 /// The window an Accessibility element is in, as the window server knows it (private, but long stable).
@@ -67,6 +70,7 @@ extension ReadableDocument {
     func words(of sentence: Sentence) -> [CGRect?] { [] }
     func scope(from position: AnyObject) -> ReadingScope? { nil }
     func relocate(_ sentence: Sentence) -> Sentence? { nil }
+    func moreComing() -> Bool { false }
     func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
 
     /// The sentence after `last`. If there's none because the page rebuilt
@@ -1724,7 +1728,7 @@ enum DocumentFinder {
         var e: AXUIElement? = hit
         for _ in 0..<40 {
             guard let cur = e, let role = AX.role(cur) else { break }
-            if role == "AXWebArea" { return WebDocument(area: cur) }
+            if role == "AXWebArea" { return BooksDocument.isBridged(cur) ? BooksDocument(around: cur) : WebDocument(area: cur) }
             if textRoles.contains(role), let doc = NativeDocument(element: cur) { return doc }
             if role == kAXWindowRole || role == kAXApplicationRole { break }
             e = AX.parent(cur)
@@ -1760,6 +1764,7 @@ enum DocumentFinder {
             role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }
         guard let e = found ?? AX.wakeWebArea(in: window) else { return nil }
-        return AX.role(e) == "AXWebArea" ? WebDocument(area: e) : NativeDocument(element: e)
+        guard AX.role(e) == "AXWebArea" else { return NativeDocument(element: e) }
+        return BooksDocument.isBridged(e) ? BooksDocument(around: e) : WebDocument(area: e)
     }
 }
