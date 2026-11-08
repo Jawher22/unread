@@ -1724,7 +1724,7 @@ enum DocumentFinder {
         var e: AXUIElement? = hit
         for _ in 0..<40 {
             guard let cur = e, let role = AX.role(cur) else { break }
-            if role == "AXWebArea" { return WebDocument(area: cur) }
+            if role == "AXWebArea" { return PDFiumDocument.open(near: cur, below: false) ?? WebDocument(area: cur) }
             if textRoles.contains(role), let doc = NativeDocument(element: cur) { return doc }
             if role == kAXWindowRole || role == kAXApplicationRole { break }
             e = AX.parent(cur)
@@ -1760,6 +1760,7 @@ enum DocumentFinder {
             role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }
         guard let e = found ?? AX.wakeWebArea(in: window) else { return nil }
-        return AX.role(e) == "AXWebArea" ? WebDocument(area: e) : NativeDocument(element: e)
+        // The search finds the outermost web area; Chromium's PDF viewer nests the document two areas in.
+        return AX.role(e) == "AXWebArea" ? PDFiumDocument.open(near: e, below: true) ?? WebDocument(area: e) : NativeDocument(element: e)
     }
 }
