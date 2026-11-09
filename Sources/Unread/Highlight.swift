@@ -20,15 +20,18 @@ struct HighlightStyle: Codable, Equatable {
     enum Strength: String, Codable, CaseIterable { case subtle, medium, strong }
     enum Sentence: String, Codable, CaseIterable { case box, soft, off }
     enum Tint: String, Codable, CaseIterable { case yellow, blue, green, pink }
-    enum Lead: Int, Codable, CaseIterable { case none = 0, short = 50, long = 100 }
+    enum Lead: Int, Codable, CaseIterable { case none = 0, short = 50, medium = 100, long = 150 }
 
     var mark = Mark.fill
     var motion = Motion.glide
     var strength = Strength.medium
     var sentence = Sentence.box
     var tint = Tint.yellow
-    /// Move the mark this much before the word is heard, so a glide lands on time.
-    var lead = Lead.none
+    /// Move the mark this much before the word is heard. Word starts are off by ~50 ms (median; p95
+    /// 129), and a mark that lags the voice is noticed from 45 ms, one that leads only from 125 ms
+    /// (ITU BT.1359): 100 ms keeps almost every word from showing late. Whether it shows too many
+    /// early is open (docs/design.md §9).
+    var lead = Lead.medium
 
     static let standard = HighlightStyle()
 
@@ -73,8 +76,19 @@ final class HighlightSettings: ObservableObject {
     }
 
     private init() {
-        style = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(HighlightStyle.self, from: $0) } ?? .standard
+        let defaults = UserDefaults.standard
+        style = defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(HighlightStyle.self, from: $0) } ?? .standard
+        // The lead was none by default until it became 100 ms, so a saved none is the old default, not a
+        // choice. Moved once: a none chosen since stays.
+        if !defaults.bool(forKey: Self.leadMoved) {
+            if style.lead == .none, defaults.data(forKey: Self.key) != nil {
+                style.lead = HighlightStyle.standard.lead
+                defaults.set(try? JSONEncoder().encode(style), forKey: Self.key) // didSet doesn't run in init
+            }
+            defaults.set(true, forKey: Self.leadMoved)
+        }
     }
+    private static let leadMoved = "highlightLeadMoved"
 }
 
 // MARK: - Easing and timing

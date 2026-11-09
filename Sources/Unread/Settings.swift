@@ -142,9 +142,9 @@ private struct HighlightSettingsView: View {
                     .disabled(settings.style.mark == .none)
                 row("Sentence", $settings.style.sentence, HighlightStyle.label)
                 row("Color", $settings.style.tint, HighlightStyle.label)
-                row("Lead", $settings.style.lead, HighlightStyle.label)
+                row("Mark ahead of voice", $settings.style.lead, HighlightStyle.label)
             } footer: {
-                Text("Glide slides to each word. Stretch reaches for the next word and pulls itself along. Flow is always easing toward the next word. Sweep fills each word in as it's spoken. Lead moves the mark ahead of the voice, if it feels late to you.")
+                Text("Glide slides to each word. Stretch reaches for the next word and pulls itself along. Flow is always easing toward the next word. Sweep fills each word in as it's spoken. The mark runs a little ahead of the voice, so it never trails the word you hear.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
