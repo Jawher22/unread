@@ -663,17 +663,11 @@ final class PDFKitDocument: ReadableDocument {
         return lines
     }
 
-    func words(of sentence: Sentence) -> [CGRect?] {
+    /// A word broken at a line end ("para-" / "graph") is two pieces, one per line: the display word
+    /// gets a box on each (`WordBoxes.assign`).
+    func words(of sentence: Sentence) -> [WordBox?] {
         guard let r = sentence.range as? PDFRange else { return [] }
-        var pieces: [(text: String, rect: CGRect)] = []
-        /// A word broken at a line end ("para-" / "graph") is one piece, with its first half's box.
-        func add(_ text: String, _ box: CGRect) {
-            if let last = pieces.last, last.text.hasSuffix("-"), let first = text.first, first.isLowercase {
-                pieces[pieces.count - 1] = (last.text + text, last.rect)
-            } else {
-                pieces.append((text, box))
-            }
-        }
+        var pieces: [(text: String, rect: CGRect?)] = []
         for part in r.parts {
             guard let p = page(part.page) else { continue }
             let pageLeaves = leaves(of: part.page)
@@ -690,7 +684,7 @@ final class PDFKitDocument: ReadableDocument {
                     guard let lr = leafRange(leaf, word), let b = bounds(leaf.element, lr) else { continue }
                     box = box.map { $0.union(b) } ?? b
                 }
-                if let box { add(p.text.substring(with: word), box) }
+                if let box { pieces.append((p.text.substring(with: word), box)) }
             }
         }
         return WordBoxes.assign(display: sentence.words, pieces: pieces)

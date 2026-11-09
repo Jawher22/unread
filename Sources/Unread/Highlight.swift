@@ -180,17 +180,29 @@ enum WordMark {
     /// `starts` and `boxes` are per display word (either may be nil).
     /// `entry`: where the previous sentence's mark ended, to come from.
     /// Any coordinate space with x growing to the right. Nil: no mark.
-    static func frame(_ style: HighlightStyle, starts: [Int?], boxes: [CGRect?], at offset: Int, entry: CGRect? = nil) -> WordMarkFrame? {
+    static func frame(_ style: HighlightStyle, starts: [Int?], boxes: [WordBox?], at offset: Int, entry: CGRect? = nil) -> WordMarkFrame? {
         guard style.markedWords > 0 else { return nil }
         let t = Double(offset) / 24_000 + Double(style.lead.rawValue) / 1000
-        // Knots: words with both a time and a box, in time order.
+        // Knots: words with both a time and a box, in time order. A word set on two lines is a knot
+        // per line, the second reached when the voice is through the first line's share of its
+        // letters, by the time until the next word.
         var times: [Double] = [], rects: [CGRect] = []
-        for i in 0..<min(starts.count, boxes.count) {
-            guard let s = starts[i], let b = boxes[i], !b.isEmpty else { continue }
+        let count = min(starts.count, boxes.count)
+        for i in 0..<count {
+            guard let s = starts[i], let b = boxes[i] else { continue }
             let time = Double(s) / 24_000
-            if let last = times.last, time <= last { continue }
-            times.append(time)
-            rects.append(b)
+            var next = time + 0.45
+            for j in i + 1..<count { if let n = starts[j], n > s { next = Double(n) / 24_000; break } }
+            let letters = b.parts.reduce(0) { $0 + $1.letters }
+            var said = 0
+            for part in b.parts {
+                defer { said += part.letters }
+                let at = time + (next - time) * Double(said) / Double(max(1, letters))
+                guard !part.rect.isEmpty else { continue }
+                if let last = times.last, at <= last { continue }
+                times.append(at)
+                rects.append(part.rect)
+            }
         }
         guard let first = times.first else { return nil }
         let hasEntry = entry != nil

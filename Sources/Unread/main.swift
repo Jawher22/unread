@@ -526,8 +526,9 @@ if args.contains("--extract") {
                 // Each display word with its box (#20); "?" where it has none.
                 _ = doc.lines(of: s)
                 let boxes = doc.words(of: s)
+                // A word set on two lines (hyphenated at a line end) shows a box per line, joined by "+".
                 let shown = zip(s.words, boxes.isEmpty ? s.words.map { _ in nil } : boxes).map { w, b in
-                    b.map { "\(w)(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "\(w)?"
+                    b.map { "\(w)" + $0.rects.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" }.joined(separator: "+") } ?? "\(w)?"
                 }
                 print("     words \(boxes.compactMap { $0 }.count)/\(s.words.count): " + shown.joined(separator: " "))
             }

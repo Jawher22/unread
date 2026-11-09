@@ -363,7 +363,7 @@ final class HighlightDemoView: NSView {
                 }
                 let starts = Self.sentences[index].starts.map { Int?(Int($0 / speed * 24_000)) }
                 let entry = index > 0 ? boxes(index - 1).compactMap { $0 }.last : nil
-                let mark = WordMark.frame(style, starts: starts, boxes: words, at: Int((t - start) * 24_000), entry: entry)
+                let mark = WordMark.frame(style, starts: starts, boxes: words.map { $0.map(WordBox.init) }, at: Int((t - start) * 24_000), entry: entry)
                 layers.showWord(mark, style: style, at: start)
             }
             restyled = false

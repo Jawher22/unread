@@ -1,5 +1,4 @@
-import CoreGraphics
-import Foundation
+import AppKit
 
 /// Word-level read-along (#20): when each word is spoken, and where it is.
 ///
@@ -86,6 +85,27 @@ enum WordTiming {
     }
 }
 
+/// Where a display word is on screen: its box on each line it's set on, in reading order. A word
+/// hyphenated at a line end ("Eventu-" / "ally") has two, so the mark can move to the second line
+/// when the voice does.
+struct WordBox: Equatable {
+    struct Part: Equatable {
+        var rect: CGRect
+        /// How many of the word's letters are on this line.
+        var letters: Int
+    }
+    var parts: [Part]
+
+    init(_ rect: CGRect) { parts = [Part(rect: rect, letters: 1)] }
+    init(parts: [Part]) { self.parts = parts }
+
+    var rects: [CGRect] { parts.map(\.rect) }
+
+    func offsetBy(dx: CGFloat, dy: CGFloat) -> WordBox {
+        WordBox(parts: parts.map { Part(rect: $0.rect.offsetBy(dx: dx, dy: dy), letters: $0.letters) })
+    }
+}
+
 enum WordBoxes {
     /// Boxes for the display words, from pieces of on-screen text measured
     /// in reading order (word ranges, which may carry leading spaces and
@@ -93,31 +113,79 @@ enum WordBoxes {
     ///
     /// Display text is the on-screen text minus some characters, so its
     /// letters are matched as a subsequence of the pieces' letters; a display
-    /// word gets the union of the pieces its letters fall in.
-    static func assign(display: [Substring], pieces: [(text: String, rect: CGRect)]) -> [CGRect?] {
+    /// word gets the union of the pieces its letters fall in on each line.
+    /// A piece without a box (it couldn't be measured) still holds its letters, so they aren't
+    /// matched to the pieces after it; a word whose letters are all in such pieces has no box.
+    static func assign(display: [Substring], pieces: [(text: String, rect: CGRect?)]) -> [WordBox?] {
         var stream: [(Character, Int)] = []
         for (p, piece) in pieces.enumerated() {
             for c in piece.text.lowercased() where c.isLetter || c.isNumber { stream.append((c, p)) }
         }
-        var out = [CGRect?](repeating: nil, count: display.count)
+        var out = [WordBox?](repeating: nil, count: display.count)
         var k = 0
         for (i, word) in display.enumerated() {
-            var probe = k, box: CGRect?
+            var probe = k, parts: [WordBox.Part] = []
             for c in word.lowercased() where c.isLetter || c.isNumber {
                 // Bounded resync: a dropped citation or URL is short.
                 let from = probe
                 while probe < stream.count, probe - from < 200, stream[probe].0 != c { probe += 1 }
                 // Not there (its piece couldn't be measured): leave this word
                 // without a box and match the next one from the same place.
-                guard probe < stream.count, stream[probe].0 == c else { box = nil; probe = -1; break }
-                let r = pieces[stream[probe].1].rect
-                box = box.map { $0.union(r) } ?? r
-                probe += 1
+                guard probe < stream.count, stream[probe].0 == c else { parts = []; probe = -1; break }
+                defer { probe += 1 }
+                guard let r = pieces[stream[probe].1].rect else { continue }
+                if let last = parts.last, WordMark.sameLine(last.rect, r) {
+                    parts[parts.count - 1] = WordBox.Part(rect: last.rect.union(r), letters: last.letters + 1)
+                } else {
+                    parts.append(WordBox.Part(rect: r, letters: 1))
+                }
             }
             guard probe >= 0 else { continue }
-            out[i] = box
+            if !parts.isEmpty { out[i] = WordBox(parts: parts) }
             k = probe
         }
         return out
     }
+}
+
+/// The band a line's glyphs fill, from the bottom of its text up by the font's ascent and descent.
+///
+/// WebKit, and Books through its iOS bridge, measure a range as the union of the carets at its ends.
+/// On a block's first line a caret is the font's height, on the glyphs; on every later line it
+/// reaches up to the line above's text bottom, leading included: 22 px then 40 at `line-height: 2`
+/// in 20 px Georgia, 27 then 32 in Books. Its bottom is the text's either way. A box keeps its
+/// bottom and is cut to the band, and the boxes on a line share one band, so a mark moving along it
+/// doesn't bob.
+enum GlyphBand {
+    /// Ascent plus descent, as WebKit rounds them: 22 for 20 px Georgia. A font that isn't
+    /// installed (a web font, a book's) is taken as 1.15 em, about what text faces measure.
+    static func height(font name: String?, size: CGFloat) -> CGFloat {
+        guard size > 0 else { return 0 }
+        if let name, let font = NSFont(name: name, size: size) { return (font.ascender).rounded() + (-font.descender).rounded() }
+        return (size * 1.15).rounded()
+    }
+
+    /// The boxes cut to a band of `height` (never taller than they are), each keeping its left and
+    /// right edges, every box on a line on that line's band. Lines are told by their bottoms.
+    static func fit(_ boxes: [CGRect], height: CGFloat) -> [CGRect] {
+        guard height > 0 else { return boxes }
+        var lines: [(bottoms: [CGFloat], tallest: CGFloat, members: [Int])] = []
+        for (i, b) in boxes.enumerated() {
+            if let l = lines.firstIndex(where: { abs(median($0.bottoms) - b.maxY) < height / 2 }) {
+                lines[l].bottoms.append(b.maxY)
+                lines[l].tallest = max(lines[l].tallest, b.height)
+                lines[l].members.append(i)
+            } else {
+                lines.append(([b.maxY], b.height, [i]))
+            }
+        }
+        var out = boxes
+        for line in lines {
+            let bottom = median(line.bottoms), h = min(height, line.tallest)
+            for i in line.members { out[i] = CGRect(x: boxes[i].minX, y: bottom - h, width: boxes[i].width, height: h) }
+        }
+        return out
+    }
+
+    private static func median(_ xs: [CGFloat]) -> CGFloat { xs.sorted()[xs.count / 2] }
 }

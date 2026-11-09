@@ -329,12 +329,12 @@ final class PDFiumDocument: ReadableDocument {
         return zip(shape.parts, shape.blocks).flatMap { part, block in inside(block, web.lines(of: part)) }
     }
 
-    func words(of sentence: Sentence) -> [CGRect?] {
+    func words(of sentence: Sentence) -> [WordBox?] {
         guard let shape = shapes[ObjectIdentifier(sentence.range)] else { return web.words(of: sentence) }
         if shape.parts.count == 1 { return inside(shape.blocks[0], web.words(of: sentence)) }
-        var pieces: [(text: String, rect: CGRect)] = []
+        var pieces: [(text: String, rect: CGRect?)] = []
         for (part, block) in zip(shape.parts, shape.blocks) {
-            for (w, box) in zip(part.words, inside(block, web.words(of: part))) { if let box { pieces.append((String(w), box)) } }
+            for (w, box) in zip(part.words, inside(block, web.words(of: part))) { for r in box?.rects ?? [] { pieces.append((String(w), r)) } }
         }
         return WordBoxes.assign(display: sentence.words, pieces: pieces)
     }
@@ -343,14 +343,22 @@ final class PDFiumDocument: ReadableDocument {
     /// to the left of where they're drawn, outside their block; the block's frame is right sideways. Boxes that
     /// fall left of it are moved back to its left edge. Not when the frame's left edge is the scroller's (a page
     /// zoomed in and scrolled sideways): the frame is clipped there, and text left of it is only out of view.
-    private func inside(_ block: AXUIElement, _ boxes: [CGRect]) -> [CGRect] { inside(block, boxes.map(Optional.some)).compactMap { $0 } }
+    private func inside(_ block: AXUIElement, _ boxes: [CGRect]) -> [CGRect] {
+        guard let shift = shift(into: block, boxes) else { return boxes }
+        return boxes.map(shift)
+    }
 
-    private func inside(_ block: AXUIElement, _ boxes: [CGRect?]) -> [CGRect?] {
-        guard let frame = AX.frame(block), frame.width > 0 else { return boxes }
-        if let visible = visibleRect(), frame.minX <= visible.minX + 1 { return boxes }
+    private func inside(_ block: AXUIElement, _ boxes: [WordBox?]) -> [WordBox?] {
+        guard let shift = shift(into: block, boxes.flatMap { $0?.rects ?? [] }) else { return boxes }
+        return boxes.map { b in b.map { WordBox(parts: $0.parts.map { WordBox.Part(rect: shift($0.rect), letters: $0.letters) }) } }
+    }
+
+    private func shift(into block: AXUIElement, _ boxes: [CGRect]) -> ((CGRect) -> CGRect)? {
+        guard let frame = AX.frame(block), frame.width > 0 else { return nil }
+        if let visible = visibleRect(), frame.minX <= visible.minX + 1 { return nil }
         let misses = { (r: CGRect) in r.maxX <= frame.minX }
-        guard let left = boxes.compactMap({ $0 }).filter(misses).map(\.minX).min() else { return boxes }
-        return boxes.map { b in b.map { misses($0) ? $0.offsetBy(dx: frame.minX - left, dy: 0) : $0 } }
+        guard let left = boxes.filter(misses).map(\.minX).min() else { return nil }
+        return { misses($0) ? $0.offsetBy(dx: frame.minX - left, dy: 0) : $0 }
     }
 
     func linesDiagnosis(of sentence: Sentence) -> String {
