@@ -23,6 +23,9 @@
 #   # start: <text>   start reading at the first sentence containing <text>, as if the user pointed there
 #   # flags: <flags>  extra --extract flags the page needs (rerender.html: --slow)
 #   # pending: <engines>  engines (WebKit, Chromium, Preview) not expected to pass yet: their result is shown, marked PENDING, and never fails
+#   # also: <engines>  run in these engines too: Browser (the Electron host with --browser, a Chromium browser before
+#                      its screen-reader pulse: block highlights) and Pulsed (that host pulsed into screen-reader mode first,
+#                      as Unread pulses a browser: text positions)
 #   # boxes: <min>-<max>  every word has a box, every word and line box (pass --word-boxes --lines) is min to max px tall
 #                         (the glyph band: a box reaching up through the leading fails), and no word's box touches the
 #                         one before it on its line (a box that takes in the space before its word fails) (leading.html)
@@ -33,13 +36,15 @@ EXTRA=(); RAW=
 while (( $# )); do if [[ "$1" == --raw ]]; then RAW="$2"; shift 2; else EXTRA+=("$1"); shift; fi; done
 CORPUS=0; [[ "$PAGE" == *fixtures/corpus/* ]] && CORPUS=1
 (( CORPUS )) && EXTRA+=(--limit 5000) # whole articles; a flag given above comes first and wins
-ELECTRON=fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
+ELECTRON=${ELECTRON:-fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron}
 
 case "$PAGE" in
     *.txt | *.rtf) ENGINES=(Native) ;;
     *.pdf) ENGINES=(WebKit Chromium Preview) ;;
     *) ENGINES=(WebKit Chromium) ;;
 esac
+EXPECTED="${PAGE%.*}.expected.txt"
+[[ -f "$EXPECTED" ]] && read -ra ALSO <<<"$(sed -n 's/^# also: //p' "$EXPECTED")" && ENGINES+=(${ALSO[@]+"${ALSO[@]}"})
 host() { # name: build the Swift host if it's missing or older than its source
     [[ -x build/fixture-host-$1 && build/fixture-host-$1 -nt fixtures/hosts/$1/main.swift ]] || {
         mkdir -p build && swiftc -O fixtures/hosts/$1/main.swift -o build/fixture-host-$1; }
@@ -52,7 +57,6 @@ if [[ ${ENGINES[0]} == Native ]]; then host native; else
 fi
 [[ -x .build/release/Unread ]] || scripts/build.sh
 
-EXPECTED="${PAGE%.*}.expected.txt"
 PENDING=" "
 if [[ -f "$EXPECTED" ]]; then
     START=$(sed -n 's/^# start: //p' "$EXPECTED")
@@ -73,6 +77,7 @@ launch() { # engine: start its host on the page, logging to $OUT/<engine>.log
         # Shells inside Electron apps (VS Code, T3 Code…) export ELECTRON_RUN_AS_NODE, which would run Electron as plain Node.
         # The binary is launched directly (not through node_modules/.bin) so $! is the window's process.
         Chromium) exec env -u ELECTRON_RUN_AS_NODE "$ELECTRON" fixtures/hosts/electron --hidden --profile "$OUT/profile" "$PAGE" ;;
+        Browser | Pulsed) exec env -u ELECTRON_RUN_AS_NODE "$ELECTRON" fixtures/hosts/electron --hidden --browser --profile "$OUT/profile-$1" "$PAGE" ;;
         Native | Preview) exec build/fixture-host-native --hidden "$PAGE" ;;
     esac >"$OUT/$1.log" 2>&1 &
     HOSTS+=($!)
@@ -89,7 +94,7 @@ check() { # output file, engine
 compare() { # output file, engine
     (( CORPUS )) && { python3 scripts/score.py page "$EXPECTED" "$2=$1"; return 0; }
     local got; got=$(sed -nE 's/^  [0-9]+\. (\([^)]*\)|no bounds)  //p' "$1")
-    local want; want=$(grep -vE '^# (start|flags|pending|boxes): ' "$EXPECTED")
+    local want; want=$(grep -vE '^# (start|flags|pending|boxes|also): ' "$EXPECTED")
     if [[ "$got" == "$want" ]]; then echo "   text: PASS"; else
         echo "   text: FAIL"; { diff <(echo "$want") <(echo "$got") || true; } | sed "s/^/     /"; return 1; fi
     local missing; missing=$(grep -c "^  [0-9]*\. no bounds" "$1" || true)
@@ -107,6 +112,11 @@ compare() { # output file, engine
 }
 
 extract() { # name, pid, host log
+    # Unread pulses only Chromium browsers; --pulse-electron treats the host as one. The mode comes on ~2.05 s later.
+    if [[ $1 == Pulsed ]]; then
+        .build/release/Unread --extract --pid "$2" --from-start --wait 20 --limit 1 --pulse-electron >"$OUT/$1.pulse" 2>&1 || true
+        sleep 2.5
+    fi
     # --wait: Chromium builds its tree only after the first query switches it on.
     if ! .build/release/Unread --extract --pid "$2" --from-start --wait 20 ${EXTRA[@]+"${EXTRA[@]}"} >"$OUT/$1" 2>&1 \
         || grep -q "^0 sentences" "$OUT/$1"; then
@@ -114,7 +124,12 @@ extract() { # name, pid, host log
         echo "== $1: nothing readable"; cat "$OUT/$1"; echo "   host log:"; sed 's/^/     /' "$3"
         pending "$1" && { echo "   PENDING: not expected to pass yet"; return 0; }; return 1; fi
     [[ -n "$RAW" ]] && cp "$OUT/$1" "$RAW/$(basename "$PAGE" .html).$1.txt"
-    echo "== $1"; tail -n +2 "$OUT/$1"; check "$OUT/$1" "$1"
+    echo "== $1"; tail -n +2 "$OUT/$1"
+    local blocks=0; grep -q "gives no text positions" "$OUT/$1" && blocks=1
+    if [[ $1 == Browser ]] && (( ! blocks )); then echo "   mode: FAIL (text positions: the block fallback went untested)"; return 1; fi
+    if [[ $1 == Pulsed ]] && (( blocks )); then
+        echo "   mode: FAIL (no text positions after the pulse)"; sed 's/^/     /' "$OUT/$1.pulse"; return 1; fi
+    check "$OUT/$1" "$1"
 }
 
 loaded() { # host log: wait up to 10 s for the host to say its page is up

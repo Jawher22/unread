@@ -1,3 +1,4 @@
+# also: Pulsed
 # flags: --word-boxes --lines
 # boxes: 20-25
 The ferry left the harbour an hour before dawn, with the lamps still lit along the quay and the gulls asleep on the posts.

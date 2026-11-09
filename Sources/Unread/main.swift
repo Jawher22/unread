@@ -15,6 +15,8 @@ if !devMode, isatty(STDOUT_FILENO) == 0, Bundle.main.bundleIdentifier != nil {
     _ = freopen(log, "a", stderr)
     print("[unread] --- launched \(Date())")
 }
+// --extract, --simulate, --at: pulse Electron into Chromium's screen-reader mode as a browser would be (the fixture host's --browser mode).
+AX.pulsesElectron = args.contains("--pulse-electron")
 
 if args.contains("--stats") {
     LatencyLog.printStats()
