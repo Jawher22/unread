@@ -161,7 +161,9 @@ enum GlyphBand {
     /// installed (a web font, a book's) is taken as 1.15 em, about what text faces measure.
     static func height(font name: String?, size: CGFloat) -> CGFloat {
         guard size > 0 else { return 0 }
-        if let name, let font = NSFont(name: name, size: size) { return (font.ascender).rounded() + (-font.descender).rounded() }
+        // The system UI font comes as ".SFNS-Regular"; asked for by that name, CoreText hands back Times New Roman.
+        let system = name?.hasPrefix(".") == true ? NSFont.systemFont(ofSize: size, weight: name!.contains("Bold") ? .bold : .regular) : nil
+        if let font = system ?? name.flatMap({ NSFont(name: $0, size: size) }) { return (font.ascender).rounded() + (-font.descender).rounded() }
         return (size * 1.15).rounded()
     }
 
