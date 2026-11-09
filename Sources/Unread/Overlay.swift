@@ -18,7 +18,12 @@ final class Overlay {
     /// The reading session moves the word mark, once per frame, before drawing.
     private var frameHandler: (owner: ObjectIdentifier, tick: (CFTimeInterval) -> Void)?
 
-    init() {
+    /// False in dev modes (`--simulate` without `--show-highlight`): the panels are fully transparent, so a test
+    /// run never draws on the user's screen, while everything behind them (layers, frame ticks, the debug log) runs as usual.
+    private let visible: Bool
+
+    init(visible: Bool = true) {
+        self.visible = visible
         rebuild()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.rebuild() }
@@ -34,6 +39,7 @@ final class Overlay {
             panel.backgroundColor = .clear
             panel.hasShadow = false
             panel.ignoresMouseEvents = true
+            panel.alphaValue = visible ? 1 : 0
             // On one Space, the one it was made on: swiping to another desktop slides the highlight away with
             // the page it's on, instead of leaving it over the new one. `claimActiveSpace` moves it where a hold starts.
             panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
