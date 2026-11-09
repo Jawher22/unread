@@ -449,15 +449,16 @@ final class BooksDocument: ReadableDocument {
 
     /// Turn to the page the sentence is on: right if it lies past the view's right edge, left if
     /// past its left edge. Geometry, not reading order: the same in a right-to-left book.
-    func scrollIntoView(_ sentence: Sentence) {
-        guard let r = sentence.range as? SentenceRange, let viewport = visibleRect() else { return }
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
+        guard let r = sentence.range as? SentenceRange, let viewport = visibleRect() else { return false }
         let flow = r.start.flow
-        guard let line = r.block.lines.first(where: { $0.endIndex > r.start.index }), let box = flow.box(of: line), !isVisible(box, in: viewport) else { return }
+        guard let line = r.block.lines.first(where: { $0.endIndex > r.start.index }), let box = flow.box(of: line), !isVisible(box, in: viewport) else { return false }
         let forward: Bool
-        if box.minX >= viewport.maxX { forward = true } else if box.maxX <= viewport.minX { forward = false } else { return }
+        if box.minX >= viewport.maxX { forward = true } else if box.maxX <= viewport.minX { forward = false } else { return false }
         let before = pageState(of: flow.area)
-        guard turn(forward: forward, in: flow) else { return }
+        guard turn(forward: forward, in: flow) else { return false }
         _ = waitForChange(from: before, in: flow.area)
+        return true
     }
 
     /// `AXScrollRightByPage` / `AXScrollLeftByPage` on a visible leaf turns the spread: no focus, no

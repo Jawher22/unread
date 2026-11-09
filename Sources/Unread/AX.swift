@@ -16,6 +16,10 @@ final class AXWorker: @unchecked Sendable {
     }
 
     func async(_ work: @escaping () -> Void) { queue.async(execute: work) }
+
+    /// Inside a hold's speculation (`PrimedSentence`): a document mustn't wait there for content still loading,
+    /// since the hold's lookups queue behind it on this queue. AXWorker only.
+    nonisolated(unsafe) static var speculating = false
 }
 
 /// An AXUIElement usable as a dictionary key (CFEqual / CFHash identity).
@@ -34,13 +38,19 @@ enum AX {
         return e
     }()
 
+    /// Accessibility calls made, each a message to the app (`--at` counts what a lookup costs). Not synchronized:
+    /// AXWorker's count, or a dev mode's.
+    nonisolated(unsafe) static var calls = 0
+
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
         var v: AnyObject?
+        calls &+= 1
         return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
     }
 
     static func param(_ e: AXUIElement, _ name: String, _ p: AnyObject) -> AnyObject? {
         var v: AnyObject?
+        calls &+= 1
         return AXUIElementCopyParameterizedAttributeValue(e, name as CFString, p, &v) == .success ? v : nil
     }
 
@@ -66,19 +76,31 @@ enum AX {
         return e
     }
 
+    /// `v` as an `AXValue`, checked by its type rather than force-cast.
+    private static func axValue(_ v: AnyObject?) -> AXValue? {
+        guard let v, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        return unsafeDowncast(v, to: AXValue.self)
+    }
+
     static func frame(_ e: AXUIElement) -> CGRect? {
-        guard let p = attr(e, kAXPositionAttribute), let s = attr(e, kAXSizeAttribute) else { return nil }
+        guard let p = axValue(attr(e, kAXPositionAttribute)), let s = axValue(attr(e, kAXSizeAttribute)) else { return nil }
         var o = CGPoint.zero, z = CGSize.zero
-        AXValueGetValue(p as! AXValue, .cgPoint, &o)
-        AXValueGetValue(s as! AXValue, .cgSize, &z)
+        guard AXValueGetValue(p, .cgPoint, &o), AXValueGetValue(s, .cgSize, &z) else { return nil }
         return CGRect(origin: o, size: z)
     }
 
     static func rect(_ v: AnyObject?) -> CGRect? {
-        guard let v, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        guard let v = axValue(v) else { return nil }
         var r = CGRect.zero
-        guard AXValueGetValue(v as! AXValue, .cgRect, &r), r.width > 0, r.height > 0 else { return nil }
+        guard AXValueGetValue(v, .cgRect, &r), r.width > 0, r.height > 0 else { return nil }
         return r
+    }
+
+    static func range(_ v: AnyObject?) -> NSRange? {
+        guard let v = axValue(v) else { return nil }
+        var r = CFRange()
+        guard AXValueGetValue(v, .cfRange, &r), r.location >= 0, r.length >= 0 else { return nil }
+        return NSRange(location: r.location, length: r.length)
     }
 
     static func pointValue(_ p: CGPoint) -> AXValue {

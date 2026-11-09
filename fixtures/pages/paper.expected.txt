@@ -1,4 +1,3 @@
-# pending: WebKit Chromium
 Listening to Documents Without Selecting Them
 Abstract
 We introduce a reading tool that speaks the paragraph under the pointer, with no selection and no copying.

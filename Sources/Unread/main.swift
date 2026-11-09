@@ -42,6 +42,11 @@ if args.contains("--speakable-check") {
     exit(Speakable.check() ? 0 : 1)
 }
 
+if args.contains("--pdf-check") {
+    // Silent: how Chromium's PDF viewer is read (#85), from tables of blocks. Exit 1 on failure.
+    exit(PDFLayout.check() ? 0 : 1)
+}
+
 if args.contains("--stretch-check") {
     // Silent: the narrator's time stretch at every menu speed. Exit 1 on failure.
     exit(stretchCheck() ? 0 : 1)
@@ -253,14 +258,37 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
             let text = ((AX.attr(e, kAXValueAttribute) as? String) ?? "").prefix(60).debugDescription
             return "\(AX.role(e) ?? "?") \(AX.frame(e).map { "\($0)" } ?? "-") \(text)"
         }
-        let hit = AX.element(at: point)
-        print("hit:  \(describe(hit))")
-        if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
-        // --pid N: use that app's window even if it isn't on top (fixture hosts).
+        // --pid N: use that app's window even if it isn't on top (fixture hosts). The screen's hit test is then
+        // whatever lies under a hidden host, so it isn't shown.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
-        guard let doc = pinned.map({ DocumentFinder.document(inApp: $0) }) ?? DocumentFinder.document(at: point) else { print("no document"); exit(1) }
+        if pinned == nil {
+            let hit = AX.element(at: point)
+            print("hit:  \(describe(hit))")
+            if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
+        }
+        // --wait S: keep looking for up to S seconds (a host that just launched; Chromium building its tree, PDFium its pages).
+        let wait = args.firstIndex(of: "--wait").flatMap { args.indices.contains($0 + 1) ? TimeInterval(args[$0 + 1]) : nil } ?? 0
+        let t = Date()
+        func lookup() -> ReadableDocument? { pinned.map({ DocumentFinder.document(inApp: $0) }) ?? DocumentFinder.document(at: point) }
+        var found = lookup()
+        while found?.paragraph(at: point) == nil, Date().timeIntervalSince(t) < wait {
+            Thread.sleep(forTimeInterval: 0.1)
+            found = lookup()
+        }
+        guard let doc = found else { print("no document"); exit(1) }
+        // --after S: look again S seconds after the document came up (PDFium builds a long PDF's pages for a while).
+        if let after = args.firstIndex(of: "--after").flatMap({ args.indices.contains($0 + 1) ? TimeInterval(args[$0 + 1]) : nil }) {
+            Thread.sleep(forTimeInterval: after)
+        }
+        // What the hold pays for each of its lookups (30 a second): once on the paragraph, once just off it.
+        func cost(_ p: CGPoint) -> String {
+            let calls = AX.calls, start = Date()
+            for _ in 0..<10 { _ = doc.paragraph(at: p) }
+            return String(format: "%.1f ms, %d AX calls", Date().timeIntervalSince(start) * 100, (AX.calls - calls) / 10)
+        }
         guard let para = doc.paragraph(at: point) else { print("no paragraph"); exit(1) }
         print("paragraph box: \(para.bounds)")
+        print("a lookup: \(cost(point)) on it, \(cost(CGPoint(x: point.x, y: para.bounds.minY - 1))) just above it")
         let scope = doc.scope(from: para.start)
         // Walk on like a reading session would, so a missing highlight on
         // later sentences shows up here too.
@@ -314,13 +342,20 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         }
         let point = CGPoint(x: xy[0], y: xy[1])
         // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows);
-        // with --pointed, from where a hold at the point would start in it (a window on another Space can't be hit-tested).
+        // with --pointed, from where a hold at the point would start in it (a window on another Space can't be hit-tested);
+        // with --from-text "…", from the first sentence holding it.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
         let found: (ReadableDocument, AnyObject)?
         if let pinned, args.contains("--pointed") {
             found = DocumentFinder.document(inApp: pinned).flatMap { d in d.paragraph(at: point).map { print("[simulate] pointed at \(point): \($0.bounds)"); return (d, $0.start) } }
         } else if let pinned {
-            found = DocumentFinder.document(inApp: pinned).flatMap { d in d.documentStart().map { (d, $0) } }
+            found = DocumentFinder.document(inApp: pinned).flatMap { d in
+                var pos = d.documentStart()
+                if let needle = value(after: "--from-text") {
+                    while let p = pos, let s = d.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+                }
+                return pos.map { (d, $0) }
+            }
         } else {
             found = DocumentFinder.document(at: point).flatMap { d in d.paragraph(at: point).map { (d, $0.start) } }
         }
@@ -482,7 +517,10 @@ if args.contains("--extract") {
                 if doc.lines(of: s).isEmpty, let fresh = doc.relocate(s) { s = fresh }
             }
             last = s
+            // As a reading does: Preview measures only the PDF pages in view, so one out of view is scrolled to.
+            if !doc.measuresOffScreen, doc.lines(of: s).isEmpty { doc.scrollIntoView(s) }
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
+            if b == "no bounds" { let why = doc.linesDiagnosis(of: s); if !why.isEmpty { print("     no bounds: \(why)") } }
             print("  \(n). \(b)  \(s.cue.map { "♪ \($0)" } ?? (fromStart ? s.text : String(s.text.prefix(90))))")
             if args.contains("--word-boxes") {
                 // Each display word with its box (#20); "?" where it has none.
