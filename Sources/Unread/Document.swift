@@ -47,6 +47,20 @@ protocol ReadableDocument: AnyObject {
     func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
     func scrollIntoView(_ sentence: Sentence)
+    /// Whether text out of view can be measured. When it can't (Preview's PDF pages), a sentence
+    /// without lines may only be out of view, and is scrolled to.
+    var measuresOffScreen: Bool { get }
+}
+
+extension ReadableDocument {
+    var measuresOffScreen: Bool { true }
+}
+
+extension CGRect {
+    /// The box around all of them; nil for none.
+    static func union(of rects: [CGRect]) -> CGRect? {
+        rects.dropFirst().reduce(rects.first) { $0?.union($1) }
+    }
 }
 
 /// The window an Accessibility element is in, as the window server knows it (private, but long stable).
@@ -87,10 +101,7 @@ extension ReadableDocument {
     }
 
     /// The union of the sentence's line boxes.
-    func bounds(of sentence: Sentence) -> CGRect? {
-        let l = lines(of: sentence)
-        return l.dropFirst().reduce(l.first) { $0?.union($1) }
-    }
+    func bounds(of sentence: Sentence) -> CGRect? { CGRect.union(of: lines(of: sentence)) }
 }
 
 /// Where a reading may go (#10): the article, or else the main area, it
@@ -186,8 +197,10 @@ enum SpeechText {
         return timestamp.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
     }
 
-    /// "[12]", "[38, 24, 15]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
-    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+(,\s*\d+)*|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
+    /// "[12]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
+    private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
+    /// "[38, 24, 15]": a paper's citation list. Only there: on a web page "returns [0, 1]" is text.
+    private static let citationList = try! NSRegularExpression(pattern: #"\[\d+(,\s*\d+)+\]"#)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
     /// Screen-reader-only link hints. Clipped to 1 px, but their text frame is
     /// full size in both engines, so geometry can't tell; the idiom can.
@@ -205,10 +218,10 @@ enum SpeechText {
     }
 
     /// Make a raw on-screen string speakable, or nil if there's nothing to say.
-    static func clean(_ raw: String) -> String? {
+    static func clean(_ raw: String, listCitations: Bool = false) -> String? {
         var s = raw.replacingOccurrences(of: "\u{00AD}", with: "") // soft hyphens
             .replacingOccurrences(of: "\u{FFFC}", with: " ") // embedded objects (images, icons)
-        for re in [citation, url, linkHint] {
+        for re in [citation, url, linkHint] + (listCitations ? [citationList] : []) {
             s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
         }
         s = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
@@ -319,8 +332,7 @@ final class WebDocument: ReadableDocument {
               let bounds = { () -> CGRect? in
                   probeTextGeometry(near: para)
                   if noTextGeometry {
-                      let frames = elementFrames(of: para)
-                      return frames.dropFirst().reduce(frames.first) { acc, f in acc?.union(f) }
+                      return CGRect.union(of: elementFrames(of: para))
                   }
                   return AX.rect(p("AXBoundsForTextMarkerRange", para))
               }()
@@ -1535,6 +1547,15 @@ final class NativeRange: NSObject {
         self.range = range
         self.version = version
     }
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let o = object as? NativeRange else { return false }
+        return range == o.range && version == o.version
+    }
+    override var hash: Int {
+        var h = Hasher()
+        h.combine(range.location); h.combine(range.length); h.combine(version)
+        return h.finalize()
+    }
 }
 
 final class NativeDocument: ReadableDocument {
@@ -1591,10 +1612,7 @@ final class NativeDocument: ReadableDocument {
     private func position(_ i: Int) -> NativeRange { handle(NSRange(location: i, length: 0)) }
 
     private func index(at point: CGPoint) -> Int? {
-        guard let v = AX.param(element, kAXRangeForPositionParameterizedAttribute, AX.pointValue(point)) else { return nil }
-        var r = CFRange()
-        AXValueGetValue(v as! AXValue, .cfRange, &r)
-        return r.location
+        AX.range(AX.param(element, kAXRangeForPositionParameterizedAttribute, AX.pointValue(point)))?.location
     }
 
     private func bounds(_ range: NSRange) -> CGRect? {
@@ -1613,9 +1631,7 @@ final class NativeDocument: ReadableDocument {
 
     func firstVisible() -> AnyObject? {
         refreshIfEdited()
-        guard let v = AX.attr(element, kAXVisibleCharacterRangeAttribute) else { return position(0) }
-        var r = CFRange()
-        AXValueGetValue(v as! AXValue, .cfRange, &r)
+        guard let r = AX.range(AX.attr(element, kAXVisibleCharacterRangeAttribute)) else { return position(0) }
         let s = sentences.first { NSMaxRange($0) > r.location }
         return position(s?.location ?? r.location)
     }
@@ -1673,10 +1689,7 @@ final class NativeDocument: ReadableDocument {
     }
 
     private func range(ofLine line: Int) -> NSRange? {
-        guard let v = AX.param(element, kAXRangeForLineParameterizedAttribute, line as NSNumber) else { return nil }
-        var r = CFRange()
-        guard AXValueGetValue(v as! AXValue, .cfRange, &r) else { return nil }
-        return NSRange(location: r.location, length: r.length)
+        AX.range(AX.param(element, kAXRangeForLineParameterizedAttribute, line as NSNumber))
     }
 
     func visibleRect() -> CGRect? {

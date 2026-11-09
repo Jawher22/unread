@@ -107,6 +107,7 @@ final class AppController: NSObject {
         if !trusted { waitForAccessibility() }
         configureLoginItemOnFirstRun()
         loadNarrator()
+        Hyphens.preload() // the word list a PDF's line-end hyphens need (#86), read before the first hold
     }
 
     // MARK: Permissions

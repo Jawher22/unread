@@ -2,48 +2,66 @@ import AppKit
 import ApplicationServices
 import NaturalLanguage
 
-/// A place in a PDFKit document (#86): ranges in pages' strings, in reading
-/// order. A position is one empty range; a sentence that crosses a page break
-/// has a part on each page.
-final class PDFRange: NSObject {
-    struct Part { let page: Int; let range: NSRange }
-    let parts: [Part]
+/// A reading position in a PDFKit document (#86): a block, and how far into its unit's spoken
+/// text the reading has come. Two positions made for the same place are equal, so a steady
+/// aim is one aim (`App.steadyAim`) and the speculation fires.
+final class PDFPosition: NSObject {
+    let block: PDFPage.BlockID
+    /// Sentences of the block's unit that end after this offset in its spoken text are still to read.
+    let spoken: Int
     /// The start the user pointed at: its block is read whatever it is.
     let pointed: Bool
     /// A caption's start reached from its cue: don't cue it again.
     let afterCue: Bool
-    init(_ parts: [Part], pointed: Bool = false, afterCue: Bool = false) {
-        self.parts = parts
-        self.pointed = pointed
-        self.afterCue = afterCue
+    /// A detour: a sentence that crossed a page break skipped the blocks between its parts (a
+    /// table and its caption at the top of the next page). They're read from `block` up to
+    /// `until`, then the reading goes on at `then`.
+    let until: PDFPage.BlockID?
+    let then: PDFPosition?
+
+    init(block: PDFPage.BlockID, spoken: Int = 0, pointed: Bool = false, afterCue: Bool = false, until: PDFPage.BlockID? = nil, then: PDFPosition? = nil) {
+        self.block = block; self.spoken = spoken; self.pointed = pointed; self.afterCue = afterCue; self.until = until; self.then = then
     }
-    convenience init(page: Int, offset: Int, pointed: Bool = false, afterCue: Bool = false) {
-        self.init([Part(page: page, range: NSRange(location: offset, length: 0))], pointed: pointed, afterCue: afterCue)
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let o = object as? PDFPosition else { return false }
+        return block == o.block && spoken == o.spoken && pointed == o.pointed && afterCue == o.afterCue && until == o.until && then == o.then
     }
-    var start: Part { parts[0] }
-    var end: Part { parts[parts.count - 1] }
+    override var hash: Int {
+        var h = Hasher()
+        h.combine(block); h.combine(spoken); h.combine(pointed); h.combine(afterCue)
+        return h.finalize()
+    }
 }
 
-/// PDFKit's pages (Preview, Safari, WKWebView; #86). Every page is an `AXPage`
-/// from the start. Its text comes whole and in reading order from
-/// `AXAttributedStringForRange`, with a font per run, and that is all the page
-/// answers. The text has the page's furniture in it (running header, footer,
-/// page number, footnotes, figure labels), so each line is judged by its
-/// font: smaller than the body is furniture, bold is a heading, the rest is
-/// read. Line ends are spaces, except at a link, a column end or an odd
-/// block, where they are "\n", so lines are joined into a block until one
-/// ends like a sentence; a block that doesn't ends carries on into the next,
-/// across a column or a page. A line-end hyphen stays when the two halves
-/// aren't one word ("task-specific"). Boxes come from the `AXStaticText`
-/// leaves under the page, which measure sub-ranges per line but hold the
-/// page's text with "\n" at every line end, so each leaf is matched to the
-/// page string ignoring whitespace.
+/// A sentence's place in a PDFKit document: ranges in pages' strings, one per run of text (a
+/// sentence can cross a page break, or skip a caption that sits inside it).
+final class PDFRange: NSObject {
+    struct Part { let page: Int; let range: NSRange }
+    let parts: [Part]
+    init(_ parts: [Part]) { self.parts = parts }
+}
+
+/// PDFKit's pages (Preview, Safari, WKWebView; #86). Every page is an `AXPage` from the start;
+/// `PDFPage` parses one into blocks. A block that doesn't end like a sentence carries on into
+/// the next paragraph, across a column or a page, past a caption in between (read after the
+/// sentence that crossed it). Line-end hyphens are resolved by `Hyphens`. Boxes come from the
+/// `AXStaticText` leaves under the page, which measure sub-ranges per line but hold the
+/// page's text with "\n" at every line end, so each leaf is matched to the page string
+/// ignoring whitespace.
 final class PDFKitDocument: ReadableDocument {
+    typealias BlockID = PDFPage.BlockID
+    private typealias Block = PDFPage.Block
+
     /// The pages' container (`AXSharedDocumentContainer` in Preview, the plugin group in WebKit).
     let element: AXUIElement
     private let pageElements: [AXUIElement]
-    private var pages: [Int: Page] = [:]
-    private var leaves: [Int: [Leaf]] = [:]
+    private var strings: [Int: NSAttributedString?] = [:]
+    /// Pages parsed, their reference list not yet known (`referencesOpen` looks back through these).
+    private var parsed: [Int: PDFPage] = [:]
+    /// Pages parsed and placed in or out of the reference list.
+    private var pages: [Int: PDFPage] = [:]
+    private var leafIndex: [Int: LeafIndex] = [:]
     private var lineRangesMemo: [AXKey: [NSRange]] = [:]
     private var units: [BlockID: Unit] = [:]
     /// The user pointed into the reference list: read it.
@@ -64,204 +82,70 @@ final class PDFKitDocument: ReadableDocument {
 
     // MARK: Pages
 
-    private struct Run {
-        let range: NSRange
-        let size: CGFloat
-        let bold: Bool
+    private func string(of i: Int) -> NSAttributedString? {
+        if let s = strings[i] { return s }
+        let e = pageElements[i]
+        let count = (AX.attr(e, kAXNumberOfCharactersAttribute) as? NSNumber)?.intValue ?? 0
+        let s = count > 0 ? AX.param(e, "AXAttributedStringForRange", AX.rangeValue(NSRange(location: 0, length: count))) as? NSAttributedString : nil
+        strings[i] = s
+        return s
     }
 
-    private struct Line {
-        let range: NSRange // in the page's text, without the "\n"
-        let size: CGFloat
-        let bold: Bool
-        let small: Bool // smaller than the body text: furniture
-        /// Bold or larger than the body text: a heading, unless it says otherwise.
-        let headingLike: Bool
-        /// Superscripts inside the line (footnote markers): dropped.
-        let dropped: [NSRange]
-        let text: String
-        /// A page number.
-        var isNumber: Bool { text.allSatisfy { $0.isNumber || $0.isWhitespace } }
-    }
+    /// The first pages, which stand for the document: its body size and the words it writes.
+    private var sample: [NSAttributedString] { (0..<min(3, pageElements.count)).compactMap { string(of: $0) } }
 
-    enum Kind: Equatable { case heading, paragraph, caption(String), furniture }
+    /// The size most of the document's characters are set in, from its first pages: a page
+    /// that is one figure has more label text than body text, so its own count would lie.
+    private lazy var bodySize: CGFloat = {
+        var histogram: [CGFloat: Int] = [:]
+        for s in sample { for (size, n) in PDFPage.sizeHistogram(of: s) { histogram[size, default: 0] += n } }
+        return PDFPage.dominant(histogram) ?? 0
+    }()
 
-    struct BlockID: Hashable { let page: Int; let index: Int }
+    /// The sizes headings come in, from the first pages: a figure's title on a later page is set at another.
+    private lazy var headingSizes: Set<CGFloat> = {
+        var sizes: Set<CGFloat> = []
+        for s in sample { sizes.formUnion(PDFPage.headingSizes(of: s, body: bodySize)) }
+        return sizes
+    }()
 
-    /// One or more lines of one kind that read as a unit: a heading, a paragraph (or the
-    /// part of one in this column or page), a caption, or furniture.
-    private final class Block {
-        let id: BlockID
-        let range: NSRange
-        let kind: Kind
-        let small: Bool
-        let lines: [Line]
-        var inReferences = false
-        init(id: BlockID, range: NSRange, kind: Kind, small: Bool, lines: [Line]) {
-            self.id = id; self.range = range; self.kind = kind; self.small = small; self.lines = lines
-        }
-        var endsLikeSentence: Bool { ReadingSession.endsLikeSentence(lines.last?.text ?? "") }
-        var isReferencesHeading: Bool {
-            kind == .heading && PDFKitDocument.referencesHeading.firstMatch(in: lines[0].text, range: NSRange(lines[0].text.startIndex..., in: lines[0].text)) != nil
-        }
-    }
+    private lazy var vocabulary: Hyphens.Vocabulary = {
+        var v = Hyphens.Vocabulary()
+        for s in sample { v.add(s.string) }
+        return v
+    }()
 
-    private final class Page {
-        let text: NSString
-        let blocks: [Block]
-        /// Whether the reference list runs on past this page's end.
-        let referencesOpenAtEnd: Bool
-        init(text: NSString, blocks: [Block], referencesOpenAtEnd: Bool) {
-            self.text = text; self.blocks = blocks; self.referencesOpenAtEnd = referencesOpenAtEnd
-        }
-    }
-
-    private static let captionStart = try! NSRegularExpression(pattern: #"^\s*(Figure|Fig\.|Table|Tab\.)\s*\d+[.:]"#)
-    private static let footnoteStart = try! NSRegularExpression(pattern: #"^\s*([∗*†‡§¶]|\d{1,2}(?=\p{Lu}))"#)
-    private static let referencesHeading = try! NSRegularExpression(pattern: #"^\s*(\d+(\.\d+)*\.?\s+)?(references|bibliography|works cited)\s*$"#, options: .caseInsensitive)
-    private static let sentenceEnd = try! NSRegularExpression(pattern: #"[\p{L}\p{N})\]"'”’][.!?…][\s"'”’)\]]"#)
-
-    /// Earlier pages first: the reference list may start on one and run on.
-    private func page(_ i: Int) -> Page? {
+    private func parse(_ i: Int) -> PDFPage? {
         guard pageElements.indices.contains(i) else { return nil }
-        if let p = pages[i] { return p }
-        var open = false
-        if i > 0, let before = page(i - 1) { open = before.referencesOpenAtEnd }
-        let p = build(i, referencesOpen: open)
-        pages[i] = p
+        if let p = parsed[i] { return p }
+        let p = PDFPage(index: i, attributed: string(of: i) ?? NSAttributedString(), body: bodySize, headingSizes: headingSizes)
+        if p.mayBeOutOfOrder { p.reorder { [self] line in frame(of: line, on: i) } }
+        if p.hasFigure { p.markLabelStacks(wraps: index(of: i).wraps) }
+        parsed[i] = p
         return p
     }
 
-    private func build(_ index: Int, referencesOpen: Bool) -> Page {
-        let e = pageElements[index]
-        let count = (AX.attr(e, kAXNumberOfCharactersAttribute) as? NSNumber)?.intValue ?? 0
-        guard count > 0, let attributed = AX.param(e, "AXAttributedStringForRange", AX.rangeValue(NSRange(location: 0, length: count))) as? NSAttributedString else {
-            return Page(text: "", blocks: [], referencesOpenAtEnd: referencesOpen)
-        }
-        let text = attributed.string as NSString
-        var runs: [Run] = []
-        attributed.enumerateAttributes(in: NSRange(location: 0, length: attributed.length)) { attrs, range, _ in
-            let font = attrs[NSAttributedString.Key("AXFont")] as? [String: Any]
-            let size = (font?["AXFontSize"] as? NSNumber)?.doubleValue ?? (font?["AXFontSize"] as? String).flatMap(Double.init) ?? 0
-            let name = ((font?["AXFontName"] as? String) ?? "") + " " + ((font?["AXVisibleName"] as? String) ?? "")
-            runs.append(Run(range: range, size: CGFloat(size), bold: name.localizedCaseInsensitiveContains("bold") || name.localizedCaseInsensitiveContains("black") || name.localizedCaseInsensitiveContains("heavy")))
-        }
-        // The body size: the one most characters are set in.
-        var weight: [CGFloat: Int] = [:]
-        for r in runs where r.size > 0 {
-            let s = text.substring(with: r.range)
-            weight[(r.size * 2).rounded() / 2, default: 0] += s.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
-        }
-        let body = weight.max { $0.value < $1.value || ($0.value == $1.value && $0.key < $1.key) }?.key ?? 0
-
-        var lines: [Line] = []
-        var at = 0
-        while at < text.length {
-            let nl = text.range(of: "\n", range: NSRange(location: at, length: text.length - at))
-            let end = nl.location == NSNotFound ? text.length : nl.location
-            let range = NSRange(location: at, length: end - at)
-            at = end + 1
-            let s = text.substring(with: range)
-            guard s.unicodeScalars.contains(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }) else { continue }
-            let inLine = runs.compactMap { r -> (Run, NSRange)? in
-                let x = NSIntersectionRange(r.range, range)
-                return x.length > 0 ? (r, x) : nil
-            }
-            var sizeWeight: [CGFloat: Int] = [:], boldChars = 0, chars = 0
-            for (r, x) in inLine {
-                let n = text.substring(with: x).unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
-                sizeWeight[(r.size * 2).rounded() / 2, default: 0] += n
-                chars += n
-                if r.bold { boldChars += n }
-            }
-            let size = sizeWeight.max { $0.value < $1.value || ($0.value == $1.value && $0.key < $1.key) }?.key ?? body
-            let dropped = inLine.filter { r, x in r.size < size - 1.5 && x.length <= 4 }.map(\.1)
-            let bold = chars > 0 && boldChars * 10 >= chars * 6
-            lines.append(Line(range: range, size: size, bold: bold, small: size < body - 1.5, headingLike: bold || size > body + 0.75, dropped: dropped, text: s))
-        }
-
-        var groups: [[Line]] = []
-        var group: [Line] = []
-        func flush() {
-            if !group.isEmpty { groups.append(group) }
-            group = []
-        }
-        for line in lines {
-            if let prev = group.last {
-                let same = prev.small == line.small && prev.bold == line.bold && abs(prev.size - line.size) <= 0.6
-                var joins = same && !ReadingSession.endsLikeSentence(prev.text) && !Self.startsLikeCaption(line.text) && !prev.isNumber && !line.isNumber
-                // Heading lines stand alone, unless one wraps onto the next ("…Transformers for" / "Language Understanding").
-                if joins, line.headingLike, !Self.wraps(prev.text, onto: line.text) { joins = false }
-                if !joins { flush() }
-            }
-            group.append(line)
-        }
-        flush()
-        var blocks: [Block] = []
-        for (i, g) in groups.enumerated() {
-            let last = groups[(i + 1)...].allSatisfy { $0[0].isNumber }
-            blocks.append(Block(id: BlockID(page: index, index: i), range: NSRange(location: g[0].range.location, length: NSMaxRange(g[g.count - 1].range) - g[0].range.location),
-                                kind: classify(g, body: body, last: last), small: g[0].small, lines: g))
-        }
-        var open = referencesOpen
-        for b in blocks {
-            if b.kind == .heading { open = b.isReferencesHeading }
-            b.inReferences = open
-        }
+    private func page(_ i: Int) -> PDFPage? {
+        if let p = pages[i] { return p }
+        guard let p = parse(i) else { return nil }
+        p.resolveReferences(openAtStart: referencesOpen(before: i))
+        pages[i] = p
         if debugWalk {
-            for b in blocks { print("[pdf] page \(index + 1) block \(b.id.index) \(b.kind)\(b.inReferences ? " refs" : "") \(b.lines.count) lines: \(b.lines[0].text.prefix(50).debugDescription)") }
+            for b in p.blocks { print("[pdf] page \(i + 1) block \(b.id.index) \(b.kind)\(b.inReferences ? " refs" : "") \(b.lines.count) lines: \(b.lines.map { "\($0.size)\($0.bold ? "b" : "")\($0.small ? "s" : "") \($0.text.prefix(40).debugDescription)" }.joined(separator: " | "))") }
         }
-        return Page(text: text, blocks: blocks, referencesOpenAtEnd: open)
+        return p
     }
 
-    private static func startsLikeCaption(_ s: String) -> Bool {
-        captionStart.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
-    }
-
-    /// `last`: the block is the page's last, or only page numbers follow it (a footer).
-    private func classify(_ lines: [Line], body: CGFloat, last: Bool) -> Kind {
-        let text = lines.map(\.text).joined(separator: " ")
-        let words = text.split(whereSeparator: \.isWhitespace).count
-        if Self.startsLikeCaption(text) { return lines[0].size >= body - 2.5 ? .caption(text.hasPrefix("Tab") ? "table" : "figure") : .furniture }
-        if lines[0].small || lines[0].isNumber { return .furniture }
-        // An author grid (names, affiliations, emails), arXiv's stamp down the margin.
-        if text.contains("@") && !ReadingSession.endsLikeSentence(text) || text.hasPrefix("arXiv:") { return .furniture }
-        // A footnote ("3In all cases…", "∗Equal contribution.") or a footer, set a little smaller than the body.
-        if lines[0].size < body - 0.5, Self.footnoteStart.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil || (last && lines.count == 1) { return .furniture }
-        let headingLike = lines[0].headingLike
-        if headingLike, words <= 15, !ReadingSession.endsLikeSentence(text) { return .heading }
-        let ends = Self.sentenceEnd.firstMatch(in: text + " ", range: NSRange(location: 0, length: (text as NSString).length + 1)) != nil
-        if words >= 2, ends || ReadingSession.endsLikeSentence(text) { return .paragraph }
-        if headingLike, words <= 15 { return .heading }
-        return .furniture
-    }
-
-    /// A heading line that runs on: it ends in a connector, or the next line starts in lower case.
-    private static func wraps(_ prev: String, onto next: String) -> Bool {
-        if let first = next.first(where: { !$0.isWhitespace }), first.isLowercase { return true }
-        let words = prev.lowercased().split(whereSeparator: \.isWhitespace)
-        guard let lastWord = words.last else { return false }
-        if let c = lastWord.last, ":,-–".contains(c) { return true }
-        return ["a", "an", "the", "of", "for", "and", "or", "in", "on", "with", "to", "from", "by", "via", "at", "as", "into", "over", "under", "without", "between", "through", "toward", "towards", "versus", "vs."].contains(String(lastWord))
-    }
-
-    // MARK: Units: what a block (and the blocks it runs on into) says
-
-    /// One UTF-16 unit of the text to read, and where it is on the page.
-    struct Loc { let page: Int; let offset: Int }
-
-    /// A run of blocks read as one text: a paragraph that runs over a column
-    /// or page end, with its line ends, superscripts and line-end hyphens
-    /// resolved, cut into sentences.
-    private struct Unit {
-        let blocks: [BlockID]
-        let spoken: String
-        let locs: [Loc]
-        let sentences: [NSRange]
-    }
-
-    private func readable(_ b: Block) -> Bool {
-        b.kind != .furniture && (!b.inReferences || referencesReadable)
+    /// Whether the reference list runs into page `i`: the page before says if it's been placed
+    /// already (a reading walks in order), else the nearest earlier page with a heading, looking
+    /// back eight pages at most and only parsing them, so a hold on page 300 of a book doesn't
+    /// parse 299 pages first.
+    private func referencesOpen(before i: Int) -> Bool {
+        for j in stride(from: i - 1, through: max(0, i - 8), by: -1) {
+            if let p = pages[j] { return p.referencesAtEnd }
+            if let open = parse(j)?.referencesAfterLastHeading { return open }
+        }
+        return false
     }
 
     private func block(_ id: BlockID) -> Block? {
@@ -269,54 +153,86 @@ final class PDFKitDocument: ReadableDocument {
         return p.blocks[id.index]
     }
 
-    /// The readable block after `id`, on this page or the next ones.
-    private func nextReadable(after id: BlockID) -> Block? {
+    /// The block after `id` in page order, on this page or the next ones.
+    private func nextBlock(after id: BlockID) -> BlockID? {
         var page = id.page, index = id.index + 1
         while let p = self.page(page) {
-            while index < p.blocks.count {
-                if readable(p.blocks[index]) { return p.blocks[index] }
-                index += 1
-            }
+            if index < p.blocks.count { return BlockID(page: page, index: index) }
             page += 1; index = 0
         }
         return nil
     }
 
-    /// The readable block before `id`.
-    private func previousReadable(before id: BlockID) -> Block? {
+    private func previousBlock(before id: BlockID) -> BlockID? {
         var page = id.page, index = id.index - 1
         while page >= 0, let p = self.page(page) {
-            while index >= 0 {
-                if readable(p.blocks[index]) { return p.blocks[index] }
-                index -= 1
-            }
+            if index >= 0, index < p.blocks.count { return BlockID(page: page, index: index) }
             page -= 1
             if page >= 0, let q = self.page(page) { index = q.blocks.count - 1 }
         }
         return nil
     }
 
-    /// A paragraph (or a caption PDFKit ran a paragraph into) that doesn't end like a sentence
-    /// carries on into the next paragraph: across a column end or a page break.
+    private func readable(_ b: Block) -> Bool {
+        b.kind != .furniture && (!b.inReferences || referencesReadable)
+    }
+
+    // MARK: Units: what a block (and the blocks it runs on into) says
+
+    /// One UTF-16 unit of the text to read, and where it is.
+    private struct Loc { let block: BlockID; let offset: Int }
+
+    /// A run of blocks read as one text: a paragraph that runs over a column or page end, with
+    /// its line ends, footnote markers and line-end hyphens resolved, cut into sentences.
+    private struct Unit {
+        let blocks: [BlockID]
+        /// Readable blocks between members (a caption inside the paragraph), read after the sentence that crosses them.
+        let gaps: [BlockID]
+        let spoken: String
+        let locs: [Loc]
+        let sentences: [NSRange]
+        func spokenStart(of block: BlockID) -> Int { locs.firstIndex { $0.block == block } ?? 0 }
+        func block(at spoken: Int) -> BlockID { locs[min(max(spoken, 0), locs.count - 1)].block }
+    }
+
+    /// A paragraph that doesn't end like a sentence carries on into the next paragraph: across a
+    /// column end or a page break, and past a caption in between.
     private func unit(containing start: Block) -> Unit {
         if let u = units[start.id] { return u }
         func carriesOn(_ b: Block) -> Bool { b.kind != .heading && !b.endsLikeSentence }
-        var first = start
-        for _ in 0..<8 {
-            guard first.kind == .paragraph, let prev = previousReadable(before: first.id), carriesOn(prev) else { break }
-            first = prev
+        /// A paragraph the sentence can run into: not a list item, and not already another unit's.
+        func continues(_ b: Block) -> Bool { b.kind == .paragraph && !b.lines[0].isListItem && units[b.id] == nil }
+        var members = [start], gaps: [BlockID] = []
+        if start.kind == .paragraph, !start.lines[0].isListItem {
+            var first = start
+            for _ in 0..<8 {
+                guard let (prev, skipped) = neighbour(of: first.id, forward: false), continues(prev), carriesOn(prev) else { break }
+                first = prev; members.insert(prev, at: 0); gaps.insert(contentsOf: skipped, at: 0)
+            }
         }
-        var members = [first]
         for _ in 0..<8 {
-            guard let last = members.last, carriesOn(last), let next = nextReadable(after: last.id), next.kind == .paragraph else { break }
-            members.append(next)
+            guard let last = members.last, carriesOn(last), let (next, skipped) = neighbour(of: last.id, forward: true), continues(next) else { break }
+            members.append(next); gaps.append(contentsOf: skipped)
         }
-        let u = make(members)
+        let u = make(members, gaps: gaps)
         for m in members { units[m.id] = u }
         return u
     }
 
-    private func make(_ blocks: [Block]) -> Unit {
+    /// The nearest readable block that isn't a caption in one direction, and the captions skipped on the way.
+    private func neighbour(of id: BlockID, forward: Bool) -> (Block, [BlockID])? {
+        var skipped: [BlockID] = []
+        var cur = id
+        while let n = forward ? nextBlock(after: cur) : previousBlock(before: cur), let b = block(n) {
+            cur = n
+            guard readable(b) else { continue }
+            if case .caption = b.kind { skipped.append(n); continue }
+            return (b, forward ? skipped : skipped.reversed())
+        }
+        return nil
+    }
+
+    private func make(_ blocks: [Block], gaps: [BlockID]) -> Unit {
         var raw: [UInt16] = [], locs: [Loc] = []
         func append(_ u: UInt16, _ loc: Loc) {
             if u == 0x20, raw.last == 0x20 { return }
@@ -324,18 +240,21 @@ final class PDFKitDocument: ReadableDocument {
         }
         for b in blocks {
             guard let p = page(b.id.page) else { continue }
-            if !raw.isEmpty, raw.last != 0x20 { append(0x20, locs.last ?? Loc(page: b.id.page, offset: b.range.location)) }
+            if let last = locs.last, raw.last != 0x20 { append(0x20, last) }
             for line in b.lines {
                 for i in line.range.location..<NSMaxRange(line.range) {
-                    let loc = Loc(page: b.id.page, offset: i)
-                    if line.dropped.contains(where: { NSLocationInRange(i, $0) }) { append(0x20, loc); continue }
+                    let loc = Loc(block: b.id, offset: i)
+                    if line.markers.contains(where: { NSLocationInRange(i, $0) }) { append(0x20, loc); continue }
+                    if line.subscripts.contains(where: { $0.location == i }), let last = raw.last, Self.isLetter(last) || Self.isDigit(last) { append(0x20, loc) } // "BERT" + "BASE": two words
                     let u = p.text.character(at: i)
                     append(Self.isSpace(u) ? 0x20 : u, loc)
                 }
-                append(0x20, Loc(page: b.id.page, offset: NSMaxRange(line.range)))
+                // The line's end, as a space standing on its last character: never past the text.
+                append(0x20, Loc(block: b.id, offset: NSMaxRange(line.range) - 1))
             }
         }
-        // Line-end hyphens: "para- graph" is one word, "task- specific" keeps its hyphen.
+        let french = Self.isFrench(raw)
+        // Line-end hyphens: "para- graph" is one word, "task- specific" keeps its hyphen, "pre- and" stays apart.
         var out: [UInt16] = [], outLocs: [Loc] = []
         var i = 0
         while i < raw.count {
@@ -343,39 +262,57 @@ final class PDFKitDocument: ReadableDocument {
             if u == 0x2D, i > 0, Self.isLetter(raw[i - 1]), i + 1 < raw.count, raw[i + 1] == 0x20 {
                 var j = i + 1
                 while j < raw.count, raw[j] == 0x20 { j += 1 }
-                if j < raw.count, Self.isLowercaseLetter(raw[j]) {
+                // Only at a line end (the leaf's text has "\n" there; a hyphen inside a line, "pre- and", is left as written).
+                if j < raw.count, Self.isLetter(raw[j]), lineEnds(after: locs[i]) != false {
                     var l = i - 1
                     while l > 0, Self.isLetter(raw[l - 1]) { l -= 1 }
                     var r = j
                     while r < raw.count, Self.isLetter(raw[r]) { r += 1 }
                     let left = String(utf16CodeUnits: Array(raw[l..<i]), count: i - l), right = String(utf16CodeUnits: Array(raw[j..<r]), count: r - j)
-                    if Hyphens.join(left, right) { i = j; continue } // drop "- "
-                    out.append(u); outLocs.append(locs[i]); i = j; continue // keep "-", drop the space
+                    // A half that starts in upper case is a name ("Berkeley-Parser"); a half with a hyphen of its own is
+                    // in a chain ("left-to-right"): the hyphen stays. French has no word list: only the document's
+                    // own spelling joins a French word.
+                    let chained = r < raw.count && raw[r] == 0x2D
+                    let join = chained || !Self.isLowercaseLetter(raw[j]) ? Hyphens.Join.compound : Hyphens.join(left, right, in: vocabulary, wordList: !french)
+                    switch join {
+                    case .word: i = j; continue // drop "- "
+                    case .compound: out.append(u); outLocs.append(locs[i]); i = j; continue // keep "-", drop the space
+                    case .apart: break
+                    }
                 }
             }
             out.append(u); outLocs.append(locs[i]); i += 1
         }
         let spoken = String(utf16CodeUnits: out, count: out.count)
-        if debugWalk { print("[pdf] unit \(blocks.map { "p\($0.id.page + 1)b\($0.id.index)" }.joined(separator: "+")): \(spoken.debugDescription)") }
+        if debugWalk { print("[pdf] unit \(blocks.map { "p\($0.id.page + 1)b\($0.id.index)" }.joined(separator: "+"))\(gaps.isEmpty ? "" : " skipping \(gaps.map { "p\($0.page + 1)b\($0.index)" }.joined(separator: ","))"): \(spoken.debugDescription)") }
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = spoken
         let sentences = tokenizer.tokens(for: spoken.startIndex..<spoken.endIndex).map { NSRange($0, in: spoken) }
-        return Unit(blocks: blocks.map(\.id), spoken: spoken, locs: outLocs, sentences: sentences)
+        return Unit(blocks: blocks.map(\.id), gaps: gaps, spoken: spoken, locs: outLocs, sentences: sentences)
+    }
+
+    private static func isFrench(_ raw: [UInt16]) -> Bool {
+        guard raw.count >= 24 else { return false }
+        let r = NLLanguageRecognizer()
+        r.languageConstraints = [.english, .french]
+        r.processString(String(utf16CodeUnits: raw, count: raw.count))
+        return (r.languageHypotheses(withMaximum: 2)[.french] ?? 0) > 0.8
     }
 
     private static func isSpace(_ u: UInt16) -> Bool { Unicode.Scalar(u).map { CharacterSet.whitespacesAndNewlines.contains($0) } ?? false }
     private static func isLetter(_ u: UInt16) -> Bool { Unicode.Scalar(u).map { CharacterSet.letters.contains($0) } ?? false }
     private static func isLowercaseLetter(_ u: UInt16) -> Bool { Unicode.Scalar(u).map { CharacterSet.lowercaseLetters.contains($0) } ?? false }
+    private static func isDigit(_ u: UInt16) -> Bool { u >= 0x30 && u <= 0x39 }
 
-    /// The parts of a unit's range, one per page.
+    /// The parts of a unit's range: one per run of the page's text, so a sentence that crosses a
+    /// page, skips a caption or reads lines out of text order gets a box for each run and nothing between.
     private func parts(of u: Unit, _ r: NSRange) -> [PDFRange.Part] {
         var parts: [PDFRange.Part] = []
         for loc in u.locs[r.location..<NSMaxRange(r)] {
-            if let last = parts.last, last.page == loc.page {
-                let lo = min(last.range.location, loc.offset), hi = max(NSMaxRange(last.range), loc.offset + 1)
-                parts[parts.count - 1] = PDFRange.Part(page: loc.page, range: NSRange(location: lo, length: hi - lo))
+            if let last = parts.last, last.page == loc.block.page, loc.offset >= last.range.location, loc.offset <= NSMaxRange(last.range) + 1 {
+                parts[parts.count - 1] = PDFRange.Part(page: last.page, range: NSRange(location: last.range.location, length: max(NSMaxRange(last.range), loc.offset + 1) - last.range.location))
             } else {
-                parts.append(PDFRange.Part(page: loc.page, range: NSRange(location: loc.offset, length: 1)))
+                parts.append(PDFRange.Part(page: loc.block.page, range: NSRange(location: loc.offset, length: 1)))
             }
         }
         return parts
@@ -383,52 +320,76 @@ final class PDFKitDocument: ReadableDocument {
 
     // MARK: ReadableDocument
 
-    func documentStart() -> AnyObject? { PDFRange(page: 0, offset: 0) }
+    func documentStart() -> AnyObject? { PDFPosition(block: BlockID(page: 0, index: 0)) }
+
+    /// A position at a block's own text: the sentence straddling its start is read whole.
+    private func position(at b: Block, pointed: Bool = false) -> PDFPosition {
+        PDFPosition(block: b.id, spoken: unit(containing: b).spokenStart(of: b.id), pointed: pointed)
+    }
 
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
-        guard let pos = position as? PDFRange else { return nil }
-        var pageIndex = pos.start.page, offset = pos.start.range.location
-        var pointed = pos.pointed, afterCue = pos.afterCue
-        while let p = page(pageIndex) {
-            for b in p.blocks where NSMaxRange(b.range) > offset {
-                if pointed {
-                    if b.inReferences { referencesReadable = true }
-                    pointed = false
-                } else if !readable(b) { continue }
-                if case .caption(let kind) = b.kind, !afterCue, offset <= b.range.location {
-                    return cue(kind, before: b, in: p)
-                }
-                afterCue = false
-                let u = unit(containing: b)
-                for r in u.sentences {
-                    let parts = parts(of: u, r)
-                    guard let end = parts.last, end.page > pageIndex || (end.page == pageIndex && NSMaxRange(end.range) > offset) else { continue }
-                    guard let text = SpeechText.clean((u.spoken as NSString).substring(with: r)) else { continue }
-                    if debugWalk { print("[pdf] sentence p\(end.page + 1) \(parts.map { "\($0.range.location)+\($0.range.length)" }.joined(separator: ",")): \(text.prefix(60).debugDescription)") }
-                    return Sentence(text: text, range: PDFRange(parts), next: PDFRange(page: end.page, offset: NSMaxRange(end.range)))
-                }
+        guard let pos = position as? PDFPosition else { return nil }
+        var cursor: BlockID? = pos.block
+        var spoken = pos.spoken, pointed = pos.pointed, afterCue = pos.afterCue
+        // Members of the unit a detour returns to, and of units read out, aren't read again on the way.
+        var skip = Set(pos.then.flatMap { block($0.block) }.map { unit(containing: $0).blocks } ?? [])
+        while let id = cursor {
+            if id == pos.until, let then = pos.then { return sentence(from: then, in: scope) }
+            guard let b = block(id) else { cursor = nextBlock(after: id); continue }
+            if pointed {
+                if b.inReferences { referencesReadable = true }
+                pointed = false
+            } else if !readable(b) || skip.contains(id) {
+                cursor = nextBlock(after: id); spoken = 0; continue
             }
-            pageIndex += 1; offset = 0
+            if case .caption(let kind) = b.kind, !afterCue, spoken == 0 { return cue(kind, before: b, from: pos) }
+            afterCue = false
+            let u = unit(containing: b)
+            for r in u.sentences where NSMaxRange(r) > spoken {
+                guard let text = SpeechText.clean((u.spoken as NSString).substring(with: r), listCitations: true) else { continue }
+                let parts = parts(of: u, r)
+                if debugWalk { print("[pdf] sentence \(parts.map { "p\($0.page + 1) \($0.range.location)+\($0.range.length)" }.joined(separator: ", ")): \(text.prefix(60).debugDescription)") }
+                return Sentence(text: text, range: PDFRange(parts), next: next(after: r, in: u, from: pos))
+            }
+            skip.formUnion(u.blocks)
+            cursor = nextBlock(after: id); spoken = 0
         }
         return nil
     }
 
-    /// The figure's cue, over the labels before its caption (short furniture
-    /// lines right before it) or, without any, the caption itself.
-    private func cue(_ kind: String, before caption: Block, in p: Page) -> Sentence {
-        var first = caption.id.index
-        while first > 0, p.blocks[first - 1].kind == .furniture, p.blocks[first - 1].small { first -= 1 }
-        let range = first < caption.id.index
-            ? NSRange(location: p.blocks[first].range.location, length: NSMaxRange(p.blocks[caption.id.index - 1].range) - p.blocks[first].range.location)
-            : caption.range
-        return Sentence(text: "", range: PDFRange([PDFRange.Part(page: caption.id.page, range: range)]),
-                        next: PDFRange(page: caption.id.page, offset: caption.range.location, afterCue: true), cue: kind)
+    /// Where the reading goes after sentence `r` of unit `u`: on in the unit, or, when the unit
+    /// skipped blocks the reading has now passed (a caption inside the sentence, or between it and
+    /// the next one), through them first and back to the unit after.
+    private func next(after r: NSRange, in u: Unit, from pos: PDFPosition) -> PDFPosition {
+        let first = u.block(at: r.location), last = u.block(at: NSMaxRange(r) - 1)
+        let resume = PDFPosition(block: last, spoken: NSMaxRange(r), until: pos.until, then: pos.then)
+        let upTo = u.sentences.first { $0.location >= NSMaxRange(r) }.map { u.block(at: $0.location) } ?? u.blocks[u.blocks.count - 1]
+        guard let gap = u.gaps.first(where: { first < $0 && $0 < upTo }) else { return resume }
+        return PDFPosition(block: gap, until: upTo, then: resume)
+    }
+
+    /// The figure's cue, over the figure's text (short lines, or small ones) before its caption, else
+    /// after it, or, without any, the caption itself.
+    private func cue(_ kind: String, before caption: Block, from pos: PDFPosition) -> Sentence {
+        var ranges = caption.ranges
+        if let p = page(caption.id.page) {
+            var labels: [NSRange] = []
+            var i = caption.id.index - 1
+            while i >= 0, p.blocks[i].isFigureText { labels.insert(contentsOf: p.blocks[i].ranges, at: 0); i -= 1 }
+            if labels.isEmpty {
+                i = caption.id.index + 1
+                while i < p.blocks.count, p.blocks[i].isFigureText { labels.append(contentsOf: p.blocks[i].ranges); i += 1 }
+            }
+            if !labels.isEmpty { ranges = labels }
+        }
+        return Sentence(text: "", range: PDFRange(ranges.map { PDFRange.Part(page: caption.id.page, range: $0) }),
+                        next: PDFPosition(block: caption.id, afterCue: true, until: pos.until, then: pos.then), cue: kind)
     }
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
-        guard let i = pageElements.firstIndex(where: { AX.frame($0)?.contains(point) ?? false }), let p = page(i) else { return nil }
-        let candidates = leaves(of: i).filter { $0.frame.contains(point) }
-        guard let leaf = candidates.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return nil }
+        guard let i = pageElements.firstIndex(where: { AX.frame($0)?.contains(point) ?? false }), let pageFrame = AX.frame(pageElements[i]), let p = page(i) else { return nil }
+        let candidates = leaves(of: i).compactMap { l in l.frame(on: pageFrame).map { (leaf: l, frame: $0) } }.filter { $0.frame.contains(point) }
+        guard let (leaf, leafFrame) = candidates.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return nil }
         // The line under the point, else the leaf's first character.
         var offset = leaf.first
         for lr in lineRanges(of: leaf) {
@@ -436,12 +397,11 @@ final class PDFKitDocument: ReadableDocument {
             if let o = (lr.location..<NSMaxRange(lr)).lazy.compactMap({ leaf.offsets[$0] >= 0 ? leaf.offsets[$0] : nil }).first { offset = o }
             break
         }
-        guard let b = p.blocks.first(where: { NSLocationInRange(offset, $0.range) }) ?? p.blocks.first(where: { $0.range.location > offset }) else { return nil }
-        let start = PDFRange(page: i, offset: b.range.location, pointed: true)
+        guard let b = p.block(containing: offset) else { return nil }
         // The block's lines in the pointed column: a paragraph that runs into the next column is shown there only.
-        let lines = boxes(for: [PDFRange.Part(page: i, range: b.range)]).filter { $0.minX < leaf.frame.maxX && $0.maxX > leaf.frame.minX }
-        guard let box = lines.dropFirst().reduce(lines.first, { $0?.union($1) }) else { return nil }
-        return (start, box)
+        let lines = boxes(for: b.ranges.map { PDFRange.Part(page: i, range: $0) }).filter { $0.minX < leafFrame.maxX && $0.maxX > leafFrame.minX }
+        guard let box = CGRect.union(of: lines) else { return nil }
+        return (position(at: b, pointed: true), box)
     }
 
     func firstVisible() -> AnyObject? {
@@ -451,10 +411,10 @@ final class PDFKitDocument: ReadableDocument {
             var measured = 0
             for b in p.blocks where readable(b) && measured < 40 {
                 measured += 1
-                let lines = boxes(for: [PDFRange.Part(page: i, range: b.range)])
-                if lines.contains(where: { $0.intersects(visible) }) { return PDFRange(page: i, offset: b.range.location) }
+                let lines = boxes(for: b.ranges.map { PDFRange.Part(page: i, range: $0) })
+                if lines.contains(where: { $0.intersects(visible) }) { return position(at: b) }
             }
-            return PDFRange(page: i, offset: 0)
+            return PDFPosition(block: BlockID(page: i, index: 0))
         }
         return documentStart()
     }
@@ -464,22 +424,48 @@ final class PDFKitDocument: ReadableDocument {
     /// An `AXStaticText` under a page, and where each of its characters is in the page's string (−1: nowhere).
     private struct Leaf {
         let element: AXUIElement
-        let frame: CGRect
         let text: NSString
         let offsets: [Int]
         let first: Int, last: Int
+        /// Its frame relative to the page's origin, so a scroll (which moves both) doesn't stale it.
+        /// Nil when it can't be measured: Preview gives no frames on a page out of view, and PDFKit
+        /// gives some leaves after a dropped run a box in the PDF's own coordinates, off the page.
+        let box: CGRect?
+        func frame(on page: CGRect) -> CGRect? { box?.offsetBy(dx: page.minX, dy: page.minY) }
     }
 
-    private func leaves(of pageIndex: Int) -> [Leaf] {
-        if let l = leaves[pageIndex] { return l }
-        guard let p = page(pageIndex) else { return [] }
-        var found: [(AXUIElement, NSString, CGRect)] = []
+    private struct LeafIndex {
+        /// The leaves that can be measured.
+        let leaves: [Leaf]
+        /// Page offsets of the last character of a line, where a leaf's text has "\n".
+        let lineEnds: Set<Int>
+        /// Page offsets some leaf holds: elsewhere nothing is known about line ends.
+        let covered: [NSRange]
+        /// The line ends alone, where a leaf's text has "\n" (`lineEnds` also has each leaf's end).
+        let wraps: Set<Int>
+        /// A leaf the page had no frame for (Preview, out of view): the index is built again once it has one.
+        let unmeasured: AXUIElement?
+    }
+
+    private func leaves(of pageIndex: Int) -> [Leaf] { index(of: pageIndex).leaves }
+
+    /// Whether the character at `loc` ends a line; nil where no leaf holds it.
+    private func lineEnds(after loc: Loc) -> Bool? {
+        let idx = index(of: loc.block.page)
+        guard idx.covered.contains(where: { NSLocationInRange(loc.offset, $0) }) else { return nil }
+        return idx.lineEnds.contains(loc.offset)
+    }
+
+    private func index(of pageIndex: Int) -> LeafIndex {
+        if let l = leafIndex[pageIndex], l.unmeasured.map({ AX.frame($0) == nil }) ?? true { return l }
+        let text = (string(of: pageIndex)?.string ?? "") as NSString
+        var found: [(AXUIElement, NSString)] = []
         var stack = [pageElements[pageIndex]]
         var seen = 0
         while let e = stack.popLast(), seen < 20_000 {
             seen += 1
             if AX.role(e) == kAXStaticTextRole {
-                if let v = AX.attr(e, kAXValueAttribute) as? String, !v.isEmpty, let f = AX.frame(e) { found.append((e, v as NSString, f)) }
+                if let v = AX.attr(e, kAXValueAttribute) as? String, !v.isEmpty { found.append((e, v as NSString)) }
                 continue
             }
             stack.append(contentsOf: AX.children(e).reversed())
@@ -487,32 +473,39 @@ final class PDFKitDocument: ReadableDocument {
         // Match each leaf to the page string ignoring whitespace: the leaf has "\n" at line ends, the
         // page a space, or a "\n" of its own after a link.
         var compact: [UInt16] = [], compactToPage: [Int] = []
-        for i in 0..<p.text.length { let u = p.text.character(at: i); if !Self.isSpace(u) { compact.append(u); compactToPage.append(i) } }
+        for i in 0..<text.length { let u = text.character(at: i); if !Self.isSpace(u) { compact.append(u); compactToPage.append(i) } }
         var cursor = 0
         var result: [Leaf] = []
-        let pageFrame = AX.frame(pageElements[pageIndex])?.insetBy(dx: -4, dy: -4)
-        for (e, text, frame) in found {
+        var lineEnds: Set<Int> = [], wraps: Set<Int> = [], covered: [NSRange] = [], unmeasured: AXUIElement?
+        let pageFrame = AX.frame(pageElements[pageIndex])
+        for (e, leafText) in found {
             var leafCompact: [UInt16] = [], compactToLeaf: [Int] = []
-            for i in 0..<text.length { let u = text.character(at: i); if !Self.isSpace(u) { leafCompact.append(u); compactToLeaf.append(i) } }
-            var offsets = [Int](repeating: -1, count: text.length)
+            for i in 0..<leafText.length { let u = leafText.character(at: i); if !Self.isSpace(u) { leafCompact.append(u); compactToLeaf.append(i) } }
+            var offsets = [Int](repeating: -1, count: leafText.length)
             guard !leafCompact.isEmpty else { continue }
             let at = Self.find(leafCompact, in: compact, from: cursor) ?? Self.find(leafCompact, in: compact, from: 0)
-            if let at {
-                for (k, li) in compactToLeaf.enumerated() { offsets[li] = compactToPage[at + k] }
-                cursor = at + leafCompact.count
-                // A leaf whose box isn't on the page (PDFKit gives some leaves after a dropped run a box in the
-                // PDF's own coordinates) can't be measured: its text falls back to the paragraph's group.
-                guard pageFrame?.contains(frame) ?? true else {
-                    if debugWalk { print("[pdf] leaf off page \(pageIndex + 1): \(frame) \((text as String).prefix(30).debugDescription)") }
-                    continue
-                }
-                result.append(Leaf(element: e, frame: frame, text: text, offsets: offsets, first: compactToPage[at], last: compactToPage[at + leafCompact.count - 1]))
-            } else if debugWalk {
-                print("[pdf] leaf not in page \(pageIndex + 1)'s text: \((text as String).prefix(40).debugDescription)")
+            guard let at else {
+                if debugWalk { print("[pdf] leaf not in page \(pageIndex + 1)'s text: \((leafText as String).prefix(40).debugDescription)") }
+                continue
             }
+            for (k, li) in compactToLeaf.enumerated() {
+                offsets[li] = compactToPage[at + k]
+                if li + 1 < leafText.length, leafText.character(at: li + 1) == 0x0A { wraps.insert(compactToPage[at + k]) }
+            }
+            let first = compactToPage[at], last = compactToPage[at + leafCompact.count - 1]
+            lineEnds.insert(last) // a leaf ends where a link starts or a line does: a hyphen there was the typesetter's
+            covered.append(NSRange(location: first, length: last - first + 1))
+            cursor = at + leafCompact.count
+            let frame = AX.frame(e)
+            if frame == nil { unmeasured = unmeasured ?? e }
+            let onPage = frame.flatMap { f in pageFrame.flatMap { $0.insetBy(dx: -4, dy: -4).contains(f) ? f.offsetBy(dx: -$0.minX, dy: -$0.minY) : nil } }
+            if debugWalk, let frame, onPage == nil { print("[pdf] leaf off page \(pageIndex + 1): \(frame) \((leafText as String).prefix(30).debugDescription)") }
+            result.append(Leaf(element: e, text: leafText, offsets: offsets, first: first, last: last, box: onPage))
         }
-        leaves[pageIndex] = result
-        return result
+        let idx = LeafIndex(leaves: result.filter { $0.box != nil }, lineEnds: lineEnds.union(wraps), covered: covered, wraps: wraps, unmeasured: unmeasured)
+        leafIndex[pageIndex] = idx
+        if debugWalk { print("[pdf] leaves of page \(pageIndex + 1): \(found.count) found, \(idx.leaves.count) measured") }
+        return idx
     }
 
     private static func find(_ needle: [UInt16], in hay: [UInt16], from: Int) -> Int? {
@@ -530,13 +523,11 @@ final class PDFKitDocument: ReadableDocument {
         if let r = lineRangesMemo[key] { return r }
         var ranges: [NSRange] = []
         var line = 0
-        while line < 400, let v = AX.param(leaf.element, kAXRangeForLineParameterizedAttribute, line as NSNumber) {
-            var r = CFRange()
-            guard AXValueGetValue(v as! AXValue, .cfRange, &r), r.length > 0, r.location + r.length <= leaf.text.length else { break }
-            let range = NSRange(location: r.location, length: r.length)
-            if let last = ranges.last, NSMaxRange(last) > range.location { break }
-            ranges.append(range)
-            if NSMaxRange(range) >= leaf.text.length { break }
+        while line < 400, let v = AX.param(leaf.element, kAXRangeForLineParameterizedAttribute, line as NSNumber), let r = AX.range(v) {
+            guard r.length > 0, NSMaxRange(r) <= leaf.text.length else { break }
+            if let last = ranges.last, NSMaxRange(last) > r.location { break }
+            ranges.append(r)
+            if NSMaxRange(r) >= leaf.text.length { break }
             line += 1
         }
         if ranges.isEmpty { ranges = [NSRange(location: 0, length: leaf.text.length)] }
@@ -562,22 +553,32 @@ final class PDFKitDocument: ReadableDocument {
         var out: [CGRect] = []
         for part in parts {
             let pageLeaves = leaves(of: part.page)
-            var covered = 0
+            var covered = 0, holder: Leaf?
+            let measured = out.count
             for leaf in pageLeaves {
                 guard let lr = leafRange(leaf, part.range) else { continue }
                 covered += lr.length
+                holder = holder ?? leaf
                 for line in lineRanges(of: leaf) {
                     let x = NSIntersectionRange(line, lr)
                     guard x.length > 0, let b = bounds(leaf.element, x) else { continue }
                     out.append(b)
                 }
             }
-            if covered * 2 < part.range.length,
-               let near = pageLeaves.first(where: { $0.first >= part.range.location }) ?? pageLeaves.last(where: { $0.last < part.range.location }) {
-                out.append(paragraphGroup(of: near.element, leafFrame: near.frame) ?? near.frame)
+            if out.count == measured, let holder, let leafFrame = AX.frame(holder.element) {
+                out.append(leafFrame) // held by a leaf that won't measure its ranges ("See Figure 2." in Preview)
+            } else if covered * 2 < part.range.length,
+               let near = pageLeaves.first(where: { $0.first >= part.range.location }) ?? pageLeaves.last(where: { $0.last < part.range.location }),
+               let leafFrame = AX.frame(near.element) {
+                out.append(paragraphGroup(of: near.element, leafFrame: leafFrame) ?? leafFrame)
             }
         }
         return WebDocument.groupIntoLines(out)
+    }
+
+    /// Where a line of the page's text is, for `PDFPage.reorder`.
+    private func frame(of line: PDFPage.Line, on page: Int) -> CGRect? {
+        CGRect.union(of: boxes(for: [PDFRange.Part(page: page, range: line.range)]))
     }
 
     /// The first ancestor group taller than the leaf: the paragraph's box.
@@ -594,7 +595,7 @@ final class PDFKitDocument: ReadableDocument {
     func lines(of sentence: Sentence) -> [CGRect] {
         guard let r = sentence.range as? PDFRange else { return [] }
         let lines = boxes(for: r.parts)
-        if sentence.cue != nil, let u = lines.dropFirst().reduce(lines.first, { $0?.union($1) }) { return [u] }
+        if sentence.cue != nil, let u = CGRect.union(of: lines) { return [u] }
         return lines
     }
 
@@ -613,7 +614,7 @@ final class PDFKitDocument: ReadableDocument {
             guard let p = page(part.page) else { continue }
             let pageLeaves = leaves(of: part.page)
             var i = part.range.location
-            let end = NSMaxRange(part.range)
+            let end = min(NSMaxRange(part.range), p.text.length)
             while i < end, pieces.count < 300 {
                 while i < end, Self.isSpace(p.text.character(at: i)) { i += 1 }
                 let start = i
@@ -663,50 +664,36 @@ final class PDFKitDocument: ReadableDocument {
     }
 
     /// Preview scrolls a box into view. WebKit's plugin scrolls only whole pages (`AXScrollToVisible`
-    /// puts the page's top at the view's top), so a sentence on another page brings that page up, and
-    /// one in the hidden foot of the page on view stays where it is.
+    /// puts the page's top at the view's top), so that's done when the sentence is out of view on a
+    /// page whose top is below the view's, or off screen; on a page scrolled partway it would scroll
+    /// back up, away from the sentence, so there the reading stays where it is.
+    ///
+    /// Preview measures nothing on a page out of view, so a sentence there is found by scrolling its
+    /// page's top into view first (`measuresOffScreen`).
     func scrollIntoView(_ sentence: Sentence) {
-        guard let r = sentence.range as? PDFRange else { return }
-        let lines = boxes(for: r.parts)
-        guard var box = lines.dropFirst().reduce(lines.first, { $0?.union($1) }) else { return }
+        guard let r = sentence.range as? PDFRange, let first = r.parts.first, let view = visibleRect() else { return }
+        var lines = boxes(for: r.parts)
+        if lines.isEmpty, let scroller, let page = AX.frame(pageElements[first.page]), !page.intersects(view) {
+            let top = CGRect(x: page.minX, y: page.minY, width: page.width, height: min(page.height, view.height))
+            AXUIElementSetAttributeValue(scroller, "AXMakeScreenRectVisible" as CFString, AX.rectValue(top))
+            // The page's frames can come a moment after the scroll: wait for them, 0.2 s at most. Once
+            // the page is in view this isn't done again (it would help nothing).
+            for _ in 0..<10 {
+                lines = boxes(for: r.parts)
+                if !lines.isEmpty { break }
+                usleep(20_000)
+            }
+        }
+        guard var box = CGRect.union(of: lines) else { return }
         if let scroller {
-            if let view = visibleRect(), box.height > view.height * 0.8, let first = lines.min(by: { $0.minY < $1.minY }) { box = first }
+            if box.height > view.height * 0.8, let top = lines.min(by: { $0.minY < $1.minY }) { box = top }
             AXUIElementSetAttributeValue(scroller, "AXMakeScreenRectVisible" as CFString, AX.rectValue(box))
             return
         }
-        let pageElement = pageElements[r.start.page]
-        guard let view = visibleRect(), let f = AX.frame(pageElement), abs(f.minY - view.minY) > 2 else { return }
-        AXUIElementPerformAction(pageElement, "AXScrollToVisible" as CFString)
-    }
-}
-
-/// Whether two halves of a word broken at a line end make one word, by the
-/// system word list (`/usr/share/dict/words`, base forms) and the common
-/// inflections. "para" + "graph" does, "task" + "specific" doesn't.
-enum Hyphens {
-    private static let words: Set<String> = {
-        guard let text = try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8) else { return [] }
-        return Set(text.split(separator: "\n").map { $0.lowercased() })
-    }()
-
-    /// Whether "left-" at a line end and "right" on the next make one word: they do when
-    /// the whole is a word, or when a half isn't one ("unidi-rectionality", "pre-train").
-    static func join(_ left: String, _ right: String) -> Bool {
-        guard !words.isEmpty else { return true } // no list: a line-end hyphen is usually a break
-        return isWord(left + right) || !isWord(left) || !isWord(right)
+        guard !view.contains(box), let f = AX.frame(pageElements[first.page]), f.minY > view.minY + 2 || f.maxY <= view.minY else { return }
+        AXUIElementPerformAction(pageElements[first.page], "AXScrollToVisible" as CFString)
     }
 
-    static func isWord(_ w: String) -> Bool {
-        let s = w.lowercased()
-        guard s.count >= 2 else { return false }
-        if words.contains(s) { return true }
-        for (suffix, stems) in [("ies", ["y"]), ("ied", ["y"]), ("ing", ["", "e"]), ("ed", ["", "e"]), ("es", [""]), ("s", [""]), ("ly", [""]), ("er", ["", "e"]), ("est", ["", "e"]), ("ness", [""]), ("ment", [""]), ("tion", ["te", "t"]), ("ity", ["", "e"]), ("al", [""]), ("ally", [""]), ("ive", ["", "e"]), ("ous", [""]), ("able", ["", "e"]), ("ible", [""]), ("ful", [""]), ("less", [""]), ("ism", [""]), ("ist", [""])] {
-            guard s.hasSuffix(suffix), s.count > suffix.count + 2 else { continue }
-            let base = String(s.dropLast(suffix.count))
-            for stem in stems where words.contains(base + stem) { return true }
-            // A doubled final consonant ("stopping"): the base is one shorter.
-            if let last = base.last, base.count >= 2, base[base.index(before: base.endIndex)] == last, words.contains(String(base.dropLast())) { return true }
-        }
-        return false
-    }
+    /// WebKit measures every page; Preview only those in view.
+    var measuresOffScreen: Bool { scroller == nil }
 }

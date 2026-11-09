@@ -458,6 +458,8 @@ if args.contains("--extract") {
                 if doc.lines(of: s).isEmpty, let fresh = doc.relocate(s) { s = fresh }
             }
             last = s
+            // As a reading does: Preview measures only the PDF pages in view, so one out of view is scrolled to.
+            if !doc.measuresOffScreen, doc.lines(of: s).isEmpty { doc.scrollIntoView(s) }
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
             if b == "no bounds" { let why = doc.linesDiagnosis(of: s); if !why.isEmpty { print("     no bounds: \(why)") } }
             print("  \(n). \(b)  \(s.cue.map { "♪ \($0)" } ?? (fromStart ? s.text : String(s.text.prefix(90))))")

@@ -342,7 +342,7 @@ final class ReadingSession {
             return
         }
         var shift = g.dy * scrollScale
-        if let l = limits, l.range === g.range, let top = Self.union(g.from)?.minY {
+        if let l = limits, l.range === g.range, let top = CGRect.union(of: g.from)?.minY {
             if let most = l.maxTop, top + shift > most { shift = max(most - top, 0) }
             if let least = l.minTop, top + shift < least { shift = min(least - top, 0) }
         }
@@ -774,7 +774,7 @@ final class ReadingSession {
                 if let fresh = doc.relocate(current) { m.relocated = fresh; current = fresh; m.lines = doc.lines(of: fresh) }
             }
             m.visible = doc.visibleRect()
-            if scrollIfNeeded, let v = m.visible, let u = Self.union(m.lines), !v.contains(u) {
+            if scrollIfNeeded, let v = m.visible, CGRect.union(of: m.lines).map({ !v.contains($0) }) ?? !doc.measuresOffScreen {
                 doc.scrollIntoView(current)
                 m.scrolled = true
                 let moved = doc.lines(of: current)
@@ -808,7 +808,7 @@ final class ReadingSession {
             }
             self.notePage(m)
             if m.scrolled { self.followGraceUntil = Date().addingTimeInterval(0.8) }
-            guard let bounds = Self.union(m.lines), let visible = m.visible else {
+            guard let bounds = CGRect.union(of: m.lines), let visible = m.visible else {
                 print("[highlight] \(label) → no box: \(m.diagnosis ?? "")")
                 self.overlay.hide()
                 self.markedWord = nil
@@ -849,7 +849,7 @@ final class ReadingSession {
                   self.queued.first?.sentence.range === current.range else { return }
             if let fresh = m.relocated { self.queued[0].sentence = fresh }
             self.notePage(m)
-            guard let bounds = Self.union(m.lines), let visible = m.visible else { return }
+            guard let bounds = CGRect.union(of: m.lines), let visible = m.visible else { return }
             // If the user scrolled the sentence away, stop dragging the page
             // back; resume following once it's on screen again.
             if Date() > self.followGraceUntil { self.following = visible.intersects(bounds) }
@@ -868,8 +868,8 @@ final class ReadingSession {
 
     /// Scrolling investigation (Aside): each refresh that moves the highlight, loses it, or is slow, with the time.
     private func logRefresh(_ m: Measured, took: TimeInterval, current: Sentence) {
-        let before = shownLines.flatMap { $0.range === current.range ? Self.union($0.lines) : nil }
-        let now = Self.union(m.lines)
+        let before = shownLines.flatMap { $0.range === current.range ? CGRect.union(of: $0.lines) : nil }
+        let now = CGRect.union(of: m.lines)
         let ms = Int(took * 1000)
         switch (before, now) {
         case (_, nil): print("[unread] \(Self.clock()) highlight refresh: no box (\(ms) ms)")
@@ -910,7 +910,7 @@ final class ReadingSession {
                 return show(m, in: visible, measuredAt: measuredAt)
             }
             guard measuredAt > lastScroll else { return }
-            let off = (Self.union(m.lines)?.minY ?? 0) - (Self.union(predicted)?.minY ?? 0)
+            let off = (CGRect.union(of: m.lines)?.minY ?? 0) - (CGRect.union(of: predicted)?.minY ?? 0)
             let caughtUp = afterGesture.map { !Self.sameRects($0, m.lines) } ?? false
             if afterGesture == nil { afterGesture = m.lines }
             if Self.sameRects(predicted, m.lines, within: 3) { // confirmed
@@ -935,7 +935,7 @@ final class ReadingSession {
 
     /// A prediction that went further than the page did ran into the page's top (scrolling up) or bottom.
     private func learnLimit(_ range: AnyObject, predicted: [CGRect], measured: [CGRect], dy: CGFloat, visible: CGRect) {
-        guard let p = Self.union(predicted), let m = Self.union(measured), m.minY > visible.minY + 1, m.maxY < visible.maxY - 1 else { return }
+        guard let p = CGRect.union(of: predicted), let m = CGRect.union(of: measured), m.minY > visible.minY + 1, m.maxY < visible.maxY - 1 else { return }
         var l: (range: AnyObject, minTop: CGFloat?, maxTop: CGFloat?) = limits.flatMap { $0.range === range ? $0 : nil } ?? (range, nil, nil)
         if dy > 0, m.minY < p.minY - 3 { l.maxTop = m.minY }
         else if dy < 0, m.minY > p.minY + 3 { l.minTop = m.minY }
@@ -948,14 +948,14 @@ final class ReadingSession {
     private func carryLimits(to range: AnyObject, at lines: [CGRect], visible: CGRect) {
         guard let l = limits, l.range !== range else { return }
         guard let old = shownLines, old.range === l.range, shownAt > lastScroll,
-              let a = Self.union(old.lines), let b = Self.union(lines),
+              let a = CGRect.union(of: old.lines), let b = CGRect.union(of: lines),
               b.minY > visible.minY + 1, b.maxY < visible.maxY - 1 else { limits = nil; return }
         let d = b.minY - a.minY
         limits = (range, l.minTop.map { $0 + d }, l.maxTop.map { $0 + d })
     }
 
     private func learnScale(from: [CGRect], to: [CGRect], dy: CGFloat, visible: CGRect) {
-        guard abs(dy) >= 40, let a = Self.union(from), let b = Self.union(to), abs(a.height - b.height) < 2,
+        guard abs(dy) >= 40, let a = CGRect.union(of: from), let b = CGRect.union(of: to), abs(a.height - b.height) < 2,
               a.minY > visible.minY + 1, a.maxY < visible.maxY - 1, b.minY > visible.minY + 1, b.maxY < visible.maxY - 1 else { return }
         // A page zoomed between 75% and 125%; anything else ran into the page's top or bottom.
         let scale = (b.minY - a.minY) / dy
@@ -1026,5 +1026,4 @@ final class ReadingSession {
         a.count == b.count && zip(a, b).allSatisfy { abs($0.width - $1.width) < 1 && abs($0.height - $1.height) < 1 }
     }
 
-    nonisolated private static func union(_ lines: [CGRect]) -> CGRect? { lines.dropFirst().reduce(lines.first) { $0?.union($1) } }
 }
