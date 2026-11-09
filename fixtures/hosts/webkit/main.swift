@@ -9,6 +9,11 @@
 //   build/fixture-host-webkit --hidden --save out.html <https:// URL | saved .html>
 // --save (save-corpus.sh): renders the page, then writes its DOM as one offline file and quits.
 // See Snapshot below and fixtures/README.md.
+//
+// --levers (scripts/window-check.sh, the highlight belonging to the window being read): takes commands on stdin,
+// each logged with its time: "move" glides the window 240 px right and 120 px up over a second, "resize" makes
+// it 120 px narrower, "cover" opens a second window over it, "raise" brings this window to the front. Only this
+// host's own windows move, and they're as transparent as the host.
 import AppKit
 import WebKit
 
@@ -50,6 +55,52 @@ final class LoadSignal: NSObject, WKNavigationDelegate {
         }
     }
 }
+func stamp(_ what: String) {
+    print(String(format: "[host %.3f] %@ (%d,%d %dx%d)", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000), what,
+                 Int(window.frame.minX), Int(window.frame.minY), Int(window.frame.width), Int(window.frame.height)))
+    fflush(stdout)
+}
+var cover: NSWindow?
+func pull(_ lever: String) {
+    switch lever {
+    case "move":
+        let from = window.frame.origin
+        var step = 0
+        stamp("move begins")
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { t in
+            step += 1
+            window.setFrameOrigin(NSPoint(x: from.x + CGFloat(step) * 2, y: from.y + CGFloat(step)))
+            stamp("moved")
+            if step == 120 { t.invalidate(); stamp("move ends") }
+        }
+    case "resize":
+        var f = window.frame
+        f.size.width -= 120
+        window.setFrame(f, display: true)
+        stamp("resized")
+    case "cover":
+        let w = NSWindow(contentRect: window.frame.insetBy(dx: 100, dy: 100), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.alphaValue = window.alphaValue
+        w.ignoresMouseEvents = true
+        w.isReleasedWhenClosed = false
+        w.orderFrontRegardless()
+        cover = w
+        print("[host] cover window \(w.windowNumber)")
+        stamp("covered")
+    case "raise":
+        window.orderFrontRegardless()
+        stamp("raised")
+    default:
+        print("[host] no lever \(lever)")
+    }
+}
+if args.contains("--levers") {
+    print("[host] window \(window.windowNumber)")
+    Thread.detachNewThread {
+        while let line = readLine() { DispatchQueue.main.async { pull(line) } }
+    }
+}
+
 let signal = LoadSignal()
 web.navigationDelegate = signal
 if isRemote { web.load(URLRequest(url: url)) } else { web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent()) }
