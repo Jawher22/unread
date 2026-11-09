@@ -441,7 +441,7 @@ final class BooksDocument: ReadableDocument {
             let b = r.end.index < line.endIndex ? r.end.marker : line.end
             if let box = flow.box(from: a, to: b, line: line) { boxes.append(box) }
         }
-        boxes = flow.rows(boxes, lines: true)
+        boxes = flow.rows(boxes, lines: true, in: r.block)
         let visible = boxes.filter { isVisible($0, in: viewport) }.map { $0.intersection(viewport) }
         return visible.isEmpty ? boxes : visible
     }
@@ -451,9 +451,9 @@ final class BooksDocument: ReadableDocument {
         return "flow \(r.start.flow === flow ? "current" : "replaced"), indices \(r.start.index)–\(r.end.index), \(Self.leaves(of: r.start.flow.area).count) leaves"
     }
 
-    /// One box per whitespace-separated word, by stepping the sentence's characters. A word
-    /// hyphenated across two lines gets the box of its longer part.
-    func words(of sentence: Sentence) -> [CGRect?] {
+    /// A box per whitespace-separated word, by stepping the sentence's characters. A word
+    /// hyphenated across two lines gets a box on each.
+    func words(of sentence: Sentence) -> [WordBox?] {
         guard let r = sentence.range as? SentenceRange else { return [] }
         let flow = r.start.flow, block = r.block, text = block.text
         guard var cursor = Cursor(block: block, index: r.start.index, marker: r.start.marker) else { return [] }
@@ -461,26 +461,26 @@ final class BooksDocument: ReadableDocument {
         func char(_ i: Int) -> unichar { text.character(at: i - block.startIndex) }
         while cursor.index < r.end.index, pieces.count < 300 {
             while cursor.index < r.end.index, Self.isSpace(char(cursor.index)) { guard cursor.advance(flow) else { return finish(pieces, for: sentence) } }
-            let wordStart = cursor.index
-            var parts: [CGRect] = []
             var partStart = cursor
             while cursor.index < r.end.index, !Self.isSpace(char(cursor.index)) {
                 guard cursor.advance(flow) else { return finish(pieces, for: sentence) }
-                if cursor.line != partStart.line || cursor.index >= r.end.index || Self.isSpace(char(cursor.index)) {
-                    let end = cursor.line != partStart.line ? partStart.lineEnd : cursor.marker
-                    if let box = flow.box(from: partStart.marker, to: end, line: block.lines[partStart.line]) { parts.append(box) }
+                let wrapped = cursor.line != partStart.line
+                if wrapped || cursor.index >= r.end.index || Self.isSpace(char(cursor.index)) {
+                    let end = wrapped ? partStart.lineEnd : cursor.marker
+                    let part = NSRange(location: partStart.index - block.startIndex, length: cursor.index - partStart.index)
+                    if part.length > 0, let box = flow.box(from: partStart.marker, to: end, line: block.lines[partStart.line]) {
+                        pieces.append((text.substring(with: part), box))
+                    }
                     partStart = cursor
                 }
             }
-            guard cursor.index > wordStart, let box = parts.max(by: { $0.width < $1.width }) else { continue }
-            pieces.append((text.substring(with: NSRange(location: wordStart - block.startIndex, length: cursor.index - wordStart)), box))
         }
         return finish(pieces, for: sentence)
     }
 
-    private func finish(_ pieces: [(text: String, rect: CGRect)], for sentence: Sentence) -> [CGRect?] {
+    private func finish(_ pieces: [(text: String, rect: CGRect)], for sentence: Sentence) -> [WordBox?] {
         guard let r = sentence.range as? SentenceRange else { return [] }
-        let rows = r.start.flow.rows(pieces.map { $0.rect }, lines: false)
+        let rows = r.start.flow.rows(pieces.map { $0.rect }, lines: false, in: r.block)
         return WordBoxes.assign(display: sentence.words, pieces: zip(pieces, rows).map { ($0.text, $1) })
     }
 
@@ -778,15 +778,29 @@ extension BooksDocument {
         /// text at its bottom: boxes much taller than the set's typical height (its lower median:
         /// a superscript or an epigraph line doesn't pull it down) are cut to that height from the
         /// bottom. A lone line box is judged by the last set of lines; word boxes judge themselves.
+        /// Then every box is cut to the block's glyph band (`glyphHeight(of:)`).
         private var lineHeight: CGFloat?
-        func rows(_ boxes: [CGRect], lines: Bool) -> [CGRect] {
+        func rows(_ boxes: [CGRect], lines: Bool, in block: Block) -> [CGRect] {
             let heights = boxes.map(\.height).filter { $0 >= 8 }.sorted()
             var h = heights.isEmpty ? nil : heights[(heights.count - 1) / 2]
             if lines {
                 if heights.count > 1 { lineHeight = h } else { h = lineHeight ?? h }
             }
             guard let h else { return boxes }
-            return boxes.map { $0.height > h * 1.4 ? CGRect(x: $0.minX, y: $0.maxY - h, width: $0.width, height: h) : $0 }
+            let rows = boxes.map { $0.height > h * 1.4 ? CGRect(x: $0.minX, y: $0.maxY - h, width: $0.width, height: h) : $0 }
+            guard let shortest = rows.map(\.height).filter({ $0 >= 8 }).min() else { return rows }
+            return GlyphBand.fit(rows, height: min(shortest, glyphHeight(of: block) ?? shortest))
+        }
+
+        /// A block's glyph band: its first line's height. Books measures a range as WebKit does, the
+        /// union of its end carets, and only a block's first line has carets on the glyphs; every
+        /// later line's reach up to the line above's text bottom, through the leading (27 px, then
+        /// 32). Measured once per block, on or off screen.
+        func glyphHeight(of block: Block) -> CGFloat? {
+            if let known = block.glyphHeight { return known }
+            guard let first = block.lines.first, let box = box(of: first), box.height >= 8 else { return nil }
+            block.glyphHeight = box.height
+            return box.height
         }
     }
 
@@ -802,6 +816,8 @@ extension BooksDocument {
         /// Played as a cue instead (#24, #26): "figure", a picture with nothing to read (a plate, a
         /// tailpiece: "￼"), or "unread", text whose offsets can't be trusted as indices.
         let cue: String?
+        /// Its first line's height, once measured (`Flow.glyphHeight(of:)`).
+        var glyphHeight: CGFloat?
 
         init(start: AXTextMarker, end: AXTextMarker, startIndex: Int, endIndex: Int, text: NSString, lines: [Line], readable: Bool) {
             self.start = start

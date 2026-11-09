@@ -23,6 +23,9 @@
 #   # start: <text>   start reading at the first sentence containing <text>, as if the user pointed there
 #   # flags: <flags>  extra --extract flags the page needs (rerender.html: --slow)
 #   # pending: <engines>  engines (WebKit, Chromium, Preview) not expected to pass yet: their result is shown, marked PENDING, and never fails
+#   # boxes: <min>-<max>  every word has a box, every word and line box (pass --word-boxes --lines) is min to max px tall
+#                         (the glyph band: a box reaching up through the leading fails), and no word's box touches the
+#                         one before it on its line (a box that takes in the space before its word fails) (leading.html)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PAGE="$1"; shift
@@ -86,11 +89,21 @@ check() { # output file, engine
 compare() { # output file, engine
     (( CORPUS )) && { python3 scripts/score.py page "$EXPECTED" "$2=$1"; return 0; }
     local got; got=$(sed -nE 's/^  [0-9]+\. (\([^)]*\)|no bounds)  //p' "$1")
-    local want; want=$(grep -vE '^# (start|flags|pending): ' "$EXPECTED")
+    local want; want=$(grep -vE '^# (start|flags|pending|boxes): ' "$EXPECTED")
     if [[ "$got" == "$want" ]]; then echo "   text: PASS"; else
         echo "   text: FAIL"; { diff <(echo "$want") <(echo "$got") || true; } | sed "s/^/     /"; return 1; fi
     local missing; missing=$(grep -c "^  [0-9]*\. no bounds" "$1" || true)
     if [[ "$missing" == 0 ]]; then echo "   bounds: PASS"; else echo "   bounds: FAIL ($missing without)"; return 1; fi
+    local band; band=$(sed -n 's/^# boxes: //p' "$EXPECTED")
+    [[ -z "$band" ]] && return 0
+    local bad; bad=$(awk -v lo="${band%-*}" -v hi="${band#*-}" '
+        /^     words / { split($2, n, "/"); if (n[1] + 0 != n[2] + 0) print "  " n[2] - n[1] " word(s) without a box: " substr($0, 1, 120) }
+        /^     (words|lines) / { s = $0; py = ""; while (match(s, /\(-?[0-9]+,-?[0-9]+ [0-9]+x[0-9]+\)/)) {
+            box = substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH); split(box, d, /[, x]/)
+            if (d[4] < lo || d[4] > hi) { print "  " box " not " lo "-" hi " tall: " substr($0, 1, 120); exit }
+            if ($1 == "words" && d[2] == py && d[1] < px + 2) { print "  " box " touches the word before it (a leading space): " substr($0, 1, 120); exit }
+            px = d[1] + d[3]; py = d[2] } }' "$1")
+    if [[ -z "$bad" ]]; then echo "   boxes: PASS ($band px)"; else echo "   boxes: FAIL"; echo "$bad" | sed "s/^/   /"; return 1; fi
 }
 
 extract() { # name, pid, host log

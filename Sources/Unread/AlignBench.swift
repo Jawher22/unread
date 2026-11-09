@@ -135,6 +135,15 @@ func checkRecording(_ wav: URL, log: URL, verbose: Bool = false) async {
     guard !abs.isEmpty else { print("no words to compare"); return }
     print(String(format: "\nscheduled against heard: %d words, |error| median %.0f ms, p95 %.0f, max %.0f; mean signed %+.0f ms",
                  abs.count, abs[abs.count / 2], abs[min(abs.count - 1, abs.count * 95 / 100)], abs.last!, errors.reduce(0, +) / Double(errors.count)))
+    // The mark moves `lead` before the scheduled start (Settings, "Mark ahead of voice"). A mark is
+    // noticed late from 45 ms after the word is heard, early from 125 ms before (ITU BT.1359).
+    for lead in HighlightStyle.Lead.allCases {
+        let shown = errors.map { $0 - Double(lead.rawValue) }
+        let late = shown.filter { $0 > 45 }.count, early = shown.filter { $0 < -125 }.count
+        print(String(format: "mark ahead by %3d ms%@: %4.1f%% of words noticeably late (> 45 ms), %4.1f%% noticeably early (> 125 ms)",
+                     lead.rawValue, lead == HighlightStyle.standard.lead ? " (default)" : "          ",
+                     100 * Double(late) / Double(shown.count), 100 * Double(early) / Double(shown.count)))
+    }
 }
 
 /// `--hear ["sentence"…] [--voice id] [--raw]`: what the narrator says for each sentence, silent. It

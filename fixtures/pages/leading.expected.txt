@@ -1,0 +1,12 @@
+# flags: --word-boxes --lines
+# boxes: 20-25
+The ferry left the harbour an hour before dawn, with the lamps still lit along the quay and the gulls asleep on the posts.
+Nobody on deck said much at first.
+The engine settled into a low and steady drum that you felt more in your feet than heard, and the town slid away behind us one window at a time.
+By the time the sun was up we had passed the last of the islands, and the water turned from grey to a green so clear that you could follow a rope down into it for several metres.
+A boy at the rail counted the jellyfish aloud until his mother told him the number was big enough.
+The captain came down to drink his coffee with the passengers and told us the crossing would take four hours if the wind held.
+It did not hold.
+Around ten the sky to the west went the colour of slate, and the first drops came sideways across the deck.
+We crowded into the cabin, where the windows fogged at once and someone opened a tin of biscuits for everyone.
+The boy fell asleep against a stranger's coat, and the stranger let him stay there until we reached the far shore.

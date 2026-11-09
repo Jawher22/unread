@@ -160,7 +160,7 @@ final class ReadingSession {
     /// The current sentence's word boxes as last measured, with the line
     /// boxes measured alongside them: when the lines move (scrolling), the
     /// words move by as much, without measuring each word again.
-    private var wordBoxes: (range: AnyObject, words: [CGRect?], lines: [CGRect])?
+    private var wordBoxes: (range: AnyObject, words: [WordBox?], lines: [CGRect])?
     /// The latest line measurement of the current sentence, what's visible, and where the window was then.
     private var shownLines: (range: AnyObject, lines: [CGRect], visible: CGRect, window: CGRect?)?
     /// The word mark shown now, so the overlay only changes when it does.
@@ -880,7 +880,7 @@ final class ReadingSession {
     /// One highlight measurement, done on the AX worker.
     private struct Measured {
         var lines: [CGRect] = []
-        var words: [CGRect?]?
+        var words: [WordBox?]?
         var visible: CGRect?
         var relocated: Sentence?
         var triedRelocate = false

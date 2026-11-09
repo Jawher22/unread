@@ -44,7 +44,7 @@ protocol ReadableDocument: AnyObject {
     /// A box for each of the sentence's display words (`Sentence.words`), nil
     /// where a word couldn't be measured. Empty if the app gives no word
     /// positions. Measured right after `lines(of:)`, in the same layout.
-    func words(of sentence: Sentence) -> [CGRect?]
+    func words(of sentence: Sentence) -> [WordBox?]
     func visibleRect() -> CGRect?
     /// Whether it asked the app to scroll (an app that scrolls only whole pages may not).
     @discardableResult func scrollIntoView(_ sentence: Sentence) -> Bool
@@ -94,7 +94,7 @@ extension ReadableDocument {
 
 extension ReadableDocument {
     func linesDiagnosis(of sentence: Sentence) -> String { "" }
-    func words(of sentence: Sentence) -> [CGRect?] { [] }
+    func words(of sentence: Sentence) -> [WordBox?] { [] }
     func scope(from position: AnyObject) -> ReadingScope? { nil }
     func relocate(_ sentence: Sentence) -> Sentence? { nil }
     func pageEnd() -> Int? { nil }
@@ -1321,14 +1321,14 @@ final class WebDocument: ReadableDocument {
 
     /// Per-sentence word layout, so the 10 Hz highlight refresh costs one AX
     /// call instead of one per word: re-measure the anchor word, shift the lines.
-    private struct Layout { let range: AnyObject; let anchor: AnyObject; let anchorRect: CGRect; let lines: [CGRect]; let words: [CGRect?] }
+    private struct Layout { let range: AnyObject; let anchor: AnyObject; let anchorRect: CGRect; let lines: [CGRect]; let words: [WordBox?] }
     private var layouts: [Layout] = []
     /// How far the cached layout of the sentence measured last has moved (#20).
     private var lastShift: (range: AnyObject, dx: CGFloat, dy: CGFloat)?
 
     /// The words' boxes from the layout `lines(of:)` measured, moved as far
     /// as its lines have moved since.
-    func words(of sentence: Sentence) -> [CGRect?] {
+    func words(of sentence: Sentence) -> [WordBox?] {
         if layouts.first(where: { $0.range === sentence.range }) == nil { _ = lines(of: sentence) }
         guard let layout = layouts.first(where: { $0.range === sentence.range }) else { return [] }
         let shift = lastShift.flatMap { $0.range === sentence.range ? ($0.dx, $0.dy) : nil } ?? (0, 0)
@@ -1360,10 +1360,11 @@ final class WebDocument: ReadableDocument {
         // Words that start on a leaf boundary all get the same enclosing
         // block's box from Chromium; in link-dense text that's most of them,
         // and the median "line" became the block. No two real words share a box.
-        let shared = Dictionary(grouping: words, by: { "\($0.rect)" }).filter { $0.value.count > 1 }
-        let own = words.filter { shared["\($0.rect)"] == nil }
-        let measured = own.isEmpty ? words : own
-        guard let lineHeight = measured.map(\.rect.height).sorted().dropFirst(measured.count / 2).first else {
+        let boxed = words.filter { $0.rect != nil }
+        let shared = Dictionary(grouping: boxed, by: { "\($0.rect!)" }).filter { $0.value.count > 1 }
+        let own = boxed.filter { shared["\($0.rect!)"] == nil }
+        let measured = own.isEmpty ? boxed : own
+        guard let extent = WordExtent(measured.map { ($0.rect!, $0.chars) }) else {
             if let whole = rect(sentence.range) { return plausible([whole]) }
             // No text positions at all, yet the text has a frame: a Chromium
             // browser without inline text boxes (Aside, Chrome without
@@ -1371,34 +1372,82 @@ final class WebDocument: ReadableDocument {
             // asking for word boxes on this page.
             return elementFrames(of: sentence.range)
         }
-        // Too tall (spans lines/blocks) or too wide for its characters (a
-        // single-line block's box): not that word's box.
-        func fits(_ r: CGRect, chars: Int) -> Bool { r.height <= lineHeight * 1.5 && r.width <= CGFloat(chars + 1) * lineHeight }
+        func fits(_ r: CGRect?, chars: Int) -> Bool { r.map { extent.fits($0, chars: chars) } ?? false }
         if debugWalk {
-            for w in words { print("      word \(string(w.range).debugDescription) \(w.rect) fits=\(fits(w.rect, chars: w.chars)) repaired=\(fits(w.rect, chars: w.chars) ? "-" : repairedBox(w.range, lineHeight: lineHeight).map { "\($0)" } ?? "nil")") }
+            for w in words { print("      word \(string(w.range).debugDescription) \(w.rect.map { "\($0)" } ?? "no box") fits=\(fits(w.rect, chars: w.chars)) repaired=\(fits(w.rect, chars: w.chars) ? "-" : repairedBox(w.range, extent: extent).map { "\($0)" } ?? "nil")") }
         }
-        // A rejected word usually starts on a leaf boundary (a new paragraph)
-        // or on the space before a line wrap. Measure it from a character or
-        // two in, which lands inside the leaf / on the new line, and extend
-        // left by the characters that were skipped.
-        let good = words.compactMap { w -> (range: AnyObject, rect: CGRect)? in
+        // A rejected or unmeasured word usually starts on a leaf boundary (a
+        // new paragraph) or on the space before a line wrap. Measure it from a
+        // character or two in, which lands inside the leaf / on the new line,
+        // and extend left by the characters that were skipped. One that still
+        // has no box stays in the list without one, so the words after it are
+        // matched to their own text.
+        let good = words.map { w -> (range: AnyObject, rect: CGRect?) in
             // A word that starts across a line break or an embedded object
             // ("\n￼\nAlmost") gets a box at the separator (an icon on the line
             // above); always measure it from its first visible character.
             let crosses = string(w.range).trimmingCharacters(in: .whitespaces).contains { $0 == "\n" || $0 == "\u{FFFC}" }
             if !crosses, fits(w.rect, chars: w.chars) { return (w.range, w.rect) }
-            return repairedBox(w.range, lineHeight: lineHeight).map { (w.range, $0) }
+            return (w.range, repairedBox(w.range, extent: extent))
         }
-        guard let first = good.first else { return plausible(rect(sentence.range).map { [$0] } ?? []) }
-        // A caret-thin box (< 3 px) is a position on a line boundary, not a
-        // glyph: WebKit can place a word's start at the end of the line above.
-        let lines = Self.groupIntoLines(good.map(\.rect).filter { $0.width >= 3 })
-        let wordRects = WordBoxes.assign(display: sentence.words, pieces: good.filter { $0.rect.width >= 3 }.map { (string($0.range), $0.rect) })
-        layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: first.rect, lines: lines, words: wordRects))
+        guard let first = good.first(where: { $0.rect != nil }), let firstRect = first.rect else { return plausible(rect(sentence.range).map { [$0] } ?? []) }
+        let texts = good.map { string($0.range) }
+        let boxedIndices = good.indices.filter { good[$0].rect != nil }
+        var rects = boxedIndices.map { good[$0].rect! }
+        if chromium { for (k, i) in boxedIndices.enumerated() { rects[k] = withoutLeadingSpace(rects[k], of: good[i].range, text: texts[i]) } }
+        rects = GlyphBand.fit(rects, height: glyphBand(of: sentence.range, boxes: rects))
+        var pieces: [(text: String, rect: CGRect?)] = texts.map { ($0, nil) }
+        for (k, i) in boxedIndices.enumerated() { pieces[i].rect = rects[k] }
+        let lines = Self.groupIntoLines(rects)
+        let wordRects = WordBoxes.assign(display: sentence.words, pieces: pieces)
+        layouts.append(Layout(range: sentence.range, anchor: first.range, anchorRect: firstRect, lines: lines, words: wordRects))
         lastShift = (sentence.range, 0, 0)
         if layouts.count > 6 { layouts.removeFirst() }
-        if debugWalk { print("    lines: \(good.count)/\(words.count) words kept, line \(Int(lineHeight)) → \(lines)") }
+        if debugWalk { print("    lines: \(good.count)/\(words.count) words kept, glyphs \(Int(extent.glyph)), pitch \(Int(extent.pitch)) → \(lines)") }
         return plausible(lines)
+    }
+
+    private lazy var chromium: Bool = {
+        var pid: pid_t = 0
+        return AXUIElementGetPid(element, &pid) == .success && AX.isChromium(pid)
+    }()
+
+    /// Chromium's box for a word range starts at the space before the word (~4 px early); WebKit's
+    /// starts at the word. Cut the box at the space's right edge, measured on its own.
+    private func withoutLeadingSpace(_ box: CGRect, of word: AnyObject, text: String) -> CGRect {
+        let spaces = text.prefix { $0 == " " || $0 == "\u{A0}" || $0 == "\t" }.utf16.count
+        guard spaces > 0 else { return box }
+        let from = start(of: word)
+        var m = from
+        for _ in 0..<spaces { guard let n = p("AXNextTextMarkerForTextMarker", m), !CFEqual(n, m) else { return box }; m = n }
+        // A space whose box isn't on the word's line, or reaches past its end, wasn't measured inside a leaf.
+        guard let gap = range(from, m).flatMap(rect), WordMark.sameLine(gap, box),
+              gap.maxX > box.minX, gap.maxX < box.maxX - 1 else { return box }
+        return CGRect(x: gap.maxX, y: box.minY, width: box.maxX - gap.maxX, height: box.height)
+    }
+
+    /// The height of the sentence's glyph band (`GlyphBand`): from its largest font, which WebKit and
+    /// Chromium name in the attributed string. A box a little taller than that estimate is on the
+    /// glyphs (Chromium's all are; in WebKit, a block's first line), and is the font's band from
+    /// then on, so every sentence of a paragraph gets the same one. Without a font, its shortest box.
+    private func glyphBand(of range: AnyObject, boxes: [CGRect]) -> CGFloat {
+        let shortest = boxes.map(\.height).filter { $0 >= 4 }.min() ?? 0
+        guard let font = largestFont(in: range) else { return shortest }
+        let estimate = GlyphBand.height(font: font.name, size: font.size)
+        let key = "\(font.name ?? "") \(font.size)"
+        if shortest >= estimate, shortest <= estimate * 1.2 { measuredBands[key] = min(measuredBands[key] ?? shortest, shortest) }
+        return measuredBands[key] ?? estimate
+    }
+    private var measuredBands: [String: CGFloat] = [:]
+
+    private func largestFont(in range: AnyObject) -> (name: String?, size: CGFloat)? {
+        guard let text = p("AXAttributedStringForTextMarkerRange", range) as? NSAttributedString, text.length > 0 else { return nil }
+        var largest: (name: String?, size: CGFloat)?
+        text.enumerateAttribute(NSAttributedString.Key("AXFont"), in: NSRange(location: 0, length: text.length)) { value, _, _ in
+            guard let font = value as? [String: Any], let size = (font["AXFontSize"] as? NSNumber).map({ CGFloat($0.doubleValue) }), size > 0 else { return }
+            if size > largest?.size ?? 0 { largest = (font["AXFontName"] as? String, size) }
+        }
+        return largest
     }
 
     /// When a sentence gets no box: are its markers still alive (the page
@@ -1494,7 +1543,7 @@ final class WebDocument: ReadableDocument {
 
     /// Measure a word from up to three characters in (past a leaf boundary
     /// or the space before a wrap), then extend left by what was skipped.
-    private func repairedBox(_ word: AnyObject, lineHeight: CGFloat) -> CGRect? {
+    private func repairedBox(_ word: AnyObject, extent: WordExtent) -> CGRect? {
         let isBlank = { (c: Character) in c.isWhitespace || c == "\u{FFFC}" }
         let visible = { (r: AnyObject) in self.string(r).filter { !isBlank($0) }.count }
         let total = visible(word)
@@ -1509,9 +1558,15 @@ final class WebDocument: ReadableDocument {
             let shown = visible(rest)
             guard shown > 0 else { return nil }
             if let first = restText.first, isBlank(first) { continue } // still on a separator
-            if let r = rect(rest), r.height <= lineHeight * 1.5, r.width <= CGFloat(shown + 1) * lineHeight {
+            if let r = rect(rest), extent.fits(r, chars: shown) {
                 let charWidth = r.width / CGFloat(shown), missing = CGFloat(max(0, total - shown))
-                return CGRect(x: r.minX - missing * charWidth, y: r.minY, width: r.width + missing * charWidth, height: r.height)
+                var left = r.minX - missing * charWidth
+                // A word at a line's start ("much" after a wrap): its leaf's frame starts there, where
+                // an average character's width can miss by half a letter ("m" is wide). Taken only
+                // when it's that close: a leaf over several lines starts at the block's left edge.
+                if missing > 0, let leaf = AX.element(p("AXUIElementForTextMarker", start(of: rest))), let f = AX.frame(leaf),
+                   f.minX < r.minX, abs(f.minX - left) < missing * charWidth { left = f.minX }
+                return CGRect(x: left, y: r.minY, width: r.maxX - left, height: r.height)
             }
         }
         return nil
@@ -1519,16 +1574,16 @@ final class WebDocument: ReadableDocument {
 
     /// Each word's range (previous word end → this word end) and its box,
     /// stepping until the words cover the sentence's text.
-    private func wordBoxes(in sentenceRange: AnyObject) -> [(range: AnyObject, rect: CGRect, chars: Int)] {
+    private func wordBoxes(in sentenceRange: AnyObject) -> [(range: AnyObject, rect: CGRect?, chars: Int)] {
         let begin = start(of: sentenceRange)
         let total = (string(sentenceRange) as NSString).length
-        var out: [(AnyObject, CGRect, Int)] = []
+        var out: [(AnyObject, CGRect?, Int)] = []
         var m = begin
         var before = 0
         for _ in 0..<200 {
             guard let next = p("AXNextWordEndTextMarkerForTextMarker", m), !CFEqual(next, m),
                   let covered = range(begin, next).map({ (string($0) as NSString).length }), covered <= total else { break }
-            if let w = range(m, next), let r = rect(w) { out.append((w, r, covered - before)) }
+            if let w = range(m, next) { out.append((w, rect(w), covered - before)) }
             m = next
             before = covered
             if covered == total { break }
@@ -1552,6 +1607,41 @@ final class WebDocument: ReadableDocument {
         guard let target = AX.element(p("AXUIElementForTextMarker", start(of: sentence.range))) else { return false }
         AXUIElementPerformAction(target, "AXScrollToVisible" as CFString)
         return true
+    }
+}
+
+/// How big one word's box on one line can be, from the boxes of a sentence's words: no taller
+/// than the line pitch, since WebKit's boxes on a block's later lines reach up through the leading
+/// (`GlyphBand`: 22 px on the first line, 60 on the next at `line-height: 3`), and no wider than a
+/// glyph height per character. A box that isn't spans lines or a block (Chromium answers a range
+/// that starts on a leaf boundary with its block's box), or is caret-thin (< 3 px: a position on a
+/// line boundary, as WebKit can give a word starting at the end of the line above).
+struct WordExtent {
+    let glyph: CGFloat, pitch: CGFloat
+
+    /// Nil for no boxes. The glyph height is the lowest of the lines' median box heights (lines of
+    /// two words or more: a lone superscript isn't a line), the pitch the highest of a line whose
+    /// typical box is as narrow as a word (a box over two lines or a block is wide), and under 4 glyphs.
+    init?(_ boxes: [(rect: CGRect, chars: Int)]) {
+        guard let median = boxes.map(\.rect.height).sorted().dropFirst(boxes.count / 2).first else { return nil }
+        var lines: [[(rect: CGRect, chars: Int)]] = []
+        for b in boxes {
+            if let i = lines.firstIndex(where: { abs($0[0].rect.maxY - b.rect.maxY) < median / 2 }) { lines[i].append(b) } else { lines.append([b]) }
+        }
+        var glyph = median, pitch: CGFloat = 0
+        let typical: [(box: (rect: CGRect, chars: Int), count: Int)] = lines.map { line in
+            (line.sorted { $0.rect.height < $1.rect.height }[line.count / 2], line.count)
+        }
+        for t in typical where t.count > 1 { glyph = min(glyph, t.box.rect.height) }
+        for t in typical where t.box.rect.width <= CGFloat(t.box.chars + 1) * glyph && t.box.rect.height <= glyph * 4 {
+            pitch = max(pitch, t.box.rect.height)
+        }
+        self.glyph = glyph
+        self.pitch = max(glyph, pitch)
+    }
+
+    func fits(_ r: CGRect, chars: Int) -> Bool {
+        r.width >= 3 && r.height <= pitch + glyph / 2 && r.width <= CGFloat(chars + 1) * glyph
     }
 }
 
@@ -1686,11 +1776,11 @@ final class NativeDocument: ReadableDocument {
     }
 
     /// One box per whitespace-separated word of the sentence's on-screen text.
-    func words(of sentence: Sentence) -> [CGRect?] {
+    func words(of sentence: Sentence) -> [WordBox?] {
         let r = range(sentence.range)
         guard r.length > 0 else { return [] }
         let raw = text.substring(with: r) as NSString
-        var pieces: [(text: String, rect: CGRect)] = []
+        var pieces: [(text: String, rect: CGRect?)] = []
         let separators = CharacterSet.whitespacesAndNewlines
         var i = 0
         while i < raw.length, pieces.count < 300 {
