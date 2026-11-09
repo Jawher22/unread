@@ -1524,12 +1524,14 @@ final class WebDocument: ReadableDocument {
             geometry = .real
         case (.awaiting(let until, _), false):
             if now < until { geometry = .awaiting(until: until, nextProbe: now + 0.25); return }
+            // Not for good: a stray false from another app inside the wait looks the same as a Chromium that
+            // changed, and only the first is worth another pulse.
             AX.pulseDidNotWork(AX.pid(element))
-            geometry = .blocks(retry: nil)
+            geometry = .blocks(retry: now + 60)
         case (_, false):
             if case .unknown = geometry { print("[unread] this page gives no text positions (no inline text boxes); highlighting whole text blocks") }
             switch AX.pulseScreenReader(AX.pid(element)) {
-            case .sent(let at): geometry = .awaiting(until: at + 4, nextProbe: max(now, at + 2.1))
+            case .sent(let at): geometry = .awaiting(until: at + 6, nextProbe: max(now, at + 2.1))
             case .later(let at): geometry = .blocks(retry: at)
             case .never: geometry = .blocks(retry: nil)
             }

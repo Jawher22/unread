@@ -151,8 +151,7 @@ enum AX {
         case sent(Date)
         /// Pulsed under 10 s ago and the positions are gone again: ask again then.
         case later(Date)
-        /// Not to be pulsed: not a Chromium browser, VoiceOver is on, another assistive tool holds the flag,
-        /// or a pulse didn't work in this process.
+        /// Not to be pulsed: not a Chromium browser, VoiceOver is on, or another assistive tool holds the flag.
         case never
     }
 
@@ -166,12 +165,11 @@ enum AX {
     /// take effect. Electron isn't pulsed: AXManualAccessibility gives its positions, and older Electron releases
     /// take a false as "screen reader stopped".
     private static var pulsedAt: [pid_t: Date] = [:]
-    private static var pulseFailed: Set<pid_t> = []
     /// For the fixture host (`--pulse-electron`): Electron 39 answers the pulse as Chrome does.
     nonisolated(unsafe) static var pulsesElectron = false
 
     static func pulseScreenReader(_ pid: pid_t) -> Pulse {
-        guard let engine = chromium(pid), engine == .browser || pulsesElectron, !pulseFailed.contains(pid),
+        guard let engine = chromium(pid), engine == .browser || pulsesElectron,
               !NSWorkspace.shared.isVoiceOverEnabled else { return .never }
         let now = Date()
         if let last = pulsedAt[pid] {
@@ -196,10 +194,11 @@ enum AX {
         return .sent(now)
     }
 
-    /// The positions didn't come after a pulse: this Chromium no longer works that way. Block highlights for good.
+    /// The positions didn't come after a pulse: this Chromium may no longer work that way. Logged once per process.
+    private static var pulseFailed: Set<pid_t> = []
     static func pulseDidNotWork(_ pid: pid_t) {
         guard pulseFailed.insert(pid).inserted else { return }
-        print("[unread] the screen-reader pulse gave pid \(pid) no text positions; highlighting whole text blocks")
+        print("[unread] the screen-reader pulse gave pid \(pid) no text positions; highlighting whole text blocks, and asking again in a minute")
     }
 
     private static func enhancedUserInterface(_ app: AXUIElement) -> Bool { (attr(app, "AXEnhancedUserInterface") as? Bool) ?? false }
