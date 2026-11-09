@@ -84,6 +84,7 @@ Details that make it feel right:
 
 - **Chords cancel.** ⌃C, ⌃-click (right-click), ⌃-scroll (zoom) or ⌃ added to an existing chord never trigger reading.
 - **The highlight lives in the source app.** A click-through overlay draws a soft yellow box on the current sentence and glides between sentences, with a stronger mark on the word being spoken (#20). There is no reader window. How it looks is a setting (mark: fill, underline, outline, trail or none; motion: hop, glide, stretch, flow or sweep; strength; sentence box; color; how far the mark runs ahead of the voice, 100 ms by default), chosen in Settings over a live demo drawn by the same renderer as the overlay.
+- **The highlight belongs to the window it's on** (2026-11-09). Moving the window being read used to lose the highlight (it was placed only from Accessibility measurements, 10 a second, and Books' text boxes lag its view during a move), and a window opened over Books had the highlight drawn on top of it (the overlay was a screen-sized panel at `.statusBar`, above every window). Now a reading draws in a panel the size of its window, at the normal level, ordered just above it: it moves with the window (the window server is polled off the main thread, 120 Hz during a drag) and windows above it cover it. Measured and constrained in `CLAUDE.md`; reproduced with `scripts/window-check.sh`. Not tested without the author: a real drag with the pointer, Stage Manager, full screen, the window's own sheets and popovers, and a second display.
 - **Follow, but don't fight.** It auto-scrolls while you're following along. If you scroll away it stops dragging you back, and resumes once the sentence is visible again. A scroll is noticed on each refresh (10 a second) from where the sentence is now; between sentences, while the next is still being made, from the one just read. Without that, a scroll in such a gap (3 s at 3× in BERT's abstract) went unseen and the next sentence scrolled the view back to itself (2026-11-09).
 - **Tied to the document, not the window.** Switching apps doesn't stop playback.
 - **Language is automatic.** English or French is chosen per sentence and is sticky: short or ambiguous sentences keep the current language.
@@ -216,6 +217,8 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 | Synthesis | 76 ms for 2.2 s of audio · 110 ms for 3.4 s · 240 ms for 8.3 s · French 151 ms for 5.3 s (29–35× real time) |
 | Find the document in the front window | ~25 ms |
 | Extract 12 sentences with bounds | ~70–110 ms |
+| Highlight panel behind a window gliding 240 px in 1 s (hidden WebKit host, `scripts/window-check.sh`, 4 runs) | p50 9–23 ms, p95 18–27 ms, first step 31–39 ms (30 Hz idle poll); the highlight's place in the window unchanged throughout |
+| Panel re-ordered after the window being read raised itself | 9–95 ms (the 10 Hz order check) |
 
 **`--extract` on a T3 Code window (2026-11-03):** 12 sentences in 101 ms, but **9 of 12 had no bounds**, so read-along would show no highlight most of the time in Electron. Inline `code` spans were also split into separate sentences (`sameBlock` treats the span as a new block).
 
