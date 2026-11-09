@@ -1,5 +1,6 @@
 import AppKit
 import NaturalLanguage
+import Synchronization
 
 /// The first sentence, extracted while the hotkey was held and handed to the
 /// narrator, so reading can start the moment it's released.
@@ -148,6 +149,9 @@ final class ReadingSession {
     private var sentenceNumber = 0
     /// Where the mark was last drawn, unclipped (AX coordinates).
     private var lastHead: (range: AnyObject, box: CGRect)?
+    /// Between sentences, while the next is still being made, the one just read: a refresh judges
+    /// `following` by it, so a page scrolled away in the gap isn't pulled back by the next sentence.
+    private var justRead: Sentence?
     /// Where the previous sentence's mark ended: the next one's first word glides from there.
     private var entry: (range: AnyObject, box: CGRect)?
     private var loggedWord: (range: AnyObject, index: Int)?
@@ -256,7 +260,9 @@ final class ReadingSession {
     /// After the end of a page that changed, how long to wait for more text since it last changed.
     private static let streamWait: TimeInterval = 6
     private static let recheck: TimeInterval = 0.35
-    private(set) var suspendHighlight = false
+    private(set) var suspendHighlight = false { didSet { aimingFlag.set(suspendHighlight) } }
+    /// `suspendHighlight` for the AX worker: a measurement queued before ⌃ went down doesn't scroll during aiming.
+    private let aimingFlag = Flag()
 
     var isPaused: Bool { player.isPaused }
 
@@ -597,6 +603,7 @@ final class ReadingSession {
 
     private func place(_ piece: Pending, at start: Int) -> Int {
         queued.append(Playing(sentence: piece.sentence, start: start, wordStarts: piece.sentence.words.map { _ in nil }))
+        justRead = nil
         if queued.count == 1 { showCurrent(scroll: true) }
         return queued.count - 1
     }
@@ -722,7 +729,8 @@ final class ReadingSession {
             let starts = done.wordStarts.map { $0.map { String(format: "%.3f", Double(done.start + $0) / 24_000) } ?? "-" }
             print("[timing] \(starts.joined(separator: ",")) | \(done.sentence.text)")
         }
-        queued.removeFirst()
+        let done = queued.removeFirst()
+        justRead = queued.isEmpty ? done.sentence : nil
         markedWord = nil // the next sentence's first word takes over the mark
         sentenceNumber += 1
         entry = nil
@@ -756,6 +764,8 @@ final class ReadingSession {
         var relocated: Sentence?
         var triedRelocate = false
         var scrolled = false
+        /// Where a sentence without lines is, roughly, in a document that can't measure text out of view.
+        var place: CGRect?
         var diagnosis: String?
         var window: CGWindowID?
     }
@@ -763,7 +773,7 @@ final class ReadingSession {
     /// `wantWords`: also measure each word's box (once per sentence, and
     /// again if the text reflowed).
     private func measure(_ sentence: Sentence, relocate: Bool, scrollIfNeeded: Bool, wantWords: Bool) async -> Measured {
-        let doc = document, needWindow = windowID == nil
+        let doc = document, needWindow = windowID == nil, aiming = aimingFlag
         return await AXWorker.shared.run {
             var m = Measured()
             var current = sentence
@@ -774,12 +784,13 @@ final class ReadingSession {
                 if let fresh = doc.relocate(current) { m.relocated = fresh; current = fresh; m.lines = doc.lines(of: fresh) }
             }
             m.visible = doc.visibleRect()
-            if scrollIfNeeded, let v = m.visible, CGRect.union(of: m.lines).map({ !v.contains($0) }) ?? !doc.measuresOffScreen {
-                doc.scrollIntoView(current)
+            if scrollIfNeeded, !aiming.isSet, let v = m.visible, CGRect.union(of: m.lines).map({ !v.contains($0) }) ?? !doc.measuresOffScreen,
+               doc.scrollIntoView(current) {
                 m.scrolled = true
                 let moved = doc.lines(of: current)
                 if !moved.isEmpty { m.lines = moved }
             }
+            if m.lines.isEmpty, !doc.measuresOffScreen { m.place = doc.place(of: current) }
             if needWindow { m.window = doc.windowID() }
             if m.lines.isEmpty { m.diagnosis = doc.linesDiagnosis(of: current) }
             else if wantWords || m.relocated != nil || m.scrolled { m.words = doc.words(of: current) }
@@ -807,7 +818,10 @@ final class ReadingSession {
                 print("[highlight] \(label): page re-rendered, found it again")
             }
             self.notePage(m)
-            if m.scrolled { self.followGraceUntil = Date().addingTimeInterval(0.8) }
+            if m.scrolled {
+                self.followGraceUntil = Date().addingTimeInterval(0.8)
+                print("[unread] \(Self.clock()) highlight: scrolled \(label) into view")
+            }
             guard let bounds = CGRect.union(of: m.lines), let visible = m.visible else {
                 print("[highlight] \(label) → no box: \(m.diagnosis ?? "")")
                 self.overlay.hide()
@@ -830,29 +844,36 @@ final class ReadingSession {
         }
         endGesture()
         checkWindow()
-        guard !suspendHighlight, !refreshing, let current = queued.first?.sentence else { return }
+        let reading = queued.first?.sentence // nil between sentences: then only `following` is judged, by `justRead`
+        guard !suspendHighlight, !refreshing, let current = reading ?? justRead else { return }
         refreshing = true
         refreshStarted = Date()
         let token = highlightToken
         // Relocating walks the tree; not more than twice a second.
-        let mayRelocate = Date().timeIntervalSince(lastRelocateAttempt) > 0.5
-        let wantWords = wordBoxes?.range !== current.range
+        let mayRelocate = reading != nil && Date().timeIntervalSince(lastRelocateAttempt) > 0.5
+        let wantWords = reading != nil && wordBoxes?.range !== current.range
         Task { [weak self] in
             guard let m = await self?.measure(current, relocate: mayRelocate, scrollIfNeeded: false, wantWords: wantWords), let self else { return }
             self.refreshing = false
             self.refreshStuckLogged = false
             let started = self.refreshStarted
-            self.logRefresh(m, took: Date().timeIntervalSince(started), current: current)
+            if reading != nil { self.logRefresh(m, took: Date().timeIntervalSince(started), current: current) }
             if m.triedRelocate { self.lastRelocateAttempt = Date() }
             if let window = m.window { self.windowID = window }
             guard !self.cancelled, token == self.highlightToken, !self.suspendHighlight,
-                  self.queued.first?.sentence.range === current.range else { return }
-            if let fresh = m.relocated { self.queued[0].sentence = fresh }
-            self.notePage(m)
-            guard let bounds = CGRect.union(of: m.lines), let visible = m.visible else { return }
-            // If the user scrolled the sentence away, stop dragging the page
-            // back; resume following once it's on screen again.
-            if Date() > self.followGraceUntil { self.following = visible.intersects(bounds) }
+                  (self.queued.first?.sentence ?? self.justRead)?.range === current.range else { return }
+            if reading != nil {
+                if let fresh = m.relocated { self.queued[0].sentence = fresh }
+                self.notePage(m)
+            }
+            // If the user scrolled the sentence away, stop dragging the page back; resume following once
+            // it's on screen again. A sentence Preview can't measure is judged by its page.
+            if Date() > self.followGraceUntil, let visible = m.visible, let at = CGRect.union(of: m.lines) ?? m.place,
+               self.following != visible.intersects(at) {
+                self.following.toggle()
+                print("[highlight] \(Self.label(current)): \(self.following ? "back in view, following again" : "scrolled away\(m.lines.isEmpty ? " (its page)" : ""), not following")")
+            }
+            guard reading != nil, !m.lines.isEmpty, let visible = m.visible else { return }
             self.show(m, in: visible, measuredAt: started)
         }
     }
@@ -1026,4 +1047,11 @@ final class ReadingSession {
         a.count == b.count && zip(a, b).allSatisfy { abs($0.width - $1.width) < 1 && abs($0.height - $1.height) < 1 }
     }
 
+}
+
+/// A Boolean the main actor sets and the AX worker reads.
+private final class Flag: Sendable {
+    private let value = Atomic<Bool>(false)
+    var isSet: Bool { value.load(ordering: .relaxed) }
+    func set(_ on: Bool) { value.store(on, ordering: .relaxed) }
 }

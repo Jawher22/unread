@@ -21,13 +21,14 @@ enum Hyphens {
         private var plain: Set<String> = []
         private var hyphenated: Set<String> = []
 
-        init() {}
-
         /// Hyphens at a line end ("para- graph": hyphen, space) are the ones in question, so only
-        /// tokens with a hyphen inside count as the document's compounds.
+        /// tokens with a hyphen inside count as the document's compounds, and neither half of a
+        /// broken word counts as a word ("plicative" in "multi- plicative" would keep its hyphen).
         mutating func add(_ text: String) {
+            var broken = false
             for token in text.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "-" }) {
-                if token.hasPrefix("-") || token.hasSuffix("-") { continue }
+                defer { broken = token.hasSuffix("-") }
+                if broken || token.hasPrefix("-") || token.hasSuffix("-") { continue }
                 if token.contains("-") { hyphenated.insert(String(token)) } else { plain.insert(String(token)) }
             }
         }

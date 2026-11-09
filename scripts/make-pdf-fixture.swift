@@ -6,7 +6,7 @@
 //
 // Source commands, one per line (# starts a comment):
 //   page                     a new US Letter page
-//   header <text>            running header, centered at the top
+//   header [<size>pt] <text> running header, centered at the top, in italic (8 pt unless a size is given)
 //   footer <y> <text>        centered at height y (points from the bottom)
 //   title <text>             bold, centered, full width
 //   center <text>            centered, full width
@@ -95,7 +95,10 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
     case "page":
         endPage(); context.beginPDFPage(nil); open = true
         y = top; column = -1; footnotes = 0
-    case "header": centered(rest, y: 756, font: italic)
+    case "header":
+        let size = rest.split(separator: " ").first.flatMap { $0.hasSuffix("pt") ? Double($0.dropLast(2)) : nil }
+        let text = size == nil ? rest : String(rest.drop { $0 != " " }.dropFirst())
+        centered(text, y: 756, font: size.map { font("TimesNewRomanPS-ItalicMT", CGFloat($0)) } ?? italic)
     case "footer":
         let (at, text) = (CGFloat(Double(rest.prefix { $0 != " " })!), String(rest.drop { $0 != " " }.dropFirst()))
         centered(text, y: at, font: small)

@@ -5,7 +5,8 @@ import ApplicationServices
 /// whole text in reading order with a font per run, and that is all a page answers. The text
 /// has the page's furniture in it (running header, footer, page number, footnotes, figure
 /// labels), so each "\n"-line is judged by its font against the document's body size:
-/// smaller is furniture, bold or larger a heading, the rest is read. A "\n" isn't a paragraph
+/// smaller is furniture, bold or larger a heading, the rest is read. A running header set like
+/// the body is known by repeating on the pages around (`PDFKitDocument.runningLines`). A "\n" isn't a paragraph
 /// end (it comes at a link that ends a line, at a column end, at odd blocks), so lines of one
 /// kind join into a block until one ends like a sentence.
 final class PDFPage {
@@ -14,6 +15,8 @@ final class PDFPage {
         let size: CGFloat
         let bold: Bool
         let small: Bool // smaller than the body text: furniture
+        /// A running header or footer: it repeats at the top or foot of the pages around. Furniture.
+        let running: Bool
         /// Bold or larger than the body text: a heading, unless it says otherwise.
         let headingLike: Bool
         /// Footnote markers inside the line (a superscript digit or symbol): dropped.
@@ -63,7 +66,7 @@ final class PDFPage {
         }
         /// A drawn figure's text or a table's cells: its labels, each a short line of its own, or set
         /// small, or rows half of numbers.
-        var isFigureText: Bool { kind == .furniture && !lines[0].isNumber && (labels || small || PDFPage.isLabelRun(lines) || lines.filter(\.isTabular).count * 2 > lines.count) }
+        var isFigureText: Bool { kind == .furniture && !lines[0].isNumber && !lines[0].running && (labels || small || PDFPage.isLabelRun(lines) || lines.filter(\.isTabular).count * 2 > lines.count) }
         func contains(_ offset: Int) -> Bool { lines.contains { NSLocationInRange(offset, $0.range) } }
     }
 
@@ -74,7 +77,14 @@ final class PDFPage {
     private let headingSizes: Set<CGFloat>
     /// Whether the reference list is open at the page's end, as its last heading (or a caption, which
     /// closes it) says; nil without either (then it's whatever it was at the page's start).
-    private(set) var referencesAfterLastHeading: Bool?
+    var referencesAfterLastHeading: Bool? {
+        var open: Bool?
+        for b in blocks {
+            if b.kind == .heading { open = b.isReferencesHeading }
+            if case .caption = b.kind { open = false }
+        }
+        return open
+    }
     /// Whether the reference list is open at the page's end, once `resolveReferences` has placed it.
     private(set) var referencesAtEnd = false
 
@@ -99,8 +109,8 @@ final class PDFPage {
     }
 
     /// The sizes of the lines a page would take for headings, at the half point.
-    static func headingSizes(of attributed: NSAttributedString, body: CGFloat) -> Set<CGFloat> {
-        let page = PDFPage(index: 0, attributed: attributed, body: body, headingSizes: [])
+    static func headingSizes(of attributed: NSAttributedString, body: CGFloat, running: [NSRange]) -> Set<CGFloat> {
+        let page = PDFPage(index: 0, attributed: attributed, body: body, headingSizes: [], running: running)
         return Set(page.blocks.filter { $0.kind == .heading }.map { $0.lines[0].size })
     }
 
@@ -129,7 +139,8 @@ final class PDFPage {
     /// `body`: the document's body size (`PDFKitDocument.bodySize`), not this page's: a page
     /// that is one figure has more label text than anything else.
     /// `headingSizes`: the sizes headings come in on the document's first pages (`PDFKitDocument.headingSizes`).
-    init(index: Int, attributed: NSAttributedString, body: CGFloat, headingSizes: Set<CGFloat>) {
+    /// `running`: the "\n"-lines that are a running header or footer (`edgeLines`, matched across pages).
+    init(index: Int, attributed: NSAttributedString, body: CGFloat, headingSizes: Set<CGFloat>, running: [NSRange]) {
         self.index = index
         self.body = body
         self.headingSizes = headingSizes
@@ -138,25 +149,51 @@ final class PDFPage {
         var lines: [Line] = []
         /// A sentence of the page is still open: a caption now interrupts it.
         var waiting = false
-        var at = 0
-        while at < text.length {
-            let nl = text.range(of: "\n", range: NSRange(location: at, length: text.length - at))
-            let end = nl.location == NSNotFound ? text.length : nl.location
-            for piece in Self.split(NSRange(location: at, length: end - at), runs: runs, text: text) {
+        for nl in Self.newlineLines(of: text) {
+            let isRunning = running.contains(nl)
+            for piece in Self.split(nl, runs: runs, text: text) {
                 for part in waiting ? Self.endCaption(piece, text: text) : [piece] {
-                    guard let line = Self.line(part, runs: runs, text: text, body: body) else { continue }
+                    guard let line = Self.line(part, runs: runs, text: text, body: body, running: isRunning) else { continue }
                     lines.append(line)
-                    if !line.small, !line.isTabular, !Self.startsLikeCaption(line.text), line.words > 2 { waiting = !ReadingSession.endsLikeSentence(line.text) }
+                    if !line.small, !line.running, !line.isTabular, !Self.startsLikeCaption(line.text), line.words > 2 { waiting = !ReadingSession.endsLikeSentence(line.text) }
                 }
             }
-            at = end + 1
         }
         blocks = []
         blocks = Self.group(Self.captionsInOrder(lines), page: index, body: body, headingSizes: headingSizes)
-        referencesAfterLastHeading = nil
-        for b in blocks {
-            if b.kind == .heading { referencesAfterLastHeading = b.isReferencesHeading }
-            if case .caption = b.kind { referencesAfterLastHeading = false }
+    }
+
+    /// The page's text cut at each "\n", without it.
+    private static func newlineLines(of text: NSString) -> [NSRange] {
+        var out: [NSRange] = [], at = 0
+        while at < text.length {
+            let nl = text.range(of: "\n", range: NSRange(location: at, length: text.length - at))
+            let end = nl.location == NSNotFound ? text.length : nl.location
+            out.append(NSRange(location: at, length: end - at))
+            at = end + 1
+        }
+        return out
+    }
+
+    /// The first two and last two "\n"-lines of a page's text that have words (a page number alone
+    /// has none), each keyed by its size and its words alone: lower-cased, without digits or
+    /// punctuation, so "4 · The Long Way Home" and "The Long Way Home · 6" are one key. A running
+    /// header or footer is among them, set alike on every page; a paper's title, which its running
+    /// header repeats, is set larger. A caption isn't taken for one: "Figure 2: Accuracy per epoch"
+    /// can follow "Figure 1: …".
+    static func edgeLines(of attributed: NSAttributedString) -> [(range: NSRange, key: String)] {
+        let text = attributed.string as NSString
+        var keyed = newlineLines(of: text).compactMap { r -> (range: NSRange, key: String)? in
+            let s = text.substring(with: r)
+            let words = s.lowercased().split(whereSeparator: { !$0.isLetter }).joined(separator: " ")
+            return words.count >= 4 && !startsLikeCaption(s) ? (r, words) : nil
+        }
+        if keyed.count > 4 { keyed = Array(keyed.prefix(2) + keyed.suffix(2)) }
+        let runs = runs(of: attributed)
+        return keyed.map { line in
+            var weight: [CGFloat: Int] = [:]
+            for run in runs where run.size > 0 { weight[(run.size * 2).rounded() / 2, default: 0] += NSIntersectionRange(run.range, line.range).length }
+            return (line.range, "\(dominant(weight.filter { $0.value > 0 }) ?? 0) \(line.key)")
         }
     }
 
@@ -225,7 +262,7 @@ final class PDFPage {
         return [range]
     }
 
-    private static func line(_ range: NSRange, runs: [Run], text: NSString, body: CGFloat) -> Line? {
+    private static func line(_ range: NSRange, runs: [Run], text: NSString, body: CGFloat, running: Bool) -> Line? {
         let s = text.substring(with: range)
         guard s.unicodeScalars.contains(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }) else { return nil }
         let inLine = runs.compactMap { r -> (Run, NSRange)? in
@@ -247,7 +284,7 @@ final class PDFPage {
             if footnoteMarker.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil { markers.append(x) } else { subscripts.append(x) }
         }
         let bold = chars > 0 && boldChars * 10 >= chars * 6
-        return Line(range: range, size: size, bold: bold, small: size < body - 1.5, headingLike: bold || size > body + 0.75, markers: markers, subscripts: subscripts, text: s)
+        return Line(range: range, size: size, bold: bold, small: size < body - 1.5, running: running, headingLike: bold || size > body + 0.75, markers: markers, subscripts: subscripts, text: s)
     }
 
     static func startsLikeCaption(_ s: String) -> Bool {
@@ -290,7 +327,7 @@ final class PDFPage {
                 // attentions for head 5."). In the body, what a colon introduces is a block of its own (an
                 // equation, a list).
                 let caption = startsLikeCaption(group[0].text)
-                let same = prev.small == line.small && prev.bold == line.bold && abs(prev.size - line.size) <= (caption ? 0.25 : 0.6) && prev.isTabular == line.isTabular
+                let same = prev.small == line.small && prev.running == line.running && prev.bold == line.bold && abs(prev.size - line.size) <= (caption ? 0.25 : 0.6) && prev.isTabular == line.isTabular
                 let ends = ReadingSession.endsLikeSentence(prev.text) && !(caption && prev.text.trimmingCharacters(in: .whitespaces).hasSuffix(":"))
                 var joins = same && !ends && (!startsLikeCaption(line.text) || refers(prev.text)) && !prev.isNumber && !line.isNumber && !line.isListItem
                 if joins, line.headingLike, !wraps(prev.text, onto: line.text) { joins = false }
@@ -336,7 +373,7 @@ final class PDFPage {
     private static func classify(_ lines: [Line], body: CGFloat, last: Bool) -> Kind {
         let text = lines.map(\.text).joined(separator: " ")
         let words = text.split(whereSeparator: \.isWhitespace).count
-        if isLabelRun(lines) || lines.filter(\.isTabular).count * 2 > lines.count { return .furniture }
+        if lines[0].running || isLabelRun(lines) || lines.filter(\.isTabular).count * 2 > lines.count { return .furniture }
         if startsLikeCaption(text) { return lines[0].size >= body - 2.5 ? .caption(text.hasPrefix("Tab") ? "table" : "figure") : .furniture }
         if lines[0].small || lines[0].isNumber { return .furniture }
         // An author grid (names, affiliations, emails), arXiv's stamp down the margin.
@@ -398,15 +435,20 @@ final class PDFPage {
     /// one figure, PDFKit lists the caption's lines bottom first). Around each block that starts
     /// in lower case, the lines of the nearby readable blocks that sit in one column are sorted by
     /// their position and grouped again; nothing changes where the text was already in order.
-    func reorder(frame: (Line) -> CGRect?) {
-        var i = 0
+    /// Blocks up to `used` are in use (read, or a reading's position is in them) and stay as they
+    /// are. Returns false if some lines had no frame (Preview, on a page out of view): it's worth
+    /// doing again once the page has them.
+    @discardableResult
+    func reorder(after used: Int = -1, frame: (Line) -> CGRect?) -> Bool {
+        var complete = true
+        var i = used + 1
         while i < blocks.count {
             defer { i += 1 }
             guard blocks[i].kind != .furniture, blocks[i].lines[0].startsLowercase else { continue }
-            let window = (max(0, i - 3)...min(blocks.count - 1, i + 3)).filter { blocks[$0].kind != .furniture }
+            let window = (max(used + 1, i - 3)...min(blocks.count - 1, i + 3)).filter { blocks[$0].kind != .furniture }
             let placed = window.flatMap { blocks[$0].lines }.compactMap { line in frame(line).map { (line: line, frame: $0) } }
-            guard placed.count == window.reduce(0, { $0 + blocks[$1].lines.count }),
-                  let left = placed.map(\.frame.minX).min(), placed.allSatisfy({ $0.frame.minX - left < 24 }) else { continue }
+            guard placed.count == window.reduce(0, { $0 + blocks[$1].lines.count }) else { complete = false; continue }
+            guard let left = placed.map(\.frame.minX).min(), placed.allSatisfy({ $0.frame.minX - left < 24 }) else { continue }
             let sorted = placed.sorted { $0.frame.minY < $1.frame.minY }
             guard sorted.map(\.line.range.location) != placed.map(\.line.range.location) else { continue }
             let regrouped = Self.group(sorted.map(\.line), page: index, body: body, headingSizes: headingSizes)
@@ -416,6 +458,7 @@ final class PDFPage {
             blocks = out.enumerated().map { k, b in Block(id: BlockID(page: index, index: k), kind: b.kind, lines: b.lines, labels: b.labels) }
             i = window[0] + regrouped.count - 1
         }
+        return complete
     }
 
     var hasFigure: Bool {

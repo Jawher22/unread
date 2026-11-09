@@ -313,11 +313,18 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             exit(0)
         }
         let point = CGPoint(x: xy[0], y: xy[1])
-        // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows).
+        // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows);
+        // --from-text "…": from the first sentence holding it.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
         let found: (ReadableDocument, AnyObject)?
         if let pinned {
-            found = DocumentFinder.document(inApp: pinned).flatMap { d in d.documentStart().map { (d, $0) } }
+            found = DocumentFinder.document(inApp: pinned).flatMap { d in
+                var pos = d.documentStart()
+                if let needle = value(after: "--from-text") {
+                    while let p = pos, let s = d.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+                }
+                return pos.map { (d, $0) }
+            }
         } else {
             found = DocumentFinder.document(at: point).flatMap { d in d.paragraph(at: point).map { (d, $0.start) } }
         }

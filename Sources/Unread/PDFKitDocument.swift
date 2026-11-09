@@ -64,6 +64,13 @@ final class PDFKitDocument: ReadableDocument {
     private var leafIndex: [Int: LeafIndex] = [:]
     private var lineRangesMemo: [AXKey: [NSRange]] = [:]
     private var units: [BlockID: Unit] = [:]
+    /// Per page, the last block a unit or a lookup has used: blocks up to it keep their place (`retryOrder`).
+    private var used: [Int: Int] = [:]
+    /// Pages `PDFPage.reorder` couldn't judge for lack of frames (Preview, out of view).
+    private var unordered: Set<Int> = []
+    /// The words the document writes, from its first pages and every page parsed since.
+    private var vocabulary = Hyphens.Vocabulary()
+    private var inVocabulary: Set<Int> = []
     /// The user pointed into the reference list: read it.
     private var referencesReadable = false
     private let debugWalk = ProcessInfo.processInfo.environment["UNREAD_DEBUG_WALK"] != nil
@@ -91,38 +98,64 @@ final class PDFKitDocument: ReadableDocument {
         return s
     }
 
-    /// The first pages, which stand for the document: its body size and the words it writes.
-    private var sample: [NSAttributedString] { (0..<min(3, pageElements.count)).compactMap { string(of: $0) } }
-
     /// The size most of the document's characters are set in, from its first pages: a page
     /// that is one figure has more label text than body text, so its own count would lie.
     private lazy var bodySize: CGFloat = {
         var histogram: [CGFloat: Int] = [:]
-        for s in sample { for (size, n) in PDFPage.sizeHistogram(of: s) { histogram[size, default: 0] += n } }
+        for s in (0..<min(3, pageElements.count)).compactMap({ string(of: $0) }) { for (size, n) in PDFPage.sizeHistogram(of: s) { histogram[size, default: 0] += n } }
         return PDFPage.dominant(histogram) ?? 0
     }()
 
     /// The sizes headings come in, from the first pages: a figure's title on a later page is set at another.
     private lazy var headingSizes: Set<CGFloat> = {
         var sizes: Set<CGFloat> = []
-        for s in sample { sizes.formUnion(PDFPage.headingSizes(of: s, body: bodySize)) }
+        for i in 0..<min(3, pageElements.count) {
+            guard let s = string(of: i) else { continue }
+            sizes.formUnion(PDFPage.headingSizes(of: s, body: bodySize, running: runningLines(of: i)))
+        }
         return sizes
     }()
 
-    private lazy var vocabulary: Hyphens.Vocabulary = {
-        var v = Hyphens.Vocabulary()
-        for s in sample { v.add(s.string) }
-        return v
-    }()
+    /// The lines at the top or foot of page `i` that are at the top or foot of a page one or two
+    /// away too, in the same size (digits aside): a running header or footer, which a book sets
+    /// like its text, alternating its title and the chapter's.
+    private func runningLines(of i: Int) -> [NSRange] {
+        guard let own = string(of: i) else { return [] }
+        var near: Set<String> = []
+        for j in [i - 2, i - 1, i + 1, i + 2] where pageElements.indices.contains(j) {
+            if let s = string(of: j) { near.formUnion(PDFPage.edgeLines(of: s).map(\.key)) }
+        }
+        return PDFPage.edgeLines(of: own).filter { near.contains($0.key) }.map(\.range)
+    }
+
+    /// Hyphens are judged by the words the document writes: its first pages', then each page's as it's parsed.
+    private func learnWords(of i: Int) {
+        for j in Array(0..<min(3, pageElements.count)) + [i] where inVocabulary.insert(j).inserted {
+            if let s = string(of: j) { vocabulary.add(s.string) }
+        }
+    }
 
     private func parse(_ i: Int) -> PDFPage? {
         guard pageElements.indices.contains(i) else { return nil }
         if let p = parsed[i] { return p }
-        let p = PDFPage(index: i, attributed: string(of: i) ?? NSAttributedString(), body: bodySize, headingSizes: headingSizes)
-        if p.mayBeOutOfOrder { p.reorder { [self] line in frame(of: line, on: i) } }
+        learnWords(of: i)
+        let p = PDFPage(index: i, attributed: string(of: i) ?? NSAttributedString(), body: bodySize, headingSizes: headingSizes, running: runningLines(of: i))
+        if p.mayBeOutOfOrder, !p.reorder(frame: { [self] line in frame(of: line, on: i) }) { unordered.insert(i) }
         if p.hasFigure { p.markLabelStacks(wraps: index(of: i).wraps) }
         parsed[i] = p
         return p
+    }
+
+    /// A page parsed out of view in Preview had no frames to put its lines in order by: now that it
+    /// has them (its leaves measure), order the blocks nothing has used yet.
+    private func retryOrder(_ i: Int) {
+        guard unordered.remove(i) != nil, let p = parsed[i] else { return }
+        let before = p.blocks.map { $0.lines.map(\.range.location) }
+        if !p.reorder(after: used[i] ?? -1, frame: { [self] line in frame(of: line, on: i) }) { unordered.insert(i) }
+        guard p.blocks.map({ $0.lines.map(\.range.location) }) != before else { return }
+        if p.hasFigure { p.markLabelStacks(wraps: index(of: i).wraps) }
+        if pages[i] != nil { p.resolveReferences(openAtStart: referencesOpen(before: i)) }
+        if debugWalk { print("[pdf] page \(i + 1) put in order once it had frames, from block \((used[i] ?? -1) + 1)") }
     }
 
     private func page(_ i: Int) -> PDFPage? {
@@ -150,8 +183,11 @@ final class PDFKitDocument: ReadableDocument {
 
     private func block(_ id: BlockID) -> Block? {
         guard let p = page(id.page), p.blocks.indices.contains(id.index) else { return nil }
+        use(id)
         return p.blocks[id.index]
     }
+
+    private func use(_ id: BlockID) { used[id.page] = max(used[id.page] ?? -1, id.index) }
 
     /// The block after `id` in page order, on this page or the next ones.
     private func nextBlock(after id: BlockID) -> BlockID? {
@@ -215,7 +251,8 @@ final class PDFKitDocument: ReadableDocument {
             members.append(next); gaps.append(contentsOf: skipped)
         }
         let u = make(members, gaps: gaps)
-        for m in members { units[m.id] = u }
+        for m in members { units[m.id] = u; use(m.id) }
+        gaps.forEach(use)
         return u
     }
 
@@ -505,6 +542,7 @@ final class PDFKitDocument: ReadableDocument {
         let idx = LeafIndex(leaves: result.filter { $0.box != nil }, lineEnds: lineEnds.union(wraps), covered: covered, wraps: wraps, unmeasured: unmeasured)
         leafIndex[pageIndex] = idx
         if debugWalk { print("[pdf] leaves of page \(pageIndex + 1): \(found.count) found, \(idx.leaves.count) measured") }
+        if unmeasured == nil { retryOrder(pageIndex) }
         return idx
     }
 
@@ -666,12 +704,15 @@ final class PDFKitDocument: ReadableDocument {
     /// Preview scrolls a box into view. WebKit's plugin scrolls only whole pages (`AXScrollToVisible`
     /// puts the page's top at the view's top), so that's done when the sentence is out of view on a
     /// page whose top is below the view's, or off screen; on a page scrolled partway it would scroll
-    /// back up, away from the sentence, so there the reading stays where it is.
+    /// back up, away from the sentence, so there the reading stays where it is. A sentence that
+    /// crosses a page break scrolls to the page of its part in view, else of its first part on a page
+    /// not entirely above the view: pointing at a page's first line, whose sentence began at the foot
+    /// of the page before, doesn't scroll back to that page's top.
     ///
     /// Preview measures nothing on a page out of view, so a sentence there is found by scrolling its
     /// page's top into view first (`measuresOffScreen`).
-    func scrollIntoView(_ sentence: Sentence) {
-        guard let r = sentence.range as? PDFRange, let first = r.parts.first, let view = visibleRect() else { return }
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
+        guard let r = sentence.range as? PDFRange, let first = r.parts.first, let view = visibleRect() else { return false }
         var lines = boxes(for: r.parts)
         if lines.isEmpty, let scroller, let page = AX.frame(pageElements[first.page]), !page.intersects(view) {
             let top = CGRect(x: page.minX, y: page.minY, width: page.width, height: min(page.height, view.height))
@@ -684,16 +725,28 @@ final class PDFKitDocument: ReadableDocument {
                 usleep(20_000)
             }
         }
-        guard var box = CGRect.union(of: lines) else { return }
+        guard var box = CGRect.union(of: lines) else { return false }
         if let scroller {
             if box.height > view.height * 0.8, let top = lines.min(by: { $0.minY < $1.minY }) { box = top }
             AXUIElementSetAttributeValue(scroller, "AXMakeScreenRectVisible" as CFString, AX.rectValue(box))
-            return
+            return true
         }
-        guard !view.contains(box), let f = AX.frame(pageElements[first.page]), f.minY > view.minY + 2 || f.maxY <= view.minY else { return }
-        AXUIElementPerformAction(pageElements[first.page], "AXScrollToVisible" as CFString)
+        guard !view.contains(box) else { return false }
+        var pages: [Int] = []
+        for part in r.parts where !pages.contains(part.page) { pages.append(part.page) }
+        let shown = pages.first { i in CGRect.union(of: boxes(for: r.parts.filter { $0.page == i })).map(view.intersects) ?? false }
+        let target = shown ?? pages.first { AX.frame(pageElements[$0]).map { $0.maxY > view.minY } ?? true } ?? pages[pages.count - 1]
+        guard let f = AX.frame(pageElements[target]), f.minY > view.minY + 2 || f.maxY <= view.minY else { return false }
+        AXUIElementPerformAction(pageElements[target], "AXScrollToVisible" as CFString)
+        return true
     }
 
     /// WebKit measures every page; Preview only those in view.
     var measuresOffScreen: Bool { scroller == nil }
+
+    /// The frames of the sentence's pages, which Preview gives for every page, in view or not.
+    func place(of sentence: Sentence) -> CGRect? {
+        guard let r = sentence.range as? PDFRange else { return nil }
+        return CGRect.union(of: r.parts.compactMap { AX.frame(pageElements[$0.page]) })
+    }
 }

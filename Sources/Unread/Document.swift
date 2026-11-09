@@ -46,14 +46,19 @@ protocol ReadableDocument: AnyObject {
     /// positions. Measured right after `lines(of:)`, in the same layout.
     func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
-    func scrollIntoView(_ sentence: Sentence)
+    /// Whether it asked the app to scroll (an app that scrolls only whole pages may not).
+    @discardableResult func scrollIntoView(_ sentence: Sentence) -> Bool
     /// Whether text out of view can be measured. When it can't (Preview's PDF pages), a sentence
     /// without lines may only be out of view, and is scrolled to.
     var measuresOffScreen: Bool { get }
+    /// Where a sentence that has no lines is, roughly, when the document can't measure text out
+    /// of view: its page's frame. Says whether the user scrolled it away.
+    func place(of sentence: Sentence) -> CGRect?
 }
 
 extension ReadableDocument {
     var measuresOffScreen: Bool { true }
+    func place(of sentence: Sentence) -> CGRect? { nil }
 }
 
 extension CGRect {
@@ -1529,9 +1534,10 @@ final class WebDocument: ReadableDocument {
         return r.isNull || r.isEmpty ? nil : r
     }
 
-    func scrollIntoView(_ sentence: Sentence) {
-        guard let target = AX.element(p("AXUIElementForTextMarker", start(of: sentence.range))) else { return }
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
+        guard let target = AX.element(p("AXUIElementForTextMarker", start(of: sentence.range))) else { return false }
         AXUIElementPerformAction(target, "AXScrollToVisible" as CFString)
+        return true
     }
 }
 
@@ -1706,14 +1712,15 @@ final class NativeDocument: ReadableDocument {
     /// middle, so what was just read stays on screen above it. A range taller
     /// than the view lands with its start below the view, so for a sentence
     /// that tall only its first line is asked for.
-    func scrollIntoView(_ sentence: Sentence) {
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
         var r = range(sentence.range)
-        guard r.length > 0 else { return }
+        guard r.length > 0 else { return false }
         if let view = visibleRect(), let box = bounds(r), box.height > view.height * 0.8,
            let first = line(at: r.location), let lr = range(ofLine: first) {
             r = NSIntersectionRange(lr, r)
         }
         AXUIElementSetAttributeValue(element, kAXVisibleCharacterRangeAttribute as CFString, AX.rangeValue(r))
+        return true
     }
 }
 
