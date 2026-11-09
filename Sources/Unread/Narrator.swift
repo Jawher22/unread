@@ -304,7 +304,7 @@ actor Narrator {
     }
 }
 
-private final class CancelFlag: Sendable {
+final class CancelFlag: Sendable {
     private let value = Atomic<Bool>(false)
     var isCancelled: Bool { value.load(ordering: .relaxed) }
     func cancel() { value.store(true, ordering: .relaxed) }

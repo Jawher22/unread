@@ -461,11 +461,14 @@ if args.contains("--extract") {
         let t2 = Date()
         while n < limit {
             var next = pos.flatMap { doc.sentence(from: $0, in: scope) }
-            if next == nil, args.contains("--turn-pages"), doc.moreComing() {
-                // As a reading does: one turn, then a lookup every 0.1 s until the document has the next page or says there's none.
+            var turns = 0
+            while next == nil, args.contains("--turn-pages"), let end = doc.pageEnd(), turns < 8 {
+                // As a reading does: one turn per page end, then a lookup every 0.1 s until the document has the next
+                // page or says there's none, for at most 12 s. A page with nothing to read has an end of its own.
+                turns += 1
                 let t = Date()
                 doc.turnPage()
-                while next == nil, doc.moreComing() {
+                while next == nil, doc.pageEnd() == end, Date().timeIntervalSince(t) < 12 {
                     Thread.sleep(forTimeInterval: 0.1)
                     next = pos.flatMap { doc.sentence(from: $0, in: scope) }
                 }
