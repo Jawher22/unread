@@ -36,7 +36,7 @@ EXTRA=(); RAW=
 while (( $# )); do if [[ "$1" == --raw ]]; then RAW="$2"; shift 2; else EXTRA+=("$1"); shift; fi; done
 CORPUS=0; [[ "$PAGE" == *fixtures/corpus/* ]] && CORPUS=1
 (( CORPUS )) && EXTRA+=(--limit 5000) # whole articles; a flag given above comes first and wins
-ELECTRON=fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron
+ELECTRON=${ELECTRON:-fixtures/hosts/electron/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron}
 
 case "$PAGE" in
     *.txt | *.rtf) ENGINES=(Native) ;;

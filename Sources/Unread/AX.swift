@@ -151,7 +151,7 @@ enum AX {
         case sent(Date)
         /// Pulsed under 10 s ago and the positions are gone again: ask again then.
         case later(Date)
-        /// Not to be pulsed: not a Chromium browser, VoiceOver is on, or another assistive tool holds the flag.
+        /// Not to be pulsed: not built on Chromium, VoiceOver is on, or another assistive tool holds the flag.
         case never
     }
 
@@ -162,21 +162,29 @@ enum AX {
     /// for the whole process, for good. So true, true, false back to back: the count goes 1, 2, 1, the mode comes
     /// on 2.05 s later, and AppKit's flag ends at 0. A false while the count is 0 switches the mode off at once:
     /// never send one alone. All three calls answer −25208 (not implemented), from AppKit's super; they still
-    /// take effect. Electron isn't pulsed: AXManualAccessibility gives its positions, and older Electron releases
-    /// take a false as "screen reader stopped".
+    /// take effect. Electron gets AXManualAccessibility instead: it gives its positions (~1–3 s later), and Electron
+    /// doesn't answer the pulse alike in every release (44 ignores it). `enableTree` leaves a tree another client
+    /// woke alone, and that tree has no positions (T3 Code on 2026-11-09).
     private static var pulsedAt: [pid_t: Date] = [:]
     /// For the fixture host (`--pulse-electron`): Electron 39 answers the pulse as Chrome does.
     nonisolated(unsafe) static var pulsesElectron = false
 
     static func pulseScreenReader(_ pid: pid_t) -> Pulse {
-        guard let engine = chromium(pid), engine == .browser || pulsesElectron,
-              !NSWorkspace.shared.isVoiceOverEnabled else { return .never }
+        guard let engine = chromium(pid), !NSWorkspace.shared.isVoiceOverEnabled else { return .never }
         let now = Date()
         if let last = pulsedAt[pid] {
             if now < last + 4 { return .sent(last) }
             if now < last + 10 { return .later(last + 10) }
         }
         let app = AXUIElementCreateApplication(pid)
+        if engine == .electron, !pulsesElectron {
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            calls &+= 1
+            enabledAt[pid] = now
+            pulsedAt[pid] = now
+            print("[unread] pid \(pid) gives no text positions; asked Electron for its full tree (AXManualAccessibility)")
+            return .sent(now)
+        }
         if enhancedUserInterface(app) { return .never }
         let flag = "AXEnhancedUserInterface" as CFString
         AXUIElementSetAttributeValue(app, flag, kCFBooleanTrue)
