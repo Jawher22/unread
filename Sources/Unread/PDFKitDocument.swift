@@ -279,9 +279,10 @@ final class PDFKitDocument: ReadableDocument {
             guard let p = page(b.id.page) else { continue }
             if let last = locs.last, raw.last != 0x20 { append(0x20, last) }
             for line in b.lines {
+                let bullet = Self.bullet(of: line, in: p.text)
                 for i in line.range.location..<NSMaxRange(line.range) {
                     let loc = Loc(block: b.id, offset: i)
-                    if line.markers.contains(where: { NSLocationInRange(i, $0) }) { append(0x20, loc); continue }
+                    if i == bullet || line.markers.contains(where: { NSLocationInRange(i, $0) }) { append(0x20, loc); continue }
                     if line.subscripts.contains(where: { $0.location == i }), let last = raw.last, Self.isLetter(last) || Self.isDigit(last) { append(0x20, loc) } // "BERT" + "BASE": two words
                     let u = p.text.character(at: i)
                     append(Self.isSpace(u) ? 0x20 : u, loc)
@@ -324,8 +325,33 @@ final class PDFKitDocument: ReadableDocument {
         if debugWalk { print("[pdf] unit \(blocks.map { "p\($0.id.page + 1)b\($0.id.index)" }.joined(separator: "+"))\(gaps.isEmpty ? "" : " skipping \(gaps.map { "p\($0.page + 1)b\($0.index)" }.joined(separator: ","))"): \(spoken.debugDescription)") }
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.string = spoken
-        let sentences = tokenizer.tokens(for: spoken.startIndex..<spoken.endIndex).map { NSRange($0, in: spoken) }
+        // A label alone ("§ 2.", "3.1.", "2.") numbers the sentence after it, as in `PDFLayout`; PDFKit's text
+        // doesn't say where a paragraph starts.
+        var sentences: [NSRange] = [], label: Int?
+        for t in tokenizer.tokens(for: spoken.startIndex..<spoken.endIndex) {
+            var r = NSRange(t, in: spoken)
+            if let l = label { r = NSRange(location: l, length: NSMaxRange(r) - l); label = nil }
+            let text = (spoken as NSString).substring(with: r).trimmingCharacters(in: .whitespaces)
+            if Self.numberLabel.firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) != nil {
+                label = r.location
+                continue
+            }
+            sentences.append(r)
+        }
         return Unit(blocks: blocks.map(\.id), gaps: gaps, spoken: spoken, locs: outLocs, sentences: sentences)
+    }
+
+    private static let numberLabel = try! NSRegularExpression(pattern: #"^[§¶]?\s*\d{1,3}(\.\d{1,3})*\.$"#)
+
+    /// Bullets that start a list item's line: blanked, as on a web page, where they're markers of their own.
+    private static let bullets = CharacterSet(charactersIn: "•◦▪▫‣●○■□➢►")
+
+    /// Where a line's leading bullet is, if it starts with one followed by a space.
+    private static func bullet(of line: PDFPage.Line, in text: NSString) -> Int? {
+        guard let i = (line.range.location..<NSMaxRange(line.range)).first(where: { !isSpace(text.character(at: $0)) }),
+              i + 1 < NSMaxRange(line.range), isSpace(text.character(at: i + 1)),
+              let u = Unicode.Scalar(text.character(at: i)), bullets.contains(u) else { return nil }
+        return i
     }
 
     private static func isFrench(_ raw: [UInt16]) -> Bool {

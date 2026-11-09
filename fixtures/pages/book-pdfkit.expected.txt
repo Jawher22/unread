@@ -1,4 +1,3 @@
-# pending: Chromium
 # flags: --word-boxes
 Chapter One: The Ferry at Dusk
 The ferry left the north bank an hour before dark, and the ferryman lit his lantern before the boat had cleared the reeds.
