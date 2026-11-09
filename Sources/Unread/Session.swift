@@ -763,6 +763,7 @@ final class ReadingSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.cancelled else { return }
             guard self.following, !self.suspendHighlight else { self.turned = nil; return }
+            self.justRead = nil // the turn takes the sentence just read off the page: not a reason to stop following
             Task { await AXWorker.shared.run { if !stopped.isCancelled { doc.turnPage() } } }
         }
     }
@@ -777,7 +778,10 @@ final class ReadingSession {
             print("[timing] \(starts.joined(separator: ",")) | \(done.sentence.text)")
         }
         let done = queued.removeFirst()
-        justRead = queued.isEmpty ? done.sentence : nil
+        // A page's last sentence the reading has turned past (#87) is off the page because the reading moved on,
+        // not because the user looked away: `following` isn't judged by it.
+        let turnedPast = pageEnd != nil && turned?.end == pageEnd
+        justRead = queued.isEmpty && !turnedPast ? done.sentence : nil
         markedWord = nil // the next sentence's first word takes over the mark
         sentenceNumber += 1
         entry = nil
