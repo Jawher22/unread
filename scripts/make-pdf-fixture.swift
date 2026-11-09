@@ -6,7 +6,7 @@
 //
 // Source commands, one per line (# starts a comment):
 //   page                     a new US Letter page
-//   header <text>            running header, centered at the top
+//   header [<size>pt] <text> running header, centered at the top, in italic (8 pt unless a size is given)
 //   footer <y> <text>        centered at height y (points from the bottom)
 //   title <text>             bold, centered, full width
 //   center <text>            centered, full width
@@ -16,6 +16,8 @@
 //   para [flush]             a new paragraph; its first line is indented unless flush
 //   | <text>                 one typeset line of the paragraph
 //   figure <height> <a;b;…>  a framed drawing with one labelled box per label
+//   row <a;b;…>              a table row: its cells spread over the column, at the body size
+//   labels <size> <a;b;…>    a figure's axis: one short label per line, right-aligned, at that size
 //   footnote <text>          at the bottom of the column, under a short rule
 //   dest <name>              a link destination at the current line
 // Inside a line, {text} is a link to the destination "refs" and ^1 is a superscript.
@@ -93,7 +95,10 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
     case "page":
         endPage(); context.beginPDFPage(nil); open = true
         y = top; column = -1; footnotes = 0
-    case "header": centered(rest, y: 756, font: italic)
+    case "header":
+        let size = rest.split(separator: " ").first.flatMap { $0.hasSuffix("pt") ? Double($0.dropLast(2)) : nil }
+        let text = size == nil ? rest : String(rest.drop { $0 != " " }.dropFirst())
+        centered(text, y: 756, font: size.map { font("TimesNewRomanPS-ItalicMT", CGFloat($0)) } ?? italic)
     case "footer":
         let (at, text) = (CGFloat(Double(rest.prefix { $0 != " " })!), String(rest.drop { $0 != " " }.dropFirst()))
         centered(text, y: at, font: small)
@@ -124,6 +129,17 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
             draw(label, x: boxRect.midX - w / 2, y: boxRect.midY - 3, font: small)
         }
         columnY -= height + 6
+    case "row":
+        let cells = rest.split(separator: ";").map(String.init)
+        let slot = columnWidth / CGFloat(cells.count)
+        for (i, cell) in cells.enumerated() { draw(cell, x: x + CGFloat(i) * slot, y: columnY) }
+        columnY -= leading
+    case "labels":
+        let size = CGFloat(Double(rest.prefix { $0 != " " })!)
+        for label in rest.drop(while: { $0 != " " }).dropFirst().split(separator: ";") {
+            let f = font("TimesNewRomanPSMT", size), w = draw(String(label), x: 0, y: 0, font: f, measure: true)
+            draw(String(label), x: x + 70 - w, y: columnY, font: f); columnY -= size + 2 // right-aligned, like an axis's
+        }
     case "footnote":
         let at: CGFloat = 84 - CGFloat(footnotes) * 10
         if footnotes == 0 { context.setLineWidth(0.4); context.strokeLineSegments(between: [CGPoint(x: x, y: at + 10), CGPoint(x: x + 60, y: at + 10)]) }

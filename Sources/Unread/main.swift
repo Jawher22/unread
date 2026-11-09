@@ -313,11 +313,18 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
             exit(0)
         }
         let point = CGPoint(x: xy[0], y: xy[1])
-        // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows).
+        // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows);
+        // --from-text "…": from the first sentence holding it.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
         let found: (ReadableDocument, AnyObject)?
         if let pinned {
-            found = DocumentFinder.document(inApp: pinned).flatMap { d in d.documentStart().map { (d, $0) } }
+            found = DocumentFinder.document(inApp: pinned).flatMap { d in
+                var pos = d.documentStart()
+                if let needle = value(after: "--from-text") {
+                    while let p = pos, let s = d.sentence(from: p), !s.text.contains(needle) { pos = s.next }
+                }
+                return pos.map { (d, $0) }
+            }
         } else {
             found = DocumentFinder.document(at: point).flatMap { d in d.paragraph(at: point).map { (d, $0.start) } }
         }
@@ -458,7 +465,10 @@ if args.contains("--extract") {
                 if doc.lines(of: s).isEmpty, let fresh = doc.relocate(s) { s = fresh }
             }
             last = s
+            // As a reading does: Preview measures only the PDF pages in view, so one out of view is scrolled to.
+            if !doc.measuresOffScreen, doc.lines(of: s).isEmpty { doc.scrollIntoView(s) }
             let b = doc.bounds(of: s).map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "no bounds"
+            if b == "no bounds" { let why = doc.linesDiagnosis(of: s); if !why.isEmpty { print("     no bounds: \(why)") } }
             print("  \(n). \(b)  \(s.cue.map { "♪ \($0)" } ?? (fromStart ? s.text : String(s.text.prefix(90))))")
             if args.contains("--word-boxes") {
                 // Each display word with its box (#20); "?" where it has none.
