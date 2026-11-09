@@ -70,10 +70,29 @@ final class Player {
     private var recording: AVAudioFile?
 
     /// Also write everything the player outputs, silences included, to `url`
-    /// (`--simulate … --record`: hear pacing and voices without playing them).
+    /// (`--simulate … --record`: hear pacing and voices without playing them),
+    /// sample 0 at the start of the player's timeline, as the session's word
+    /// starts are. The tap's first buffer starts before it (~47 ms): written as
+    /// it came, every word in the file was that much later than scheduled.
     func record(to url: URL) throws {
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        node.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in try? file.write(from: buffer) }
+        var aligned = false
+        node.installTap(onBus: 0, bufferSize: 4096, format: format) { [node, format] buffer, when in
+            if !aligned {
+                guard let start = node.playerTime(forNodeTime: when)?.sampleTime else { return } // before the timeline
+                aligned = true
+                if start > 0, let pad = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(start)) {
+                    pad.frameLength = pad.frameCapacity // zeroed
+                    try? file.write(from: pad)
+                } else if start < 0 {
+                    let skip = Int(min(-start, Int64(buffer.frameLength)))
+                    let channel = buffer.floatChannelData![0]
+                    channel.update(from: channel + skip, count: Int(buffer.frameLength) - skip)
+                    buffer.frameLength -= AVAudioFrameCount(skip)
+                }
+            }
+            try? file.write(from: buffer)
+        }
         recording = file
     }
 
