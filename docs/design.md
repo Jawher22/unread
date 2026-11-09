@@ -176,6 +176,19 @@ Text comes from the macOS Accessibility (AX) tree, not screenshots.
 - **Text edited while reading:** positions are `NativeRange`s, a character range tagged with the version of the text it came from. Each call that reads or measures first compares `AXNumberOfCharacters` with the snapshot (one cheap call); if it changed, `AXValue` is re-read, the edit is found as the common prefix and suffix of the two texts, and older ranges are shifted past it. An edit that keeps the length the same (replacing a word with one as long) isn't noticed. In the native host, typing a paragraph at the top in the middle of a reading moved every following highlight down by exactly the new text's height.
 - An app's windows on another Space aren't in `AXWindows` (a TextEdit document opened with `open -g`), but `AXMainWindow` still returns them, and they read and scroll the same.
 
+**PDF and EPUB readers (#16, probed 2026-11-08 on macOS 27).** Each reader shows a different tree, and none is fully covered by today's documents. Tested with the BERT paper (ACL, two columns), "Attention Is All You Need" (arXiv) and a Project Gutenberg EPUB. Chrome isn't installed here, so Chromium's viewer was tried in the Electron fixture host, and Aside shows the same tree. `scripts/reader-probe.swift <pid>` reruns the probe on a document opened in the background.
+
+| Reader | Engine | Document found? | Sentences | Bounds | Follow-up |
+| --- | --- | --- | --- | --- | --- |
+| Chromium's viewer (Chrome, Aside, Electron) | PDFium, in a web area | Yes, when pointed at. `--extract --pid` takes the outer of three nested web areas | All 16 pages walked, but cut at every line end | Line boxes for 84% of pieces | #85 |
+| Preview | PDFKit | No: `AXPage`s, neither a web area nor a text area | Page text is complete and in column order | Leaves only, and the leaves miss text | #86 |
+| Safari | PDFKit (the same tree as Preview) | No | As Preview | As Preview | #86 |
+| Books | WebKit behind the iOS bridge | Yes (a web area), but the empty one of two | None: no text call works | Paragraph frames only | #87 |
+
+- *Chromium (PDFium):* the document's web area holds an `AXLandmarkRegion` with one `AXGroup` per paragraph. A paragraph's text keeps the PDF's line ends as `\r\n`, and `NLTokenizer` ends a sentence at each one. A line-end hyphen is U+0002, which Unread drops, joining the halves: right for "representa-tion", wrong for "task-specific" ("taskspecific"). The content stream's order puts BERT's footer and the arXiv paper's permission notice first. Lines dense with citation links are dropped as link rows, and figure labels are read as sentences.
+- *PDFKit (Preview, Safari):* every page is an `AXPage` from the start. Its `AXAttributedStringForRange` gives the whole page in reading order, and it answers no other text call (−25213). Leaves (`AXStaticText`) measure sub-ranges (`AXBoundsForRange`), but in a paragraph with links the text before the first link is in no leaf (BERT's first four abstract lines). Headers, footers and page numbers are in the page string, and a line-end hyphen becomes "representa- tion".
+- *Books:* now an iOS-style app. The book is two web areas side by side, and only the right one has leaves. A leaf's value is the part of a paragraph on the visible pages. `AXBoundsForRange` returns a zero box, a leaf's text-marker range holds another paragraph's text, and `AXStringForTextMarkerRange` fails. A right-arrow key event posted to Books' pid turns the page without focus.
+
 ## 7. Measurements (M-series MacBook, macOS 27)
 
 | What | Result |
@@ -349,7 +362,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 - **Kokoro dropped (2026-11-05):** the narrator is the only voice. Gone with it: the voice choice, per-voice speed, the opening-clause split (#14), Kokoro's word timing, and `--bench`, `--bench --split` and `--words`.
 
 **Phase 2: sources the author reads**
-14. **PDF and EPUB. Probe before building:** run `--extract` on an EPUB in Apple Books (WebKit, may already work), a PDF in Chrome's viewer (PDFium exposes an AX tree) and a PDF in Preview (PDFKit). Then fix what's missing: page headers, page numbers, hyphenation. OCR via ScreenCaptureKit + Vision is the last resort.
+14. **PDF and EPUB.** Probed (#16, 2026-11-08, §6): Chromium's PDF viewer already reads, but cuts sentences at line ends (#85). Preview and Safari need a document type for PDFKit's pages (#86). Books gives text without positions (#87). OCR via ScreenCaptureKit + Vision is the last resort.
 15. **LLM responses still streaming** (T3 Code, Claude): at the end of the text, wait briefly for it to grow before finishing.
 16. **Text normalization:** numbers, abbreviations, URLs, identifiers in inline code; a policy for code blocks (default: skip `<pre>` blocks, read inline code) and tables. Done for the narrator (#18, 2026-11-05): see §7. Code blocks (#24) and tables (#26): a cue, decided 2026-11-07 (§9). URLs are still dropped from the text.
 
