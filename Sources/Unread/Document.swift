@@ -525,7 +525,7 @@ final class WebDocument: ReadableDocument {
     }
 
     func relocate(_ s: Sentence) -> Sentence? {
-        guard isStale(s) else { return nil }
+        guard !detached, isStale(s) else { return nil }
         // Search for the start of its text in the current tree. A list item's
         // bullet is a separate marker element, so match what follows it.
         var needle = s.text
@@ -1345,6 +1345,7 @@ final class WebDocument: ReadableDocument {
     /// taller than a line and are re-measured or dropped. WebKit is precise
     /// either way.
     func lines(of sentence: Sentence) -> [CGRect] {
+        if detached { return [] }
         if let shown = sentence.shows { return AX.frame(shown).flatMap(onScreen).map { [$0] } ?? [] }
         if let cached = layouts.first(where: { $0.range === sentence.range }) {
             if let now = rect(cached.anchor), abs(now.width - cached.anchorRect.width) < 1, abs(now.height - cached.anchorRect.height) < 1 {
@@ -1452,6 +1453,7 @@ final class WebDocument: ReadableDocument {
     /// When a sentence gets no box: are its markers still alive (the page
     /// may have re-rendered since it was extracted), and what did the words say?
     func linesDiagnosis(of sentence: Sentence) -> String {
+        if detached { return "the page is out of its window (a tab in the background)" }
         let now = SpeechText.clean(string(sentence.range)) ?? ""
         let words = wordBoxes(in: sentence.range)
         let whole = rect(sentence.range).map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil"
@@ -1481,6 +1483,14 @@ final class WebDocument: ReadableDocument {
     }
 
     private func rect(_ range: AnyObject) -> CGRect? { AX.rect(p("AXBoundsForTextMarkerRange", range)) }
+
+    /// A browser tab in the background: its view is out of the window, and its tree still answers every
+    /// frame and text bounds with the layout it had when shown. Only its window is gone.
+    private var detached: Bool {
+        var window: AnyObject?
+        AX.calls &+= 1
+        return AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &window) == .noValue
+    }
 
     /// Whether the app answers text-position queries: a Chromium browser without inline text boxes (Aside;
     /// Chrome without VoiceOver) gives zero-size boxes while its elements have real frames. Then highlights fall
