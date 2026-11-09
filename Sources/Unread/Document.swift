@@ -1757,11 +1757,13 @@ enum DocumentFinder {
         return document(climbingFrom: again)
     }
 
-    /// The Books window under the point, if the topmost window there is Books'.
+    /// The Books window under the point, if the topmost window there is Books'. Unread's own panel, drawn just
+    /// above the window being read at the same level, isn't a window the user points at.
     private static func booksWindow(at point: CGPoint) -> AXUIElement? {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let me = Int(getpid())
         guard let top = windows.first(where: { w in
-                  (w[kCGWindowLayer as String] as? Int) == 0
+                  (w[kCGWindowLayer as String] as? Int) == 0 && (w[kCGWindowOwnerPID as String] as? Int) != me
                       && (w[kCGWindowBounds as String]).flatMap { CGRect(dictionaryRepresentation: $0 as! CFDictionary) }?.contains(point) == true
               }),
               let pid = (top[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }), BooksDocument.isBooks(pid) else { return nil }
