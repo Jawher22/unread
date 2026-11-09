@@ -258,14 +258,37 @@ if let i = args.firstIndex(of: "--at"), args.indices.contains(i + 1) {
             let text = ((AX.attr(e, kAXValueAttribute) as? String) ?? "").prefix(60).debugDescription
             return "\(AX.role(e) ?? "?") \(AX.frame(e).map { "\($0)" } ?? "-") \(text)"
         }
-        let hit = AX.element(at: point)
-        print("hit:  \(describe(hit))")
-        if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
-        // --pid N: use that app's window even if it isn't on top (fixture hosts).
+        // --pid N: use that app's window even if it isn't on top (fixture hosts). The screen's hit test is then
+        // whatever lies under a hidden host, so it isn't shown.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
-        guard let doc = pinned.map({ DocumentFinder.document(inApp: $0) }) ?? DocumentFinder.document(at: point) else { print("no document"); exit(1) }
+        if pinned == nil {
+            let hit = AX.element(at: point)
+            print("hit:  \(describe(hit))")
+            if let hit { print("leaf: \(describe(WebDocument.textLeaf(in: hit, at: point)))") }
+        }
+        // --wait S: keep looking for up to S seconds (a host that just launched; Chromium building its tree, PDFium its pages).
+        let wait = args.firstIndex(of: "--wait").flatMap { args.indices.contains($0 + 1) ? TimeInterval(args[$0 + 1]) : nil } ?? 0
+        let t = Date()
+        func lookup() -> ReadableDocument? { pinned.map({ DocumentFinder.document(inApp: $0) }) ?? DocumentFinder.document(at: point) }
+        var found = lookup()
+        while found?.paragraph(at: point) == nil, Date().timeIntervalSince(t) < wait {
+            Thread.sleep(forTimeInterval: 0.1)
+            found = lookup()
+        }
+        guard let doc = found else { print("no document"); exit(1) }
+        // --after S: look again S seconds after the document came up (PDFium builds a long PDF's pages for a while).
+        if let after = args.firstIndex(of: "--after").flatMap({ args.indices.contains($0 + 1) ? TimeInterval(args[$0 + 1]) : nil }) {
+            Thread.sleep(forTimeInterval: after)
+        }
+        // What the hold pays for each of its lookups (30 a second): once on the paragraph, once just off it.
+        func cost(_ p: CGPoint) -> String {
+            let calls = AX.calls, start = Date()
+            for _ in 0..<10 { _ = doc.paragraph(at: p) }
+            return String(format: "%.1f ms, %d AX calls", Date().timeIntervalSince(start) * 100, (AX.calls - calls) / 10)
+        }
         guard let para = doc.paragraph(at: point) else { print("no paragraph"); exit(1) }
         print("paragraph box: \(para.bounds)")
+        print("a lookup: \(cost(point)) on it, \(cost(CGPoint(x: point.x, y: para.bounds.minY - 1))) just above it")
         let scope = doc.scope(from: para.start)
         // Walk on like a reading session would, so a missing highlight on
         // later sentences shows up here too.

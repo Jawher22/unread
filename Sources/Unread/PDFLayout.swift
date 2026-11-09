@@ -66,12 +66,13 @@ final class PDFLayout {
     /// The most blocks one flow joins; a longer chain of continuations starts a new flow every this many.
     static let maxParts = 8
 
-    private let pageCount: () -> Int
+    private let pageCount: () -> (count: Int, known: Bool)
     private let source: (Int) -> [PDFBlock]?
     private let debug: Bool
 
     /// `page` gives a page's blocks, or nil if it isn't there (yet: PDFium builds pages one at a time).
-    init(pageCount: @escaping () -> Int, page: @escaping (Int) -> [PDFBlock]?, debug: Bool = false) {
+    /// `pageCount` isn't `known` while it's only the pages built so far.
+    init(pageCount: @escaping () -> (count: Int, known: Bool), page: @escaping (Int) -> [PDFBlock]?, debug: Bool = false) {
         self.pageCount = pageCount
         source = page
         self.debug = debug
@@ -88,6 +89,8 @@ final class PDFLayout {
         let lineWords: Int
         /// Holds a sentence of three words or more.
         let reads: Bool
+        /// Mostly numbers, as a table's rows are.
+        let tabular: Bool
         var kind: Kind = .other
         var bounds: CGRect? { input.bounds }
         /// Where its own text starts in `input.raw`: past a running header PDFium put in the same group.
@@ -107,6 +110,9 @@ final class PDFLayout {
             lineWords = text.components(separatedBy: "\n").map(count).max() ?? 0
             let unmarked = PDFLayout.withoutMarkers(text) // "…a wide margin.12" ends a sentence
             reads = words >= 3 && PDFLayout.matches(PDFLayout.sentenceEnd, unmarked)
+            let tokens = flat.split(separator: " ")
+            let numbers = tokens.filter { t in t.contains(where: \.isNumber) || t.allSatisfy { "-–—".contains($0) } }.count
+            tabular = tokens.count >= 6 && numbers * 5 >= tokens.count * 2
         }
     }
 
@@ -134,7 +140,7 @@ final class PDFLayout {
     private func blocks(_ page: Int) -> [Block]? {
         if let known = pages[page] { return known }
         guard page >= 0, let input = source(page) else {
-            if page >= 0, page < pageCount() { missing = true }
+            if page >= 0, case let c = pageCount(), page < c.count || !c.known { missing = true }
             return nil
         }
         let made = input.enumerated().map { Block(id: BlockID(page: page, index: $0), input: $1) }
@@ -155,7 +161,7 @@ final class PDFLayout {
     private func after(_ id: BlockID) -> BlockID? {
         if id.index + 1 < (blocks(id.page)?.count ?? 0) { return BlockID(page: id.page, index: id.index + 1) }
         var page = id.page + 1
-        while page < pageCount() {
+        while page < pageCount().count {
             if blocks(page)?.isEmpty == false { return BlockID(page: page, index: 0) }
             page += 1
         }
@@ -202,16 +208,38 @@ final class PDFLayout {
         return words.joined(separator: " ")
     }
 
-    /// Short blocks on the neighbouring pages: a running header repeats on one of them. The first page has none.
-    private func neighbours(of page: Int) -> Set<String> {
-        guard page > 0 else { return [] }
-        var out: Set<String> = []
+    /// Short blocks on the pages around one, where a running header repeats: the next and previous pages, and
+    /// the pages two away, since books and theses alternate the book's title and the chapter's. The first page
+    /// has none.
+    private struct Neighbours {
+        /// Every short block on the next and previous pages, and their first block's first line.
+        var adjacent: Set<String> = []
+        /// Those at the top or foot of the pages two away: a header or footer sits there, and text two pages on
+        /// can repeat a short block from the middle of a page (a heading, a table's row).
+        var alternate: Set<String> = []
+        func contains(_ text: String, atEdge: Bool) -> Bool { adjacent.contains(text) || (atEdge && alternate.contains(text)) }
+    }
+
+    private func neighbours(of page: Int) -> Neighbours {
+        guard page > 0 else { return Neighbours() }
+        var out = Neighbours()
         for p in [page - 1, page + 1] {
             guard let all = blocks(p) else { continue }
-            out.formUnion(all.filter { $0.lines <= 2 }.map { Self.plain($0.flat) })
-            if let first = all.first.flatMap({ Self.firstLine($0.input.raw) }) { out.insert(Self.plain(first.text)) }
+            out.adjacent.formUnion(all.filter { $0.lines <= 2 }.map { Self.plain($0.flat) })
+            if let first = all.first.flatMap({ Self.firstLine($0.input.raw) }) { out.adjacent.insert(Self.plain(first.text)) }
+        }
+        for p in [page - 2, page + 2] {
+            guard let all = blocks(p) else { continue }
+            out.alternate.formUnion(all.filter { $0.lines <= 2 && atEdge($0, of: all) }.map { Self.plain($0.flat) })
+            if let first = all.first.flatMap({ Self.firstLine($0.input.raw) }) { out.alternate.insert(Self.plain(first.text)) }
         }
         return out
+    }
+
+    /// The first or last block of its page, past page numbers and empty blocks.
+    private func atEdge(_ b: Block, of all: [Block]) -> Bool {
+        let text = all.filter { !$0.flat.isEmpty && !Self.matches(Self.pageNumber, $0.flat) }
+        return text.first === b || text.last === b
     }
 
     /// A block's first line, when more follows it: the text and its length with its line end.
@@ -225,27 +253,30 @@ final class PDFLayout {
 
     /// On a one-column page PDFium can put the running header in the same group as the text under it ("A Report
     /// on the Town Archive\r\nthe archive should keep both…"): the length of that first line, if it's one.
-    private func headerLength(_ b: Block, neighbours: Set<String>) -> Int? {
+    private func headerLength(_ b: Block, neighbours: Neighbours) -> Int? {
         guard b.id.index == 0, b.skip == 0, let first = Self.firstLine(b.input.raw) else { return nil }
         let text = Self.plain(first.text)
-        return text.count >= 8 && neighbours.contains(text) ? first.length : nil
+        return text.count >= 8 && neighbours.contains(text, atEdge: true) ? first.length : nil
     }
 
     /// A page number, an empty block, arXiv's stamp in the margin, or a running header: text repeated on a
-    /// neighbouring page.
-    private func pageFurniture(_ b: Block, neighbours: Set<String>) -> Bool {
+    /// neighbouring page, or at the top or foot of the pages two away.
+    private func pageFurniture(_ b: Block, in all: [Block], neighbours: Neighbours) -> Bool {
         let rotated = b.bounds.map { $0.height > 3 * $0.width && $0.height > 60 } ?? false
         if b.flat.isEmpty || Self.matches(Self.pageNumber, b.flat) || rotated { return true }
         // Not text in lower case: the end of a sentence carried over from the last page ("traffic since the
         // spring floods."), which a document that repeats itself can have on the next page too.
-        return b.lines <= 2 && Self.plain(b.flat).count >= 8 && b.flat.first?.isLowercase != true && neighbours.contains(Self.plain(b.flat))
+        return b.lines <= 2 && Self.plain(b.flat).count >= 8 && b.flat.first?.isLowercase != true
+            && neighbours.contains(Self.plain(b.flat), atEdge: atEdge(b, of: all))
     }
 
     /// The font a page's paragraphs are set in, if every one of three lines or more agrees: TeX's PDFs report
     /// exact sizes, others (Quartz's) sizes a step or two off block by block (the fixtures' 10-point text comes
-    /// out 9.3 and 10.7, their 8-point footer 10.7), and then fonts don't decide anything.
+    /// out 9.3 and 10.7, in steps of 4/3), and then fonts don't decide anything. Not counted: a block that starts
+    /// in lower case, which can be a footnote carried on from the last column (BERT's page 4), and a table's rows.
     private func bodyFont(_ all: [Block]) -> CGFloat? {
-        let sizes = all.filter { $0.kind == .paragraph && $0.lines >= 3 }.compactMap(\.input.fontSize).sorted()
+        let sizes = all.filter { $0.kind == .paragraph && $0.lines >= 3 && $0.flat.first?.isLowercase != true && !$0.tabular }
+            .compactMap(\.input.fontSize).sorted()
         guard let median = sizes.isEmpty ? nil : sizes[sizes.count / 2], sizes.allSatisfy({ abs($0 - median) <= median * 0.05 }) else { return nil }
         return median
     }
@@ -268,29 +299,44 @@ final class PDFLayout {
     private func classify(_ all: [Block], page: Int) {
         let neighbours = neighbours(of: page)
         func base(_ b: Block, footnote: Bool) -> Kind {
-            if pageFurniture(b, neighbours: neighbours) { return .furniture }
+            if pageFurniture(b, in: all, neighbours: neighbours) { return .furniture }
             if footnote, Self.matches(Self.footnote, (b.raw as String).trimmingCharacters(in: .whitespacesAndNewlines)) { return .footnote }
             if Self.matches(Self.caption, b.flat) { return .caption(b.flat.hasPrefix("Table") ? "table" : "figure") }
             if Self.matches(Self.references, b.flat) { return .references }
             return b.reads ? .paragraph : b.lines == 1 && b.words <= 14 ? .heading : .other
         }
         for b in all { b.kind = base(b, footnote: true) }
-        // A footnote has its marker and is set smaller than the page's paragraphs when its fonts can be trusted;
-        // else it sits below the paragraphs of its column, in the page's lower half. A paragraph that starts with
-        // "§ 3." or "4GB" has neither.
-        let body = all.filter { $0.kind == .paragraph }
+        // A footnote has its marker and is set smaller than the page's paragraphs when its fonts can be trusted.
+        // Else it's at the foot of its column, in the page's lower half, with no paragraph under it, and the
+        // run of footnotes it's in is set off from the text above by more space than the column leaves between its
+        // blocks. A paragraph that starts with "§ 6.", "4GB" or "*" has its marker too, but a run of them sits in
+        // the text: "§ 6." comes as close under "§ 5." as any paragraph under the one before it.
         let font = bodyFont(all)
         let boxes = all.compactMap(\.bounds)
-        func belowBody(_ b: Block) -> Bool {
-            guard let r = b.bounds, let top = boxes.map(\.minY).min(), let bottom = boxes.map(\.maxY).max() else {
-                return !all[(b.id.index + 1)...].contains { $0.kind == .paragraph }
-            }
-            return r.minY >= (top + bottom) / 2
-                && !body.contains { p in p.bounds.map { $0.minY > r.minY && $0.maxX > r.minX && $0.minX < r.maxX } ?? false }
+        let placed = all.filter { $0.kind != .furniture && $0.bounds != nil }
+        func atFoot(_ b: Block) -> Bool {
+            guard let r = b.bounds, let top = boxes.map(\.minY).min(), let bottom = boxes.map(\.maxY).max() else { return false }
+            let middle = (top + bottom) / 2
+            let column = placed.filter { $0.bounds!.maxX > r.minX && $0.bounds!.minX < r.maxX }.sorted { $0.bounds!.minY < $1.bounds!.minY }
+            guard r.minY >= middle, let i = column.firstIndex(where: { $0 === b }) else { return false }
+            // A footnote's second block starts in lower case; a footer under it isn't a paragraph.
+            let partOfNote = { (x: Block) in x.kind == .footnote || x.flat.first?.isLowercase == true }
+            if column[(i + 1)...].contains(where: { $0.kind == .paragraph && !partOfNote($0) }) { return false }
+            var first = i
+            while first > 0, partOfNote(column[first - 1]), column[first - 1].bounds!.minY >= middle { first -= 1 }
+            guard first > 0 else { return false }
+            let gaps = zip(column, column.dropFirst()).map { $1.bounds!.minY - $0.bounds!.maxY }
+            let gap = gaps[first - 1]
+            var others = gaps
+            others.remove(at: first - 1)
+            others.sort()
+            let typical = others.isEmpty ? 0 : others[(others.count - 1) / 2]
+            let lineHeight = column.map { $0.bounds!.height / CGFloat(max($0.lines, 1)) }.sorted()[column.count / 2]
+            return gap > max(1.5 * typical, 0.8 * lineHeight)
         }
         for b in all where b.kind == .footnote {
             let smaller = font.flatMap { f in b.input.fontSize.map { $0 < f * 0.95 } }
-            if !(smaller ?? belowBody(b)) { b.kind = base(b, footnote: false) }
+            if !(smaller ?? atFoot(b)) { b.kind = base(b, footnote: false) }
         }
         // A footnote can run on into the next block, as a paragraph does.
         var previous: Block?
@@ -328,12 +374,7 @@ final class PDFLayout {
             guard b.kind == .heading, let x = b.bounds?.minX, lefts.contains(where: { abs($0 - x) <= 3 }) else { return false }
             return !(font.flatMap { f in b.input.fontSize.map { $0 < f * 0.95 } } ?? false)
         }
-        func labelish(_ b: Block) -> Bool {
-            let tokens = b.flat.split(separator: " ")
-            let numbers = tokens.filter { t in t.contains(where: \.isNumber) || t.allSatisfy { "-–—".contains($0) } }.count
-            let tabular = tokens.count >= 6 && numbers * 5 >= tokens.count * 2
-            return ([.heading, .other, .furniture].contains(b.kind) || tabular) && !title(b)
-        }
+        func labelish(_ b: Block) -> Bool { ([.heading, .other, .furniture].contains(b.kind) || b.tabular) && !title(b) }
         for (i, b) in all.enumerated() {
             guard case .caption(let what) = b.kind else { continue }
             var j = i - 1
@@ -367,7 +408,7 @@ final class PDFLayout {
             text = b.flat
         } else if let next = blocks(all[i].id.page + 1) {
             let around = neighbours(of: all[i].id.page + 1)
-            if let first = next.first(where: { !pageFurniture($0, neighbours: around) }) {
+            if let first = next.first(where: { !pageFurniture($0, in: next, neighbours: around) }) {
                 text = headerLength(first, neighbours: around).map { (first.input.raw as NSString).substring(from: $0) } ?? first.flat
             }
         }

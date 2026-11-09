@@ -144,6 +144,34 @@ extension PDFLayout {
             "§ 4. The minutes are published within a week.",
             "Meetings are held in the town hall.",
         ]),
+        Check(name: "legal: a run of sections with a section sign down to the page's foot, then a real footnote", pages: [
+            (1...8).map { section($0, y: CGFloat(72 + 90 * ($0 - 1))) } + [block(["1"], x: 300, y: 790, width: 10)],
+            [section(9, y: 72),
+             block(["* Members who joined before the spring keep the plot they hold, whatever its size."], y: 162),
+             block(["4GB of photographs of the garden are kept by the secretary, one for every plot."], y: 182),
+             block(["1The gate house is open on Saturdays from nine until noon."], y: 730),
+             block(["2"], x: 300, y: 790, width: 10)],
+        ], said: (1...9).flatMap { sectionSaid($0) } + [
+            "* Members who joined before the spring keep the plot they hold, whatever its size.",
+            "4GB of photographs of the garden are kept by the secretary, one for every plot.",
+        ]),
+        Check(name: "running headers that alternate the book's title and the chapter's", pages: [
+            [block(["Chapter Two: The River Crossing"], x: 230, y: 60, width: 150),
+             block(["The ferry had stopped running in the spring, when the water rose over the",
+                    "landing, so the family walked to the ford and waited there for the"], y: 100),
+             block(["1"], x: 300, y: 760, width: 10)],
+            [block(["The Long Road Home", "light to change. Mara counted the stones in the shallows while her brother"], y: 40),
+             block(["2"], x: 300, y: 760, width: 10)],
+            [block(["Chapter Two: The River Crossing", "tied the bundles tighter. They had left the farm four days before, and the"], y: 40),
+             block(["3"], x: 300, y: 760, width: 10)],
+            [block(["The Long Road Home", "cart had lost a wheel on the second morning."], y: 40),
+             block(["4"], x: 300, y: 760, width: 10)],
+        ], said: [
+            "Chapter Two: The River Crossing",
+            "The ferry had stopped running in the spring, when the water rose over the landing, so the family walked to the ford and waited there for the light to change.",
+            "Mara counted the stones in the shallows while her brother tied the bundles tighter.",
+            "They had left the farm four days before, and the cart had lost a wheel on the second morning.",
+        ]),
         Check(name: "footnotes: a real one below the text, and paragraphs that open like one", pages: [
             [block(["The archive grew again this year, as it has every year since it opened.1",
                     "It now fills the whole basement, and the boxes that came last are",
@@ -225,6 +253,20 @@ extension PDFLayout {
         ]),
     ]
 
+    /// Six lines of a bylaw, "§ n." and two sentences.
+    private static func section(_ n: Int, y: CGFloat) -> PDFBlock {
+        block(["§ \(n). The members shall keep the paths of the garden clear, and every plot",
+               "holder shall cut the hedge along the side of the plot before the end of",
+               "the month in which the board asks for it. A holder who cannot do the work",
+               "may ask a neighbour to do it, or may pay the association to have it done",
+               "by the gardener, at the rate the board sets each spring for the work of",
+               "one hour, and the board shall write the payment in the accounts."], y: y)
+    }
+    private static func sectionSaid(_ n: Int) -> [String] {
+        ["§ \(n). The members shall keep the paths of the garden clear, and every plot holder shall cut the hedge along the side of the plot before the end of the month in which the board asks for it.",
+         "A holder who cannot do the work may ask a neighbour to do it, or may pay the association to have it done by the gardener, at the rate the board sets each spring for the work of one hour, and the board shall write the payment in the accounts."]
+    }
+
     private static let opening = [block(["The chain is on the second page."], y: 72)]
     private static let chain: [PDFBlock] = {
         var blocks: [PDFBlock] = []
@@ -252,7 +294,7 @@ extension PDFLayout {
     static func check() -> Bool {
         var ok = true
         for c in checks {
-            let layout = PDFLayout(pageCount: { c.pages.count }, page: { $0 < c.pages.count ? c.pages[$0] : nil })
+            let layout = PDFLayout(pageCount: { (c.pages.count, true) }, page: { $0 < c.pages.count ? c.pages[$0] : nil })
             let from = c.pointed.map { PDFPosition(BlockID(page: $0.0, index: $0.1), walked: false) } ?? layout.start()
             let said = layout.walk(from: from)
             guard said != c.said else { continue }

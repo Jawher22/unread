@@ -16,6 +16,10 @@ final class AXWorker: @unchecked Sendable {
     }
 
     func async(_ work: @escaping () -> Void) { queue.async(execute: work) }
+
+    /// Inside a hold's speculation (`PrimedSentence`): a document mustn't wait there for content still loading,
+    /// since the hold's lookups queue behind it on this queue. AXWorker only.
+    nonisolated(unsafe) static var speculating = false
 }
 
 /// An AXUIElement usable as a dictionary key (CFEqual / CFHash identity).
@@ -34,13 +38,19 @@ enum AX {
         return e
     }()
 
+    /// Accessibility calls made, each a message to the app (`--at` counts what a lookup costs). Not synchronized:
+    /// AXWorker's count, or a dev mode's.
+    nonisolated(unsafe) static var calls = 0
+
     static func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
         var v: AnyObject?
+        calls &+= 1
         return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
     }
 
     static func param(_ e: AXUIElement, _ name: String, _ p: AnyObject) -> AnyObject? {
         var v: AnyObject?
+        calls &+= 1
         return AXUIElementCopyParameterizedAttributeValue(e, name as CFString, p, &v) == .success ? v : nil
     }
 

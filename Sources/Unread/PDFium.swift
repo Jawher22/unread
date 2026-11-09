@@ -54,7 +54,10 @@ final class PDFiumDocument: ReadableDocument {
             }
             doc = inner
         }
-        if let known = recent.first(where: { CFEqual($0.element, doc) }) { return .document(known) }
+        if let known = recent.first(where: { CFEqual($0.element, doc) }) {
+            if known.alive() { return .document(known) }
+            recent.removeAll { $0 === known }
+        }
         let made = PDFiumDocument(area: doc)
         recent = [made] + recent.prefix(1)
         return .document(made)
@@ -116,7 +119,9 @@ final class PDFiumDocument: ReadableDocument {
         }
         guard let parent = regionParent else { return [] }
         if pageTotal == nil || regionList.count < pageTotal! {
-            let now = AX.children(parent).filter { AX.subrole($0) == "AXLandmarkRegion" }
+            // Only children not yet known to be regions are asked what they are.
+            let known = Set(regionList.map(AXKey.init))
+            let now = AX.children(parent).filter { known.contains(AXKey(element: $0)) || AX.subrole($0) == "AXLandmarkRegion" }
             if now.count > regionList.count { grewAt = Date() }
             regionList = now
         }
@@ -124,25 +129,32 @@ final class PDFiumDocument: ReadableDocument {
     }
 
     /// How many pages the PDF has, from the document's own description ("PDF document containing 15 pages"),
-    /// there from the start. Until it's found, the pages built so far.
-    private func pageCount() -> Int {
-        if let known = pageTotal { return known }
+    /// there from the start. Until it's found, the pages built so far, not `known`: more may come.
+    private func pageCount() -> (count: Int, known: Bool) {
+        if let known = pageTotal { return (known, true) }
         let built = regions().count
         if let parent = regionParent, let d = AX.attr(parent, kAXDescriptionAttribute) as? String,
            let n = d.split(whereSeparator: { !$0.isNumber }).compactMap({ Int($0) }).first, n > 0 {
             pageTotal = n
-            return n
+            return (n, true)
         }
-        return built
+        return (built, false)
+    }
+
+    /// The blocks read so far are still in the tree: Chromium hasn't rebuilt the PDF's (one call).
+    fileprivate func alive() -> Bool {
+        guard let block = axPages.values.first?.first else { return true }
+        return AX.role(block.element) != nil
     }
 
     private func region(_ page: Int) -> AXUIElement? {
         var all = regions()
         // A page the PDF has that PDFium hasn't built yet, met reading on: wait while pages keep coming (one every
         // ~150–300 ms), at most 3 s past the last one; not again until another arrives, and never after two waits
-        // gave up. Not while pointing (the hold asks 30 times a second): the layout keeps nothing it worked out
-        // without the page, and asks again.
-        while page >= all.count, page < pageCount(), !pointing, stalledAt != all.count, stalls < 2 {
+        // gave up. Not while pointing (the hold asks 30 times a second), and not in a hold's speculation, which
+        // the hold's lookups queue behind on AXWorker: the layout keeps nothing it worked out without the page,
+        // and asks again.
+        while page >= all.count, page < pageCount().count, !pointing, !AXWorker.speculating, stalledAt != all.count, stalls < 2 {
             if Date().timeIntervalSince(grewAt) > 3 { stalledAt = all.count; stalls += 1; break }
             Thread.sleep(forTimeInterval: 0.05)
             all = regions()
@@ -345,16 +357,49 @@ final class PDFiumDocument: ReadableDocument {
         web.linesDiagnosis(of: shapes[ObjectIdentifier(sentence.range)]?.parts.first ?? sentence)
     }
 
-    func visibleRect() -> CGRect? { web.visibleRect() }
+    /// The scroll areas and the window the document is clipped by, from the first look: the walk up to them is
+    /// ~40 calls, and the hold asks for the visible area 30 times a second.
+    private var clips: [AXUIElement]?
+
+    func visibleRect() -> CGRect? {
+        if clips == nil {
+            var found: [AXUIElement] = [], e = AX.parent(element)
+            while let cur = e {
+                let role = AX.role(cur)
+                if role == kAXScrollAreaRole || role == kAXWindowRole { found.append(cur) }
+                if role == kAXWindowRole { break }
+                e = AX.parent(cur)
+            }
+            clips = found
+        }
+        guard var r = AX.frame(element) else { return nil }
+        for c in clips ?? [] { if let f = AX.frame(c) { r = r.intersection(f) } }
+        return r.isNull || r.isEmpty ? nil : r
+    }
 
     func scrollIntoView(_ sentence: Sentence) { web.scrollIntoView(shapes[ObjectIdentifier(sentence.range)]?.parts.first ?? sentence) }
 
-    /// Blocks on screen, in reading order (element frames are right for these).
-    private func visibleBlocks() -> [(id: BlockID, kind: PDFLayout.Kind, frame: CGRect)] {
+    /// Blocks on screen, in reading order (element frames are right for these); only those on the page under
+    /// `point`, if given.
+    private func visibleBlocks(at point: CGPoint? = nil) -> [(id: BlockID, kind: PDFLayout.Kind, frame: CGRect)] {
         guard let visible = visibleRect() else { return [] }
         var out: [(BlockID, PDFLayout.Kind, CGRect)] = []
-        for (page, region) in regions().enumerated() {
-            guard let f = AX.frame(region), f.height >= 4, f.intersects(visible) else { continue }
+        let all = regions()
+        // Pages run down the document (two side by side in the two-page view), so the first one on screen is
+        // found by halving: 8 frames for 150 pages instead of 150. Frames are clipped to the scroller, so a page
+        // out of view is a sliver on the edge it left by.
+        func shown(_ f: CGRect) -> Bool { f.height >= 4 && f.intersects(visible) }
+        func above(_ f: CGRect) -> Bool { f.height < 4 ? f.midY < visible.midY : f.maxY <= visible.minY }
+        var lo = 0, hi = all.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            guard let f = AX.frame(all[mid]) else { lo = 0; break }
+            if above(f) { lo = mid + 1 } else { hi = mid }
+        }
+        for page in lo..<all.count {
+            guard let f = AX.frame(all[page]) else { continue }
+            guard shown(f) else { if above(f) { continue } else { break } }
+            if let point, !f.contains(point) { continue }
             let kinds = layout.kinds(onPage: page)
             for (i, b) in (axPages[page] ?? []).enumerated() where i < kinds.count {
                 if let bf = AX.frame(b.element), bf.height >= 4, bf.intersects(visible) { out.append((BlockID(page: page, index: i), kinds[i], bf)) }
@@ -371,7 +416,7 @@ final class PDFiumDocument: ReadableDocument {
         pointing = true
         defer { pointing = false }
         if let last = lastParagraph, let frame = AX.frame(last.element), frame.contains(point) { return (last.start, frame) }
-        guard let hit = visibleBlocks().first(where: { $0.frame.contains(point) && $0.kind != .furniture }), let b = axBlock(hit.id) else {
+        guard let hit = visibleBlocks(at: point).first(where: { $0.frame.contains(point) && $0.kind != .furniture }), let b = axBlock(hit.id) else {
             lastParagraph = nil
             return nil
         }
