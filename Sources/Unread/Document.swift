@@ -1745,6 +1745,9 @@ enum DocumentFinder {
 
     /// The document under a screen point, if any.
     static func document(at point: CGPoint) -> ReadableDocument? {
+        // Books' hit test over its pages times out or lands on the toolbar (#87), so a Books window under the point
+        // (asked of the window server, ~0.6 ms) goes to its document, which finds the text under the point by frames.
+        if let window = booksWindow(at: point), let doc = BooksDocument(around: window) { return doc }
         guard let hit = AX.element(at: point) else { return nil }
         AX.enableTree(for: AX.pid(hit))
         if let doc = document(climbingFrom: hit) { return doc }
@@ -1752,6 +1755,19 @@ enum DocumentFinder {
         guard let window = AX.element(AX.attr(hit, kAXWindowAttribute)), AX.wakeWebArea(in: window) != nil,
               let again = AX.element(at: point) else { return nil }
         return document(climbingFrom: again)
+    }
+
+    /// The Books window under the point, if the topmost window there is Books'.
+    private static func booksWindow(at point: CGPoint) -> AXUIElement? {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        guard let top = windows.first(where: { w in
+                  (w[kCGWindowLayer as String] as? Int) == 0
+                      && (w[kCGWindowBounds as String]).flatMap { CGRect(dictionaryRepresentation: $0 as! CFDictionary) }?.contains(point) == true
+              }),
+              let pid = (top[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }), BooksDocument.isBooks(pid) else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        return (AX.attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first { AX.frame($0)?.contains(point) == true }
+            ?? AX.element(AX.attr(app, kAXMainWindowAttribute))
     }
 
     private static func document(climbingFrom hit: AXUIElement) -> ReadableDocument? {
