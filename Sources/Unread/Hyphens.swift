@@ -56,7 +56,7 @@ enum Hyphens {
     }
 
     /// A half the hyphen can't follow: "pre- and post-training" is two words.
-    private static let connectors: Set<String> = ["and", "or", "to", "nor", "but", "et", "ou"]
+    static let connectors: Set<String> = ["and", "or", "to", "nor", "but", "et", "ou"]
     /// Prefixes that keep their hyphen before a word the document uses on its own ("multi-head"
     /// where it writes "heads", but "multi-plicative" is one word), even where the word list has
     /// the whole: it's Webster's of 1934, with "multihead". Only prefixes that seldom begin a

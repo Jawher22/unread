@@ -342,10 +342,13 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         }
         let point = CGPoint(x: xy[0], y: xy[1])
         // --pid N: read that app's document from the top instead (fixture hosts sit behind other windows);
-        // --from-text "…": from the first sentence holding it.
+        // with --pointed, from where a hold at the point would start in it (a window on another Space can't be hit-tested);
+        // with --from-text "…", from the first sentence holding it.
         let pinned = args.firstIndex(of: "--pid").flatMap { args.indices.contains($0 + 1) ? pid_t(args[$0 + 1]) : nil }
         let found: (ReadableDocument, AnyObject)?
-        if let pinned {
+        if let pinned, args.contains("--pointed") {
+            found = DocumentFinder.document(inApp: pinned).flatMap { d in d.paragraph(at: point).map { print("[simulate] pointed at \(point): \($0.bounds)"); return (d, $0.start) } }
+        } else if let pinned {
             found = DocumentFinder.document(inApp: pinned).flatMap { d in
                 var pos = d.documentStart()
                 if let needle = value(after: "--from-text") {
@@ -430,6 +433,8 @@ if args.contains("--extract") {
     //   --lines                       also print each sentence's line boxes
     //   --word-boxes                  also print each word's box (#20)
     //   --from-text "…"               point at the first visible text containing this, and start at the sentence holding it
+    //   --point x,y                   point at that screen position in the document, as a hold would (its paragraph's start)
+    //   --turn-pages                  at a page's end with more past it (a book's chapter, #87), turn the page as a reading would
     //   --slow                        pause 1.6 s per sentence (pages that re-render), then measure, like a reading would
     //   --wait S                      keep looking for up to S seconds (a host that just launched; Chromium building its tree)
     func value(after flag: String) -> String? { args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } }
@@ -441,6 +446,12 @@ if args.contains("--extract") {
         let t = Date()
         func open() -> ReadableDocument? { pid.map { DocumentFinder.document(inApp: $0) } ?? DocumentFinder.frontDocument() }
         func findStart(in doc: ReadableDocument) -> AnyObject? {
+            if let at = value(after: "--point") {
+                let xy = at.split(separator: ",").compactMap { Double($0) }
+                guard xy.count == 2, let para = doc.paragraph(at: CGPoint(x: xy[0], y: xy[1])) else { print("no paragraph at \(at)"); return nil }
+                print("paragraph at \(at): \(para.bounds)")
+                return para.start
+            }
             guard let needle = value(after: "--from-text") else { return fromStart ? doc.documentStart() : doc.firstVisible() }
             func search(from start: AnyObject?) -> AnyObject? {
                 var pos = start
@@ -485,6 +496,19 @@ if args.contains("--extract") {
         let t2 = Date()
         while n < limit {
             var next = pos.flatMap { doc.sentence(from: $0, in: scope) }
+            var turns = 0
+            while next == nil, args.contains("--turn-pages"), let end = doc.pageEnd(), turns < 8 {
+                // As a reading does: one turn per page end, then a lookup every 0.1 s until the document has the next
+                // page or says there's none, for at most 12 s. A page with nothing to read has an end of its own.
+                turns += 1
+                let t = Date()
+                doc.turnPage()
+                while next == nil, doc.pageEnd() == end, Date().timeIntervalSince(t) < 12 {
+                    Thread.sleep(forTimeInterval: 0.1)
+                    next = pos.flatMap { doc.sentence(from: $0, in: scope) }
+                }
+                print(next == nil ? "  [page turned, nothing new: the end]" : "  [page turned, the next page read \(Int(Date().timeIntervalSince(t) * 1000)) ms later]")
+            }
             if next == nil, let l = last { next = doc.sentence(after: l, scope: &scope) }
             if next == nil, last == nil, let again = findStart() { pos = again; scope = doc.scope(from: again); next = doc.sentence(from: again, in: scope) }
             guard var s = next else { break }

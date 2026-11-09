@@ -616,7 +616,8 @@ final class PDFLayout {
     }
 
     /// A line-end hyphen (U+0002) joins a word the typesetter broke ("para-graph") and stays in a word that has
-    /// one ("task-specific", "state-of-the-art"). The document's own spelling decides first, then the spell checker.
+    /// one ("task-specific", "state-of-the-art"), or apart before "and"/"or"/"to" ("pre- and post-training").
+    /// The document's own spelling decides first, then the spell checker.
     private func resolvingHyphens(_ s: String, language: String) -> String {
         guard s.contains("\u{02}") else { return s }
         let chars = Array(s)
@@ -628,6 +629,9 @@ final class PDFLayout {
             var r = i + 1
             while r < chars.count, chars[r].isLetter { r += 1 }
             let left = String(chars[l..<i]), right = String(chars[(i + 1)..<r])
+            // "pre-" + "and post-training": the hyphen hangs from the first word, which stays apart. Not in a
+            // chain ("English-" + "to-German").
+            if Hyphens.connectors.contains(right.lowercased()), r == chars.count || chars[r] != "-" { out += "- "; continue }
             out += joins(left, right, language: language) ? "" : "-"
         }
         return out

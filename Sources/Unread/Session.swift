@@ -257,6 +257,16 @@ final class ReadingSession {
         /// Reading reached the end of the text, and is waiting for more.
         var atEnd = false
     }
+    /// The page end the last lookup reached, when the document has more past it once the page is turned
+    /// (a book's next chapter, #87): the turn is asked for when the last sentence's speech has been heard.
+    private var pageEnd: Int?
+    /// The page end this reading last asked to turn past, and when: one turn per end.
+    private var turned: (end: Int, at: Date)?
+    /// Set by `stop`, read on the AX worker: a turn queued there before the stop isn't made.
+    private let stopped = CancelFlag()
+    /// How long to keep asking after a turn with nothing left to play. The document waits up to 10 s for
+    /// the next page, then says no more; this ends the reading even if it doesn't.
+    private static let turnWait: TimeInterval = 12
     /// A last sentence that doesn't end like one is read once it has stayed the same this long.
     private static let settle: TimeInterval = 0.7
     /// After the end of a page that changed, how long to wait for more text since it last changed.
@@ -382,6 +392,7 @@ final class ReadingSession {
 
     func stop() {
         cancelled = true
+        stopped.cancel()
         ready.forEach { $0.take.cancel() }
         live?.take.cancel()
         refresh?.invalidate()
@@ -447,14 +458,14 @@ final class ReadingSession {
         let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
         Task { [weak self] in
             let extractStart = Date()
-            let (found, newScope, rebuilt, open) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool) in
+            let (found, newScope, rebuilt, open, more, grows) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool, Int?, Bool) in
                 var sc = needScope ? doc.scope(from: position) : scopeNow
                 var s = doc.sentence(from: position, in: sc)
                 var rebuilt = false
                 if s == nil, let last { s = doc.sentence(after: last, scope: &sc); rebuilt = s != nil } // page re-rendered?
                 // The last text on the page, not ending like a sentence: it may still be being written.
-                let open = s.map { $0.cue == nil && !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
-                return (s, sc, rebuilt, open)
+                let open = doc.mayGrow && s.map { $0.cue == nil && !Self.endsLikeSentence($0.text) && $0.next.flatMap { doc.sentence(from: $0, in: sc) } == nil } ?? false
+                return (s, sc, rebuilt, open, s == nil ? doc.pageEnd() : nil, doc.mayGrow)
             }
             guard let self, !self.cancelled else { return }
             self.scope = newScope
@@ -463,7 +474,21 @@ final class ReadingSession {
             guard let sentence = found else {
                 self.producing = false
                 self.growth.atEnd = true
-                if let changed = self.growth.changedAt, now.timeIntervalSince(changed) < Self.streamWait {
+                self.pageEnd = more
+                if let end = more {
+                    // More once the page turns: ask again while this page plays (it's turned once its last sentence has been
+                    // said), while the user aims, and while the turn past this end is under way, until the document has the
+                    // next page or says there's none, for at most `turnWait`. The last sentence already said: turn now, unless
+                    // the user is aiming or has looked away from it (then the reading ends here). A new end (the next page
+                    // had nothing to read but a cue, or nothing at all) is turned past in turn.
+                    let busy = !self.queued.isEmpty || self.live != nil || !self.ready.isEmpty || !self.backlog.isEmpty
+                    if !busy, self.turned?.end != end, self.following, !self.suspendHighlight { self.turnPage(past: end) }
+                    if busy || self.suspendHighlight || self.turned.map({ $0.end == end && now.timeIntervalSince($0.at) < Self.turnWait }) == true {
+                        self.fillAgain()
+                        return
+                    }
+                }
+                if self.growth.changedAt.map({ now.timeIntervalSince($0) < Self.streamWait }) == true {
                     self.fillAgain() // the answer may still be coming
                     return
                 }
@@ -471,7 +496,8 @@ final class ReadingSession {
                 if self.queued.isEmpty, self.ready.isEmpty, self.backlog.isEmpty { self.finish() }
                 return
             }
-            if rebuilt || self.growth.atEnd { self.growth.changedAt = now }
+            self.pageEnd = nil
+            if grows, rebuilt || self.growth.atEnd { self.growth.changedAt = now } // a book's next page isn't new text
             self.growth.atEnd = false
             if open {
                 if let held = self.growth.held, held.text != sentence.text { self.growth.changedAt = now }
@@ -719,7 +745,27 @@ final class ReadingSession {
         guard !cancelled else { return }
         playerWantsMore = true
         scheduleNext()
+        // The page's last sentence has been said (nothing is scheduled behind it, nothing is coming):
+        // turn the page (#87) once it has been heard, unless the user has turned away from the sentence being read.
+        if let end = pageEnd, turned?.end != end, following, !suspendHighlight, queued.count <= 1, ready.isEmpty, live == nil, backlog.isEmpty {
+            turnPage(past: end, after: player.outputLatency)
+        }
         fill()
+    }
+
+    /// Turn to the page after this end (#87), once per end. "Consumed" is when the player has rendered the speech;
+    /// it's heard `delay` later (the output's latency: ~0.2 s on Bluetooth), so the page turns then. The document
+    /// doesn't wait for the tree: the lookups that follow find the next page when it's there. Never while the
+    /// user aims: a hold doesn't turn pages, and one that started during the delay turns once aiming ends.
+    private func turnPage(past end: Int, after delay: TimeInterval = 0) {
+        turned = (end, Date())
+        let doc = document, stopped = stopped
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.cancelled else { return }
+            guard self.following, !self.suspendHighlight else { self.turned = nil; return }
+            self.justRead = nil // the turn takes the sentence just read off the page: not a reason to stop following
+            Task { await AXWorker.shared.run { if !stopped.isCancelled { doc.turnPage() } } }
+        }
     }
 
     private func sentenceFinished() {
@@ -732,7 +778,10 @@ final class ReadingSession {
             print("[timing] \(starts.joined(separator: ",")) | \(done.sentence.text)")
         }
         let done = queued.removeFirst()
-        justRead = queued.isEmpty ? done.sentence : nil
+        // A page's last sentence the reading has turned past (#87) is off the page because the reading moved on,
+        // not because the user looked away: `following` isn't judged by it.
+        let turnedPast = pageEnd != nil && turned?.end == pageEnd
+        justRead = queued.isEmpty && !turnedPast ? done.sentence : nil
         markedWord = nil // the next sentence's first word takes over the mark
         sentenceNumber += 1
         entry = nil

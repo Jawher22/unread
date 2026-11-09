@@ -54,6 +54,17 @@ protocol ReadableDocument: AnyObject {
     /// Where a sentence that has no lines is, roughly, when the document can't measure text out
     /// of view: its page's frame. Says whether the user scrolled it away.
     func place(of sentence: Sentence) -> CGRect?
+    /// The last lookup found nothing because the text ends here for now, but more follows on the
+    /// next page (a book's next chapter): which page end it is, so the session turns once per end
+    /// (`turnPage`) when it has finished what's shown, and asks again until the new page is there
+    /// or the turn has failed. Nil: no more.
+    func pageEnd() -> Int?
+    /// Turn to the page after the end a lookup reached. Only the reading session calls it,
+    /// once the last sentence's speech has played; a lookup never turns a page.
+    func turnPage()
+    /// Text may be added while it's read (an answer being written, #17), so a last sentence that
+    /// doesn't end like one is held back a moment. A book's can't.
+    var mayGrow: Bool { get }
 }
 
 extension ReadableDocument {
@@ -86,6 +97,9 @@ extension ReadableDocument {
     func words(of sentence: Sentence) -> [CGRect?] { [] }
     func scope(from position: AnyObject) -> ReadingScope? { nil }
     func relocate(_ sentence: Sentence) -> Sentence? { nil }
+    func pageEnd() -> Int? { nil }
+    func turnPage() {}
+    var mayGrow: Bool { true }
     func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
 
     /// The sentence after `last`. If there's none because the page rebuilt
@@ -1789,10 +1803,11 @@ enum DocumentFinder {
         }
     }
 
-    /// A web area's document: a page, or the PDF in Chromium's viewer. The viewer's own controls (its toolbar,
+    /// A web area's document: a page, a book in Apple Books, or the PDF in Chromium's viewer. The viewer's own controls (its toolbar,
     /// a password prompt) are never read.
     private static func webDocument(_ area: AXUIElement, below: Bool) -> ReadableDocument? {
-        switch PDFiumDocument.find(near: area, below: below) {
+        if BooksDocument.isBridged(area) { return BooksDocument(around: area) } // Apple Books (#87)
+        return switch PDFiumDocument.find(near: area, below: below) {
         case .page: WebDocument(area: area)
         case .nothing: nil
         case .document(let pdf): pdf

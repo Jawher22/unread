@@ -237,6 +237,11 @@ extension PDFLayout {
             "It needs no task-specific setup, and it reads the paragraph under the pointer, as Collobert and Weston did.",
             "Die Verwaltung der Stadt hat beschlossen, das alte Rathaus im nächsten Jahr zu renovieren und die Brücke zu erneuern.",
         ]),
+        Check(name: "hyphens: apart before a connector, not in a chain", pages: [
+            [block(["Checks run pre~", "and post-training, and on first~", "or second-order terms, English~", "to-German too."], y: 72)],
+        ], said: [
+            "Checks run pre- and post-training, and on first- or second-order terms, English-to-German too.",
+        ]),
         Check(name: "footnote markers: after a word or a quote, not in a section number", pages: [
             [block(["The method is set out in Appendix A.1", "for the details of each step."], y: 72),
              block(["The first figure was drawn by hand.2", "The rest were drawn by the tool."], y: 110),
