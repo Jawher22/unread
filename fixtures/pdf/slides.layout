@@ -1,0 +1,29 @@
+# A short bullet deck (#85 review): a title slide, then slides of bullets that end in no
+# period, one of them short and one wrapping onto a second line, and slide numbers.
+# The text is original. Rebuild the PDF with
+#   swift scripts/make-pdf-fixture.swift fixtures/pdf/slides.layout fixtures/pages/slides.pdf
+columns 72 648
+font 20
+page landscape
+gap 150
+title Plans for the Reading Room
+center Town archive, spring 2026
+page landscape
+column
+heading What the visitors asked for
+para flush
+| • Open two evenings a week from the start of spring
+para flush
+| • Move the maps to the long table by the window, where the
+|   light is better for reading them
+para flush
+| • More chairs
+footer 30 2
+page landscape
+column
+heading What it would cost
+para flush
+| • The heating and the light of the room for six hours a week
+para flush
+| • A volunteer at the desk on each of the evenings
+footer 30 3

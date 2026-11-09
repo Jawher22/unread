@@ -5,7 +5,9 @@
 //   swift scripts/make-pdf-fixture.swift fixtures/pdf/paper.layout fixtures/pages/paper.pdf
 //
 // Source commands, one per line (# starts a comment):
-//   page                     a new US Letter page
+//   page [landscape]         a new US Letter page, upright unless landscape
+//   columns <x,x…> <width>   the columns' left edges and width (default 54,315 243: two columns)
+//   font <points>            the body's size (default 10); headings are bold at it, lines 1.2 times it
 //   header <text>            running header, centered at the top
 //   footer <y> <text>        centered at height y (points from the bottom)
 //   title <text>             bold, centered, full width
@@ -15,7 +17,7 @@
 //   heading <text>           a bold line in the column
 //   para [flush]             a new paragraph; its first line is indented unless flush
 //   | <text>                 one typeset line of the paragraph
-//   figure <height> <a;b;…>  a framed drawing with one labelled box per label
+//   figure <height> [a;b;…]  a framed drawing with one labelled box per label (none: a picture with no text)
 //   footnote <text>          at the bottom of the column, under a short rule
 //   dest <name>              a link destination at the current line
 // Inside a line, {text} is a link to the destination "refs" and ^1 is a superscript.
@@ -24,14 +26,15 @@ import CoreText
 
 let args = CommandLine.arguments
 let source = try String(contentsOfFile: args[1], encoding: .utf8)
-var media = CGRect(x: 0, y: 0, width: 612, height: 792)
+let upright = CGRect(x: 0, y: 0, width: 612, height: 792)
+var media = upright
 let context = CGContext(URL(fileURLWithPath: args[2]) as CFURL, mediaBox: &media, nil)!
 
 func font(_ name: String, _ size: CGFloat) -> CTFont { CTFontCreateWithName(name as CFString, size, nil) }
-let body = font("TimesNewRomanPSMT", 10), bold = font("TimesNewRomanPS-BoldMT", 10)
+var body = font("TimesNewRomanPSMT", 10), bold = font("TimesNewRomanPS-BoldMT", 10)
 let italic = font("TimesNewRomanPS-ItalicMT", 8), small = font("TimesNewRomanPSMT", 8)
-let columns: [CGFloat] = [54, 315]
-let columnWidth: CGFloat = 243, leading: CGFloat = 12, top: CGFloat = 738
+var columns: [CGFloat] = [54, 315]
+var columnWidth: CGFloat = 243, leading: CGFloat = 12, top: CGFloat = 738
 
 enum Piece { case plain(String), link(String), sup(String) }
 func pieces(_ line: String) -> [Piece] {
@@ -91,9 +94,25 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
     let x = column >= 0 ? columns[column] : 54
     switch command {
     case "page":
-        endPage(); context.beginPDFPage(nil); open = true
+        endPage()
+        if rest == "landscape" {
+            media = CGRect(x: 0, y: 0, width: upright.height, height: upright.width)
+            context.beginPDFPage([kCGPDFContextMediaBox as String: NSData(bytes: &media, length: MemoryLayout<CGRect>.size)] as CFDictionary)
+        } else {
+            media = upright
+            context.beginPDFPage(nil)
+        }
+        open = true
+        top = media.height - 54
         y = top; column = -1; footnotes = 0
-    case "header": centered(rest, y: 756, font: italic)
+    case "columns":
+        let parts = rest.split(separator: " ")
+        columns = parts[0].split(separator: ",").map { CGFloat(Double($0)!) }
+        columnWidth = CGFloat(Double(parts[1])!)
+    case "font":
+        let size = CGFloat(Double(rest)!)
+        body = font("TimesNewRomanPSMT", size); bold = font("TimesNewRomanPS-BoldMT", size); leading = (size * 1.2).rounded()
+    case "header": centered(rest, y: media.height - 36, font: italic)
     case "footer":
         let (at, text) = (CGFloat(Double(rest.prefix { $0 != " " })!), String(rest.drop { $0 != " " }.dropFirst()))
         centered(text, y: at, font: small)
@@ -104,7 +123,7 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
         column += 1
         if column == 0 { columnTop = y }
         columnY = columnTop; footnotes = 0
-    case "heading": columnY -= 6; draw(rest, x: x, y: columnY, font: bold); columnY -= 14
+    case "heading": columnY -= 6; draw(rest, x: x, y: columnY, font: bold); columnY -= leading + 2
     case "para": columnY -= 3; indent = rest == "flush" ? 0 : 10
     case "|":
         if draw(rest, x: x + indent, y: columnY) > columnWidth - indent { print("wider than the column: \(rest)") }
@@ -116,7 +135,8 @@ for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
         columnY -= 6
         let frame = CGRect(x: x, y: columnY - height, width: columnWidth, height: height)
         context.setLineWidth(0.6); context.stroke(frame)
-        let slot = columnWidth / CGFloat(labels.count)
+        if labels.isEmpty { context.strokeLineSegments(between: [frame.origin, CGPoint(x: frame.maxX, y: frame.maxY)]) }
+        let slot = columnWidth / CGFloat(max(labels.count, 1))
         for (i, label) in labels.enumerated() {
             let boxRect = CGRect(x: x + CGFloat(i) * slot + 6, y: frame.midY - 12, width: slot - 12, height: 24)
             context.stroke(boxRect)

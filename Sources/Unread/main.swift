@@ -42,6 +42,11 @@ if args.contains("--speakable-check") {
     exit(Speakable.check() ? 0 : 1)
 }
 
+if args.contains("--pdf-check") {
+    // Silent: how Chromium's PDF viewer is read (#85), from tables of blocks. Exit 1 on failure.
+    exit(PDFLayout.check() ? 0 : 1)
+}
+
 if args.contains("--stretch-check") {
     // Silent: the narrator's time stretch at every menu speed. Exit 1 on failure.
     exit(stretchCheck() ? 0 : 1)
