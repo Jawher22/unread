@@ -22,6 +22,8 @@ struct PrimedSentence {
             defer { settled() }
             let found = await AXWorker.shared.run { () -> (Sentence, ReadingScope?, Double)? in
                 let t = Date()
+                AXWorker.speculating = true
+                defer { AXWorker.speculating = false }
                 let scope = doc.scope(from: start)
                 guard let sentence = doc.sentence(from: start, in: scope) else { return nil }
                 return (sentence, scope, LatencyLog.ms(since: t))

@@ -5,7 +5,7 @@ import NaturalLanguage
 /// A reading position in a PDFKit document (#86): a block, and how far into its unit's spoken
 /// text the reading has come. Two positions made for the same place are equal, so a steady
 /// aim is one aim (`App.steadyAim`) and the speculation fires.
-final class PDFPosition: NSObject {
+final class PDFKitPosition: NSObject {
     let block: PDFPage.BlockID
     /// Sentences of the block's unit that end after this offset in its spoken text are still to read.
     let spoken: Int
@@ -17,14 +17,14 @@ final class PDFPosition: NSObject {
     /// table and its caption at the top of the next page). They're read from `block` up to
     /// `until`, then the reading goes on at `then`.
     let until: PDFPage.BlockID?
-    let then: PDFPosition?
+    let then: PDFKitPosition?
 
-    init(block: PDFPage.BlockID, spoken: Int = 0, pointed: Bool = false, afterCue: Bool = false, until: PDFPage.BlockID? = nil, then: PDFPosition? = nil) {
+    init(block: PDFPage.BlockID, spoken: Int = 0, pointed: Bool = false, afterCue: Bool = false, until: PDFPage.BlockID? = nil, then: PDFKitPosition? = nil) {
         self.block = block; self.spoken = spoken; self.pointed = pointed; self.afterCue = afterCue; self.until = until; self.then = then
     }
 
     override func isEqual(_ object: Any?) -> Bool {
-        guard let o = object as? PDFPosition else { return false }
+        guard let o = object as? PDFKitPosition else { return false }
         return block == o.block && spoken == o.spoken && pointed == o.pointed && afterCue == o.afterCue && until == o.until && then == o.then
     }
     override var hash: Int {
@@ -357,15 +357,15 @@ final class PDFKitDocument: ReadableDocument {
 
     // MARK: ReadableDocument
 
-    func documentStart() -> AnyObject? { PDFPosition(block: BlockID(page: 0, index: 0)) }
+    func documentStart() -> AnyObject? { PDFKitPosition(block: BlockID(page: 0, index: 0)) }
 
     /// A position at a block's own text: the sentence straddling its start is read whole.
-    private func position(at b: Block, pointed: Bool = false) -> PDFPosition {
-        PDFPosition(block: b.id, spoken: unit(containing: b).spokenStart(of: b.id), pointed: pointed)
+    private func position(at b: Block, pointed: Bool = false) -> PDFKitPosition {
+        PDFKitPosition(block: b.id, spoken: unit(containing: b).spokenStart(of: b.id), pointed: pointed)
     }
 
     func sentence(from position: AnyObject, in scope: ReadingScope?) -> Sentence? {
-        guard let pos = position as? PDFPosition else { return nil }
+        guard let pos = position as? PDFKitPosition else { return nil }
         var cursor: BlockID? = pos.block
         var spoken = pos.spoken, pointed = pos.pointed, afterCue = pos.afterCue
         // Members of the unit a detour returns to, and of units read out, aren't read again on the way.
@@ -397,17 +397,17 @@ final class PDFKitDocument: ReadableDocument {
     /// Where the reading goes after sentence `r` of unit `u`: on in the unit, or, when the unit
     /// skipped blocks the reading has now passed (a caption inside the sentence, or between it and
     /// the next one), through them first and back to the unit after.
-    private func next(after r: NSRange, in u: Unit, from pos: PDFPosition) -> PDFPosition {
+    private func next(after r: NSRange, in u: Unit, from pos: PDFKitPosition) -> PDFKitPosition {
         let first = u.block(at: r.location), last = u.block(at: NSMaxRange(r) - 1)
-        let resume = PDFPosition(block: last, spoken: NSMaxRange(r), until: pos.until, then: pos.then)
+        let resume = PDFKitPosition(block: last, spoken: NSMaxRange(r), until: pos.until, then: pos.then)
         let upTo = u.sentences.first { $0.location >= NSMaxRange(r) }.map { u.block(at: $0.location) } ?? u.blocks[u.blocks.count - 1]
         guard let gap = u.gaps.first(where: { first < $0 && $0 < upTo }) else { return resume }
-        return PDFPosition(block: gap, until: upTo, then: resume)
+        return PDFKitPosition(block: gap, until: upTo, then: resume)
     }
 
     /// The figure's cue, over the figure's text (short lines, or small ones) before its caption, else
     /// after it, or, without any, the caption itself.
-    private func cue(_ kind: String, before caption: Block, from pos: PDFPosition) -> Sentence {
+    private func cue(_ kind: String, before caption: Block, from pos: PDFKitPosition) -> Sentence {
         var ranges = caption.ranges
         if let p = page(caption.id.page) {
             var labels: [NSRange] = []
@@ -420,7 +420,7 @@ final class PDFKitDocument: ReadableDocument {
             if !labels.isEmpty { ranges = labels }
         }
         return Sentence(text: "", range: PDFRange(ranges.map { PDFRange.Part(page: caption.id.page, range: $0) }),
-                        next: PDFPosition(block: caption.id, afterCue: true, until: pos.until, then: pos.then), cue: kind)
+                        next: PDFKitPosition(block: caption.id, afterCue: true, until: pos.until, then: pos.then), cue: kind)
     }
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
@@ -451,7 +451,7 @@ final class PDFKitDocument: ReadableDocument {
                 let lines = boxes(for: b.ranges.map { PDFRange.Part(page: i, range: $0) })
                 if lines.contains(where: { $0.intersects(visible) }) { return position(at: b) }
             }
-            return PDFPosition(block: BlockID(page: i, index: 0))
+            return PDFKitPosition(block: BlockID(page: i, index: 0))
         }
         return documentStart()
     }

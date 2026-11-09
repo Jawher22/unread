@@ -1,0 +1,96 @@
+# A one-column report (#85 review): paragraphs that cross a page's foot, so their first
+# lines sit where a footer would; paragraphs that open like a footnote ("§ 2.", "4GB",
+# "2FA"); a real footnote below the text; an unnumbered heading right above a picture
+# with no text in it, then its caption; a running header and page numbers.
+# The text is original. Rebuild the PDF with
+#   swift scripts/make-pdf-fixture.swift fixtures/pdf/report.layout fixtures/pages/report.pdf
+columns 72 468
+page
+title A Report on the Town Archive
+center Prepared for the council, spring 2026
+gap 14
+column
+heading Summary
+para
+| The town archive holds every decision the council has taken since the town was founded, and it has
+| grown faster in the last five years than in the fifty before them. This report describes what was
+| bought, what was moved, and what the council should decide before the next budget.
+heading Storage
+para
+| 4GB of storage was purchased for the archive last spring, which now holds scanned copies of every
+| council decision, every map of the town, and the minutes of each public meeting since the war.
+para
+| § 2. Every record is kept in two places, one in the archive and one in the library across the
+| square, so that a fire or a flood in one building can never take the only copy of anything.
+para
+| 2FA protects every account that can change a record, and each clerk carries a key on a ring
+| with the keys to the building. The keys are changed each spring, when the clerks change desks.^1
+para
+| The archive was moved twice this year. In March the paper records went from the basement of the
+| town hall to the dry rooms above the library, where the air is kept cool and the light low, and
+| the shelves were numbered again from the start. In June the scans went from the old server in
+| the clerk's office to the new one in the library, which is copied every night to a second machine
+| in the fire station. Both moves were done by the clerks themselves, on weekends, without closing
+| the archive to the public for a single day, and nothing was lost on the way.
+para
+| The cost of the year was lower than the council had expected. The storage, the shelves and the
+| new server together came to less than the old contract for keeping the paper records in a ware-
+| house outside the town, which the council ended in January. The savings were put into the fund
+| for the roof of the library, which will need to be replaced within the next ten years, and
+| the rest was kept for the shelves of the second reading room.
+para
+| Visitors came in greater numbers than ever before. Most of them were looking for the history of
+| their own houses, and the new maps made that easier: a visitor can now find the first owner of
+| a house, the year it was built and every change made to it since, in a single afternoon at the
+| reading table. School classes came every month, and two of them made an exhibition of what they
+| found, which was shown in the town hall for the whole of the summer.
+para
+| The clerks kept a list of every question they could not answer, and the list was shorter than
+| last year's. Most of the questions that remain are about the years when the town had no clerk at
+| all, and the records of those years are kept in the archive of the county, not in ours. The
+| council could ask the county for copies of them, and the clerks have already asked how much
+| the copies would cost and how long they would take to make.
+para
+| The volunteers who help the clerks on Saturdays have grown from four to eleven. They sort the
+| letters that families give to the archive, write a short note on each one, and put them in boxes
+| by street. Without them the letters given this year would still be waiting in the hall. Two of
+| the volunteers are retired teachers, who now lead the school classes through the reading room
+| and show them how a record is found, read and put back where it belongs, in the right box and
+| on the right shelf, so that the next visitor can find it again.
+para
+| The council asked last autumn whether the archive could open in the evenings. A trial was run in
+| October and November, two evenings a week, and the reading room was full on each of them, so the
+| clerks propose to keep the evenings open from the spring, with the volunteers taking turns. The
+| evenings would cost the town the heating and the light of the reading room for six hours a week,
+| which the clerks have counted at a little more than the price of the new shelves.
+para
+| The last question the council asked was whether the archive should keep the letters and photo-
+| graphs that families bring in, or only the records of the council itself. The clerks believe that
+footnote ^1The old keys are kept in a sealed envelope in the safe of the town hall.
+footer 40 1
+page
+header A Report on the Town Archive
+column
+| the archive should keep both, since the families' papers are often the only record of how the
+| town looked and lived, and they ask the council to say so in the rules of the archive.
+heading Results
+figure 90
+para flush
+| Figure 1: Requests to the archive, by month, over the last two years.
+para
+| Requests rose in every month but August, when the reading room was closed for the move, and they
+| rose most in the months when the schools came. The clerks expect them to rise again next year.
+para
+| 10GB more will be needed within two years at this rate, and the clerks ask the council to plan
+| for it in the next budget rather than wait until the server is full.
+para
+| The clerks thank the council for its support, and the volunteers for their Saturdays.
+footer 40 2
+page
+header A Report on the Town Archive
+column
+heading Next steps
+para
+| The council is asked to approve the evening hours, the rule on families' papers, and the request
+| to the county for copies of the early records.
+footer 40 3
