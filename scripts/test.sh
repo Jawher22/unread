@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build, then check every extraction fixture in both engines, all at once, the narrator's time stretch (--stretch-check) and what it's given for technical text (--speakable-check).
 #
-#   scripts/test.sh                 # every fixture page (.html, .txt, .rtf) with an expected file, then the corpus score (~40 s)
+#   scripts/test.sh                 # every fixture page (.html, .pdf, .txt, .rtf) with an expected file, then the corpus score (~40 s)
 #   scripts/test.sh --quick         # skip pages that declare --slow (rerender.html) and the corpus, for the inner loop (~5 s)
 #   scripts/test.sh chat scroller   # just these pages
 #
@@ -16,7 +16,7 @@ if ! log=$(scripts/build.sh 2>&1); then echo "$log"; exit 1; fi
 
 QUICK=0; [[ "${1:-}" == --quick ]] && { QUICK=1; shift; }
 page() { # name → its page file, whatever the extension
-    local f; for f in fixtures/pages/"$1".{html,txt,rtf}; do [[ -f $f ]] && { echo "$f"; return; }; done
+    local f; for f in fixtures/pages/"$1".{html,pdf,txt,rtf}; do [[ -f $f ]] && { echo "$f"; return; }; done
     echo "fixtures/pages/$1.html"
 }
 PAGES=()

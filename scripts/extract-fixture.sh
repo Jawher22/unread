@@ -4,11 +4,13 @@
 #   scripts/extract-fixture.sh fixtures/pages/inline.html [--limit N]
 #   scripts/extract-fixture.sh fixtures/corpus/<page>.html [--raw DIR]
 #   scripts/extract-fixture.sh fixtures/pages/notes.txt          (or .rtf)
+#   scripts/extract-fixture.sh fixtures/pages/paper.pdf
 #
 # Opens the page in throwaway windows, invisible and click-through: an HTML page in a
 # WKWebView host (what Safari exposes) and an Electron host (what Chrome, Dia and
 # Electron apps expose), a .txt or .rtf file in an NSTextView host (what TextEdit and
-# other Cocoa apps expose). Runs `Unread --extract --pid … --from-start` against
+# other Cocoa apps expose). A .pdf shows in both web hosts: WKWebView draws it with PDFKit
+# (Safari's and Preview's tree), Electron with PDFium (Chrome's). Runs `Unread --extract --pid … --from-start` against
 # each at once, then closes them. Needs the terminal to have Accessibility
 # permission. Uses the existing release build; scripts/test.sh rebuilds first.
 #
@@ -20,6 +22,7 @@
 # The expected file may begin with header lines:
 #   # start: <text>   start reading at the first sentence containing <text>, as if the user pointed there
 #   # flags: <flags>  extra --extract flags the page needs (rerender.html: --slow)
+#   # pending: <engines>  engines not expected to pass yet: their result is shown, marked PENDING, and never fails
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PAGE="$1"; shift
@@ -45,10 +48,12 @@ fi
 [[ -x .build/release/Unread ]] || scripts/build.sh
 
 EXPECTED="${PAGE%.*}.expected.txt"
+PENDING=" "
 if [[ -f "$EXPECTED" ]]; then
     START=$(sed -n 's/^# start: //p' "$EXPECTED")
     [[ -n "$START" ]] && EXTRA+=(--from-text "$START")
     read -ra FLAGS <<<"$(sed -n 's/^# flags: //p' "$EXPECTED")"
+    PENDING=" $(sed -n 's/^# pending: //p' "$EXPECTED") "
     EXTRA+=(${FLAGS[@]+"${FLAGS[@]}"})
 fi
 
@@ -69,11 +74,17 @@ launch() { # engine: start its host on the page, logging to $OUT/<engine>.log
 }
 for e in "${ENGINES[@]}"; do launch "$e"; done
 
-check() { # output file
+pending() { [[ "$PENDING" == *" $1 "* ]]; }
+check() { # output file, engine
     [[ -f "$EXPECTED" ]] || return 0
+    compare "$@" && return 0
+    pending "$2" && { echo "   PENDING: not expected to pass yet"; return 0; }
+    return 1
+}
+compare() { # output file, engine
     (( CORPUS )) && { python3 scripts/score.py page "$EXPECTED" "$2=$1"; return 0; }
     local got; got=$(sed -nE 's/^  [0-9]+\. (\([^)]*\)|no bounds)  //p' "$1")
-    local want; want=$(grep -vE '^# (start|flags): ' "$EXPECTED")
+    local want; want=$(grep -vE '^# (start|flags|pending): ' "$EXPECTED")
     if [[ "$got" == "$want" ]]; then echo "   text: PASS"; else
         echo "   text: FAIL"; { diff <(echo "$want") <(echo "$got") || true; } | sed "s/^/     /"; return 1; fi
     local missing; missing=$(grep -c "^  [0-9]*\. no bounds" "$1" || true)
@@ -85,7 +96,8 @@ extract() { # name, pid, host log
     if ! .build/release/Unread --extract --pid "$2" --from-start --wait 20 ${EXTRA[@]+"${EXTRA[@]}"} >"$OUT/$1" 2>&1 \
         || grep -q "^0 sentences" "$OUT/$1"; then
         [[ -n "$RAW" ]] && cp "$OUT/$1" "$RAW/$(basename "$PAGE" .html).$1.txt"
-        echo "== $1: nothing readable"; cat "$OUT/$1"; echo "   host log:"; sed 's/^/     /' "$3"; return 1; fi
+        echo "== $1: nothing readable"; cat "$OUT/$1"; echo "   host log:"; sed 's/^/     /' "$3"
+        pending "$1" && { echo "   PENDING: not expected to pass yet"; return 0; }; return 1; fi
     [[ -n "$RAW" ]] && cp "$OUT/$1" "$RAW/$(basename "$PAGE" .html).$1.txt"
     echo "== $1"; tail -n +2 "$OUT/$1"; check "$OUT/$1" "$1"
 }
