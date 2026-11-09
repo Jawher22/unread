@@ -47,9 +47,13 @@ protocol ReadableDocument: AnyObject {
     func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
     func scrollIntoView(_ sentence: Sentence)
-    /// The text ends here for now, but more follows once what's shown has been read (a book's
-    /// next chapter, on the page after this one): ask again in a moment.
+    /// The text ends here for now, but more follows on the next page (a book's next chapter):
+    /// the session turns it (`turnPage`) once it has finished what's shown, and asks again until
+    /// the new page is there or the turn has failed.
     func moreComing() -> Bool
+    /// Turn to the page after the end a lookup reached. Only the reading session calls it,
+    /// once the last sentence's speech has played; a lookup never turns a page.
+    func turnPage()
 }
 
 /// The window an Accessibility element is in, as the window server knows it (private, but long stable).
@@ -71,6 +75,7 @@ extension ReadableDocument {
     func scope(from position: AnyObject) -> ReadingScope? { nil }
     func relocate(_ sentence: Sentence) -> Sentence? { nil }
     func moreComing() -> Bool { false }
+    func turnPage() {}
     func sentence(from position: AnyObject) -> Sentence? { sentence(from: position, in: nil) }
 
     /// The sentence after `last`. If there's none because the page rebuilt
