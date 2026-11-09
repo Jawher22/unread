@@ -46,7 +46,26 @@ protocol ReadableDocument: AnyObject {
     /// positions. Measured right after `lines(of:)`, in the same layout.
     func words(of sentence: Sentence) -> [CGRect?]
     func visibleRect() -> CGRect?
-    func scrollIntoView(_ sentence: Sentence)
+    /// Whether it asked the app to scroll (an app that scrolls only whole pages may not).
+    @discardableResult func scrollIntoView(_ sentence: Sentence) -> Bool
+    /// Whether text out of view can be measured. When it can't (Preview's PDF pages), a sentence
+    /// without lines may only be out of view, and is scrolled to.
+    var measuresOffScreen: Bool { get }
+    /// Where a sentence that has no lines is, roughly, when the document can't measure text out
+    /// of view: its page's frame. Says whether the user scrolled it away.
+    func place(of sentence: Sentence) -> CGRect?
+}
+
+extension ReadableDocument {
+    var measuresOffScreen: Bool { true }
+    func place(of sentence: Sentence) -> CGRect? { nil }
+}
+
+extension CGRect {
+    /// The box around all of them; nil for none.
+    static func union(of rects: [CGRect]) -> CGRect? {
+        rects.dropFirst().reduce(rects.first) { $0?.union($1) }
+    }
 }
 
 /// The window an Accessibility element is in, as the window server knows it (private, but long stable).
@@ -87,10 +106,7 @@ extension ReadableDocument {
     }
 
     /// The union of the sentence's line boxes.
-    func bounds(of sentence: Sentence) -> CGRect? {
-        let l = lines(of: sentence)
-        return l.dropFirst().reduce(l.first) { $0?.union($1) }
-    }
+    func bounds(of sentence: Sentence) -> CGRect? { CGRect.union(of: lines(of: sentence)) }
 }
 
 /// Where a reading may go (#10): the article, or else the main area, it
@@ -188,6 +204,8 @@ enum SpeechText {
 
     /// "[12]", "[edit]", and inline cleanup tags: "[who?]", "[citation needed]", "[clarification needed]".
     private static let citation = try! NSRegularExpression(pattern: #"\[(\d+|edit|[a-z][a-z ]{0,30}(\?| needed))\]"#, options: .caseInsensitive)
+    /// "[38, 24, 15]": a paper's citation list. Only there: on a web page "returns [0, 1]" is text.
+    private static let citationList = try! NSRegularExpression(pattern: #"\[\d+(,\s*\d+)+\]"#)
     private static let url = try! NSRegularExpression(pattern: #"https?://\S+"#)
     /// Screen-reader-only link hints. Clipped to 1 px, but their text frame is
     /// full size in both engines, so geometry can't tell; the idiom can.
@@ -205,10 +223,10 @@ enum SpeechText {
     }
 
     /// Make a raw on-screen string speakable, or nil if there's nothing to say.
-    static func clean(_ raw: String) -> String? {
+    static func clean(_ raw: String, listCitations: Bool = false) -> String? {
         var s = raw.replacingOccurrences(of: "\u{00AD}", with: "") // soft hyphens
             .replacingOccurrences(of: "\u{FFFC}", with: " ") // embedded objects (images, icons)
-        for re in [citation, url, linkHint] {
+        for re in [citation, url, linkHint] + (listCitations ? [citationList] : []) {
             s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
         }
         s = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
@@ -319,8 +337,7 @@ final class WebDocument: ReadableDocument {
               let bounds = { () -> CGRect? in
                   probeTextGeometry(near: para)
                   if noTextGeometry {
-                      let frames = elementFrames(of: para)
-                      return frames.dropFirst().reduce(frames.first) { acc, f in acc?.union(f) }
+                      return CGRect.union(of: elementFrames(of: para))
                   }
                   return AX.rect(p("AXBoundsForTextMarkerRange", para))
               }()
@@ -1517,9 +1534,10 @@ final class WebDocument: ReadableDocument {
         return r.isNull || r.isEmpty ? nil : r
     }
 
-    func scrollIntoView(_ sentence: Sentence) {
-        guard let target = AX.element(p("AXUIElementForTextMarker", start(of: sentence.range))) else { return }
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
+        guard let target = AX.element(p("AXUIElementForTextMarker", start(of: sentence.range))) else { return false }
         AXUIElementPerformAction(target, "AXScrollToVisible" as CFString)
+        return true
     }
 }
 
@@ -1534,6 +1552,15 @@ final class NativeRange: NSObject {
     init(_ range: NSRange, version: Int) {
         self.range = range
         self.version = version
+    }
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let o = object as? NativeRange else { return false }
+        return range == o.range && version == o.version
+    }
+    override var hash: Int {
+        var h = Hasher()
+        h.combine(range.location); h.combine(range.length); h.combine(version)
+        return h.finalize()
     }
 }
 
@@ -1591,10 +1618,7 @@ final class NativeDocument: ReadableDocument {
     private func position(_ i: Int) -> NativeRange { handle(NSRange(location: i, length: 0)) }
 
     private func index(at point: CGPoint) -> Int? {
-        guard let v = AX.param(element, kAXRangeForPositionParameterizedAttribute, AX.pointValue(point)) else { return nil }
-        var r = CFRange()
-        AXValueGetValue(v as! AXValue, .cfRange, &r)
-        return r.location
+        AX.range(AX.param(element, kAXRangeForPositionParameterizedAttribute, AX.pointValue(point)))?.location
     }
 
     private func bounds(_ range: NSRange) -> CGRect? {
@@ -1613,9 +1637,7 @@ final class NativeDocument: ReadableDocument {
 
     func firstVisible() -> AnyObject? {
         refreshIfEdited()
-        guard let v = AX.attr(element, kAXVisibleCharacterRangeAttribute) else { return position(0) }
-        var r = CFRange()
-        AXValueGetValue(v as! AXValue, .cfRange, &r)
+        guard let r = AX.range(AX.attr(element, kAXVisibleCharacterRangeAttribute)) else { return position(0) }
         let s = sentences.first { NSMaxRange($0) > r.location }
         return position(s?.location ?? r.location)
     }
@@ -1673,10 +1695,7 @@ final class NativeDocument: ReadableDocument {
     }
 
     private func range(ofLine line: Int) -> NSRange? {
-        guard let v = AX.param(element, kAXRangeForLineParameterizedAttribute, line as NSNumber) else { return nil }
-        var r = CFRange()
-        guard AXValueGetValue(v as! AXValue, .cfRange, &r) else { return nil }
-        return NSRange(location: r.location, length: r.length)
+        AX.range(AX.param(element, kAXRangeForLineParameterizedAttribute, line as NSNumber))
     }
 
     func visibleRect() -> CGRect? {
@@ -1693,14 +1712,15 @@ final class NativeDocument: ReadableDocument {
     /// middle, so what was just read stays on screen above it. A range taller
     /// than the view lands with its start below the view, so for a sentence
     /// that tall only its first line is asked for.
-    func scrollIntoView(_ sentence: Sentence) {
+    func scrollIntoView(_ sentence: Sentence) -> Bool {
         var r = range(sentence.range)
-        guard r.length > 0 else { return }
+        guard r.length > 0 else { return false }
         if let view = visibleRect(), let box = bounds(r), box.height > view.height * 0.8,
            let first = line(at: r.location), let lr = range(ofLine: first) {
             r = NSIntersectionRange(lr, r)
         }
         AXUIElementSetAttributeValue(element, kAXVisibleCharacterRangeAttribute as CFString, AX.rangeValue(r))
+        return true
     }
 }
 
@@ -1725,6 +1745,7 @@ enum DocumentFinder {
         for _ in 0..<40 {
             guard let cur = e, let role = AX.role(cur) else { break }
             if role == "AXWebArea" { return webDocument(cur, below: false) }
+            if role == "AXPage", let doc = PDFKitDocument(page: cur) { return doc } // PDFKit (Preview, Safari; #86)
             if textRoles.contains(role), let doc = NativeDocument(element: cur) { return doc }
             if role == kAXWindowRole || role == kAXApplicationRole { break }
             e = AX.parent(cur)
@@ -1737,7 +1758,7 @@ enum DocumentFinder {
         let hit = AX.element(at: point)
         let app = hit.map { NSRunningApplication(processIdentifier: AX.pid($0))?.localizedName ?? "pid \(AX.pid($0))" } ?? "?"
         let what = hit.map { "\(AX.role($0) ?? "?")\(AX.subrole($0).map { "/\($0)" } ?? "")" } ?? "nothing (hit test failed or timed out)"
-        if doc == nil { return "no web area or text view under the pointer in \(app) (hit: \(what))" }
+        if doc == nil { return "no web area, PDF page or text view under the pointer in \(app) (hit: \(what))" }
         return "\(type(of: doc!)) in \(app) has no readable paragraph at the pointer (hit: \(what))"
     }
 
@@ -1757,11 +1778,15 @@ enum DocumentFinder {
                 ?? AX.element(AX.attr(axApp, kAXMainWindowAttribute))
                 ?? (AX.attr(axApp, kAXWindowsAttribute) as? [AXUIElement])?.first else { return nil }
         let found = AX.find(in: window) { e, role in
-            role == "AXWebArea" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
+            role == "AXWebArea" || role == "AXPage" || (textRoles.contains(role) && ((AX.attr(e, kAXValueAttribute) as? String)?.count ?? 0) > 200)
         }
         guard let e = found ?? AX.wakeWebArea(in: window) else { return nil }
+        switch AX.role(e) {
         // The search finds the outermost web area; Chromium's PDF viewer nests the document two areas in.
-        return AX.role(e) == "AXWebArea" ? webDocument(e, below: true) : NativeDocument(element: e)
+        case "AXWebArea": return webDocument(e, below: true)
+        case "AXPage": return PDFKitDocument(page: e) // PDFKit (Preview, Safari; #86)
+        default: return NativeDocument(element: e)
+        }
     }
 
     /// A web area's document: a page, or the PDF in Chromium's viewer. The viewer's own controls (its toolbar,

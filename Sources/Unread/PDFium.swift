@@ -377,7 +377,7 @@ final class PDFiumDocument: ReadableDocument {
         return r.isNull || r.isEmpty ? nil : r
     }
 
-    func scrollIntoView(_ sentence: Sentence) { web.scrollIntoView(shapes[ObjectIdentifier(sentence.range)]?.parts.first ?? sentence) }
+    func scrollIntoView(_ sentence: Sentence) -> Bool { web.scrollIntoView(shapes[ObjectIdentifier(sentence.range)]?.parts.first ?? sentence) }
 
     /// Blocks on screen, in reading order (element frames are right for these); only those on the page under
     /// `point`, if given.

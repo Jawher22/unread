@@ -1,0 +1,22 @@
+# pending: Chromium
+# flags: --word-boxes
+Reading a Paper at the Edges of Its Layout
+Abstract
+A reader of papers meets the layout where it is least regular, from the head of a column to its foot.
+This one checks the joins a typesetter leaves behind and the blocks that stand in the way of a sentence.
+1 Hyphens
+Some checks run both pre- and post-training, and some on first- and second-order terms alike.
+A multi-head layout keeps its hyphen, while a sentence broken at its end is joined again.
+The checks we ran pre- and post-training agree.
+2 Tables
+Tables are set apart from the text around them.
+When a table stands in the middle of a sentence, the reading finishes the sentence first and then announces the table.
+♪ table
+Table 1: Words and lines read whole, per viewer.
+A paragraph that starts at the foot of a page and goes on at the top of the next one is read as one sentence, without the page number.
+3 Figures
+A page that holds only a figure is announced, and its caption is read whole.
+♪ figure
+Figure 1: The words of a sentence drawn as a grid.
+Top: the words as set.
+Bottom: as read.
