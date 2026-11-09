@@ -140,10 +140,69 @@ enum AX {
         }
         enabledAt[pid] = Date()
         let app = AXUIElementCreateApplication(pid)
-        // Deliberately not AXEnhancedUserInterface: it breaks window
-        // animations in some apps. Chromium/Electron honour this one.
+        // Not AXEnhancedUserInterface here: held at true, AppKit animates every window move.
+        // Electron honours this one; Chromium browsers refuse it and get `pulseScreenReader`.
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
+
+    /// What a page with no text positions can expect from `pulseScreenReader`.
+    enum Pulse {
+        /// Pulsed at this time: Chromium switches ~2.05 s later, if it still works this way.
+        case sent(Date)
+        /// Pulsed under 10 s ago and the positions are gone again: ask again then.
+        case later(Date)
+        /// Not to be pulsed: not a Chromium browser, VoiceOver is on, another assistive tool holds the flag,
+        /// or a pulse didn't work in this process.
+        case never
+    }
+
+    /// Chromium browsers (Aside, Chrome, Arc, Dia) build inline text boxes, so text ranges have bounds, only in
+    /// their screen-reader mode, which only AXEnhancedUserInterface turns on. Held at true, that flag makes AppKit
+    /// animate every window move. Chromium counts the requests (+1 per true, −1 per false), re-arms a 2 s timer on
+    /// each, and when it fires with the count above 0 sets it to 0 and switches complete + screen-reader mode on
+    /// for the whole process, for good. So true, true, false back to back: the count goes 1, 2, 1, the mode comes
+    /// on 2.05 s later, and AppKit's flag ends at 0. A false while the count is 0 switches the mode off at once:
+    /// never send one alone. All three calls answer −25208 (not implemented), from AppKit's super; they still
+    /// take effect. Electron isn't pulsed: AXManualAccessibility gives its positions, and older Electron releases
+    /// take a false as "screen reader stopped".
+    private static var pulsedAt: [pid_t: Date] = [:]
+    private static var pulseFailed: Set<pid_t> = []
+    /// For the fixture host (`--pulse-electron`): Electron 39 answers the pulse as Chrome does.
+    nonisolated(unsafe) static var pulsesElectron = false
+
+    static func pulseScreenReader(_ pid: pid_t) -> Pulse {
+        guard let engine = chromium(pid), engine == .browser || pulsesElectron, !pulseFailed.contains(pid),
+              !NSWorkspace.shared.isVoiceOverEnabled else { return .never }
+        let now = Date()
+        if let last = pulsedAt[pid] {
+            if now < last + 4 { return .sent(last) }
+            if now < last + 10 { return .later(last + 10) }
+        }
+        let app = AXUIElementCreateApplication(pid)
+        if enhancedUserInterface(app) { return .never }
+        let flag = "AXEnhancedUserInterface" as CFString
+        AXUIElementSetAttributeValue(app, flag, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, flag, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, flag, kCFBooleanFalse)
+        calls &+= 3
+        // Something else set it between our calls: one more on, off leaves the count as it was and the flag at 0.
+        if enhancedUserInterface(app) {
+            AXUIElementSetAttributeValue(app, flag, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(app, flag, kCFBooleanFalse)
+            calls &+= 2
+        }
+        pulsedAt[pid] = now
+        print("[unread] pid \(pid) gives no text positions; asked for Chromium's screen-reader mode (AXEnhancedUserInterface on, on, off)")
+        return .sent(now)
+    }
+
+    /// The positions didn't come after a pulse: this Chromium no longer works that way. Block highlights for good.
+    static func pulseDidNotWork(_ pid: pid_t) {
+        guard pulseFailed.insert(pid).inserted else { return }
+        print("[unread] the screen-reader pulse gave pid \(pid) no text positions; highlighting whole text blocks")
+    }
+
+    private static func enhancedUserInterface(_ app: AXUIElement) -> Bool { (attr(app, "AXEnhancedUserInterface") as? Bool) ?? false }
 
     /// `strict` (first contact): the tree must already contain a web area. A
     /// Chromium window whose tree was never built still shows an AXWindow with
@@ -185,17 +244,20 @@ enum AX {
         return nil
     }
 
+    enum Chromium { case electron, browser }
     /// Built on Chromium: Electron apps and Chromium browsers ship their engine as
-    /// `Contents/Frameworks/<name> Framework.framework`.
-    private static var chromium: [pid_t: Bool] = [:]
-    static func isChromium(_ pid: pid_t) -> Bool {
-        if let known = chromium[pid] { return known }
+    /// `Contents/Frameworks/<name> Framework.framework`, Electron's named so.
+    private static var engines: [pid_t: Chromium?] = [:]
+    static func chromium(_ pid: pid_t) -> Chromium? {
+        if let known = engines[pid] { return known }
         let frameworks = NSRunningApplication(processIdentifier: pid)?.bundleURL?.appendingPathComponent("Contents/Frameworks")
         let names = frameworks.flatMap { try? FileManager.default.contentsOfDirectory(atPath: $0.path) } ?? []
-        let found = names.contains { $0.hasSuffix(" Framework.framework") }
-        chromium[pid] = found
-        return found
+        let engine: Chromium? = names.contains("Electron Framework.framework") ? .electron
+            : names.contains { $0.hasSuffix(" Framework.framework") } ? .browser : nil
+        engines[pid] = engine
+        return engine
     }
+    static func isChromium(_ pid: pid_t) -> Bool { chromium(pid) != nil }
 
     static func mouseLocation() -> CGPoint {
         let m = NSEvent.mouseLocation

@@ -1366,10 +1366,9 @@ final class WebDocument: ReadableDocument {
         let measured = own.isEmpty ? boxed : own
         guard let extent = WordExtent(measured.map { ($0.rect!, $0.chars) }) else {
             if let whole = rect(sentence.range) { return plausible([whole]) }
-            // No text positions at all, yet the text has a frame: a Chromium
-            // browser without inline text boxes (Aside, Chrome without
-            // VoiceOver). Highlight the text's element instead, and stop
-            // asking for word boxes on this page.
+            // No text positions at all, yet the text has a frame: a Chromium browser whose screen-reader mode was
+            // switched off since (something sent a lone false). Probe, and pulse again.
+            if case .real = geometry { geometry = .unknown; probeTextGeometry(near: sentence.range) }
             return elementFrames(of: sentence.range)
         }
         func fits(_ r: CGRect?, chars: Int) -> Bool { r.map { extent.fits($0, chars: chars) } ?? false }
@@ -1483,22 +1482,57 @@ final class WebDocument: ReadableDocument {
 
     private func rect(_ range: AnyObject) -> CGRect? { AX.rect(p("AXBoundsForTextMarkerRange", range)) }
 
-    /// Set once the app answers text-position queries with zero-size boxes
-    /// while its elements have real frames: a Chromium browser without inline
-    /// text boxes (Aside; Chrome when VoiceOver hasn't switched on its full
-    /// mode). Then highlights fall back to whole text blocks.
-    private var noTextGeometry = false
-    private var geometryProbed = false
+    /// Whether the app answers text-position queries: a Chromium browser without inline text boxes (Aside;
+    /// Chrome without VoiceOver) gives zero-size boxes while its elements have real frames. Then highlights fall
+    /// back to whole text blocks, and the browser is pulsed into its screen-reader mode (`AX.pulseScreenReader`),
+    /// which brings real boxes ~2.05 s later.
+    private enum TextGeometry {
+        case unknown
+        case real
+        /// Block highlights; probe again from `retry` (nil: for good).
+        case blocks(retry: Date?)
+        /// Pulsed: block highlights until the positions come or `until` passes, probing from `nextProbe`.
+        case awaiting(until: Date, nextProbe: Date)
+    }
+    private var geometry = TextGeometry.unknown
 
-    /// Ask once, on a text element that's on screen: does measuring its own
-    /// text give a real box? (Off-screen text can't tell: Chromium clips frames.)
+    private var noTextGeometry: Bool {
+        switch geometry {
+        case .unknown, .real: false
+        case .blocks, .awaiting: true
+        }
+    }
+
+    /// Ask, on a text element that's on screen: does measuring its own text give a real box? (Off-screen text
+    /// can't tell: Chromium clips frames.) Once real, not again until `lines(of:)` finds the boxes gone.
     private func probeTextGeometry(near range: AnyObject) {
-        guard !geometryProbed, let leaf = leaf(endingAt: end(of: range)), let frame = AX.frame(leaf),
+        let now = Date()
+        switch geometry {
+        case .real: return
+        case .blocks(let retry): guard let retry, now >= retry else { return }
+        case .awaiting(_, let next): guard now >= next else { return }
+        case .unknown: break
+        }
+        guard let leaf = leaf(endingAt: end(of: range)), let frame = AX.frame(leaf),
               frame.width >= 4, frame.height >= 4, let own = p("AXTextMarkerRangeForUIElement", leaf) else { return }
-        geometryProbed = true
-        if AX.rect(p("AXBoundsForTextMarkerRange", own)) == nil {
-            noTextGeometry = true
-            print("[unread] this page gives no text positions (no inline text boxes); highlighting whole text blocks")
+        let real = AX.rect(p("AXBoundsForTextMarkerRange", own)) != nil
+        switch (geometry, real) {
+        case (.awaiting, true):
+            geometry = .real
+            print("[unread] the page gives text positions now; highlighting words")
+        case (_, true):
+            geometry = .real
+        case (.awaiting(let until, _), false):
+            if now < until { geometry = .awaiting(until: until, nextProbe: now + 0.25); return }
+            AX.pulseDidNotWork(AX.pid(element))
+            geometry = .blocks(retry: nil)
+        case (_, false):
+            if case .unknown = geometry { print("[unread] this page gives no text positions (no inline text boxes); highlighting whole text blocks") }
+            switch AX.pulseScreenReader(AX.pid(element)) {
+            case .sent(let at): geometry = .awaiting(until: at + 4, nextProbe: max(now, at + 2.1))
+            case .later(let at): geometry = .blocks(retry: at)
+            case .never: geometry = .blocks(retry: nil)
+            }
         }
     }
 
