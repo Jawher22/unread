@@ -21,6 +21,9 @@ final class BooksDocument: ReadableDocument {
     let element: AXUIElement
     private let window: AXUIElement
     private var flow: Flow?
+    /// Flows over the other areas on screen: a spread can show pages of two files (a chapter's
+    /// title page beside its first page), each its own web area. Kept so their blocks aren't rebuilt.
+    private var beside: [Flow] = []
     /// The last lookup stopped at the flow's end, and the book may go on past it.
     private var stoppedAtEnd = false
     /// The way the last chapter turned ran, for a chapter with no text to judge by.
@@ -120,8 +123,10 @@ final class BooksDocument: ReadableDocument {
 
     /// The pages: the ancestor of the web area that sits inside the window (the area itself is
     /// as wide as the chapter and mostly off screen).
-    func visibleRect() -> CGRect? {
-        guard let flow = currentFlow(), let wf = AX.frame(window) else { return nil }
+    func visibleRect() -> CGRect? { currentFlow().flatMap { visibleRect(of: $0) } }
+
+    private func visibleRect(of flow: Flow) -> CGRect? {
+        guard let wf = AX.frame(window) else { return nil }
         var e: AXUIElement? = AX.parent(flow.area)
         for _ in 0..<6 {
             guard let cur = e else { break }
@@ -129,6 +134,39 @@ final class BooksDocument: ReadableDocument {
             e = AX.parent(cur)
         }
         return wf
+    }
+
+    /// The book view's areas showing pages now, the current one first.
+    private func shownFlows() -> [Flow] {
+        guard let current = currentFlow() else { return [] }
+        var areas: [AXUIElement] = [], queue = [current.view ?? window], seen = 0
+        while !queue.isEmpty, seen < 2000 {
+            let e = queue.removeFirst()
+            seen += 1
+            if AX.role(e) == "AXWebArea" {
+                if !CFEqual(e, current.area), !Self.leaves(of: e).isEmpty { areas.append(e) }
+                continue
+            }
+            queue.append(contentsOf: AX.children(e))
+        }
+        beside = areas.map { area in
+            beside.first { CFEqual($0.area, area) } ?? Flow(area: area, anchor: Self.leaves(of: area)[0], window: window)
+        }
+        return [current] + beside
+    }
+
+    /// The flow beside `flow` on screen that the text runs on into: its pages are next in the
+    /// chapter's direction. Read without a turn, before the page is turned past both.
+    private func flowAfter(_ flow: Flow) -> Flow? {
+        guard let here = visibleRect(of: flow) else { return nil }
+        let rightward = self.rightward ?? true
+        return shownFlows().dropFirst().filter { other in
+            guard let there = visibleRect(of: other) else { return false }
+            return rightward ? there.minX >= here.maxX - 2 : there.maxX <= here.minX + 2
+        }.min { a, b in
+            let fa = visibleRect(of: a)?.minX ?? 0, fb = visibleRect(of: b)?.minX ?? 0
+            return rightward ? fa < fb : fa > fb
+        }
     }
 
     private func isVisible(_ box: CGRect, in viewport: CGRect) -> Bool {
@@ -142,11 +180,46 @@ final class BooksDocument: ReadableDocument {
     // MARK: Positions
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
-        guard let flow = currentFlow(), let viewport = visibleRect() else { return nil }
+        for flow in shownFlows() {
+            guard let viewport = visibleRect(of: flow), viewport.insetBy(dx: -4, dy: -4).contains(point),
+                  let found = paragraph(at: point, in: flow, viewport: viewport) else { continue }
+            if flow !== self.flow {
+                // The other file on the spread: reading goes on from there.
+                self.flow = flow
+                turn = nil
+                endReached = nil
+                stoppedAtEnd = false
+            }
+            return found
+        }
+        return nil
+    }
+
+    private func paragraph(at point: CGPoint, in flow: Flow, viewport: CGRect) -> (start: AnyObject, bounds: CGRect)? {
+        // Judged by the lines' marker boxes, never the leaves' frames: those can come relative to the page's area
+        // ("CHAPTER 1" at 163,89 where it's drawn at 495,297), so they miss the pointer. A leaf can show several
+        // blocks (a title page's lines, one heading leaf), so each is tried, up to the leaf's end.
+        var tried = Set<Int>()
         for leaf in Self.leaves(of: flow.area) {
-            guard let f = AX.frame(leaf), f.insetBy(dx: -4, dy: -4).contains(point), let block = flow.block(of: leaf) else { continue }
+            var next = flow.block(of: leaf)
+            let leafEnd = flow.endIndex(of: leaf) ?? next?.endIndex ?? 0
+            for _ in 0..<40 {
+                guard let block = next, tried.insert(block.startIndex).inserted else { break }
+                next = nil
+                if block.endIndex < leafEnd, case .text(let p) = flow.step(pastEnd: block), p.index < leafEnd {
+                    next = flow.block(startingAt: p.marker, index: p.index)
+                }
+                guard let found = paragraph(at: point, in: flow, block: block, viewport: viewport) else { continue }
+                return found
+            }
+        }
+        return nil
+    }
+
+    private func paragraph(at point: CGPoint, in flow: Flow, block: Block, viewport: CGRect) -> (start: AnyObject, bounds: CGRect)? {
+        do {
             let boxes = block.lines.map { flow.box(of: $0) }
-            guard let hit = boxes.firstIndex(where: { $0?.insetBy(dx: -2, dy: -3).contains(point) == true }) else { continue }
+            guard let hit = boxes.firstIndex(where: { $0?.insetBy(dx: -2, dy: -3).contains(point) == true }) else { return nil }
             // The bounds are the block's lines on the page pointed at: its column.
             var column = 0, previous: CGRect?
             let columns = boxes.map { box -> Int in
@@ -158,10 +231,9 @@ final class BooksDocument: ReadableDocument {
                 guard let box, c == columns[hit], isVisible(box, in: viewport) else { return nil }
                 return box
             }
-            guard let start = start(in: flow, block: block, viewport: viewport), let bounds = onPage.dropFirst().reduce(onPage.first, { $0?.union($1) }) else { continue }
+            guard let start = start(in: flow, block: block, viewport: viewport), let bounds = onPage.dropFirst().reduce(onPage.first, { $0?.union($1) }) else { return nil }
             return (start, bounds.intersection(viewport))
         }
-        return nil
     }
 
     /// Where to start reading a block: its start if that is on the visible pages, else the first
@@ -257,6 +329,13 @@ final class BooksDocument: ReadableDocument {
         let from = end.flow
         if let next = from.next { return sentence(from: next, in: nil) }
         guard !from.ended else { return nil }
+        if turn == nil, let beside = flowAfter(from), let start = beside.start() {
+            // The next file's pages are already on the spread: read on, no turn.
+            flow = beside
+            from.next = start
+            print("[books] on into the pages beside")
+            return sentence(from: start, in: nil)
+        }
         endReached = end
         stoppedAtEnd = true
         guard var t = turn, t.from === from else { return nil }
@@ -583,6 +662,12 @@ extension BooksDocument {
         }
 
         /// Where the paragraph a leaf shows part of starts: two calls, no block built.
+        /// Where a leaf's text ends in the chapter: its marker range's end.
+        func endIndex(of leaf: AXUIElement) -> Int? {
+            guard let v = AX.param(leaf, "AXTextMarkerRangeForUIElement", leaf), CFGetTypeID(v) == AXTextMarkerRangeGetTypeID() else { return nil }
+            return index(AXTextMarkerRangeCopyEndMarker(v as! AXTextMarkerRange))
+        }
+
         func paragraphStart(of leaf: AXUIElement) -> (marker: AXTextMarker, index: Int)? {
             guard let v = AX.param(leaf, "AXTextMarkerRangeForUIElement", leaf), CFGetTypeID(v) == AXTextMarkerRangeGetTypeID() else { return nil }
             let start = AXTextMarkerRangeCopyStartMarker(v as! AXTextMarkerRange)
