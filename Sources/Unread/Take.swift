@@ -1,5 +1,6 @@
 import Foundation
 import NaturalLanguage
+import Synchronization
 
 /// A sentence the narrator says: its audio as it streams, and when each word starts, aligned as it comes (#58).
 @MainActor
@@ -28,12 +29,19 @@ final class NarratorTake {
     private var task: Task<Void, Never>?
     /// A cue's sound (#24): the same length at every speed.
     private let fixedLength: Bool
+    /// How the narrator said it, once streamed.
+    var report: Narrator.Report? { reportBox.value }
+    private let reportBox: ReportBox
+    var spokenText: String { spoken.text }
 
     /// `words`: the sentence's display words; the narrator is given them made sayable (`Speakable`).
     /// `after`: the sentence before it in the same paragraph, for the narrator to carry on from (#56).
     init(_ narrator: Narrator, words: ArraySlice<Substring>, language: NLLanguage, after previous: String? = nil) {
         let spoken = Speakable(Array(words), language: language)
-        let stream = narrator.speak(spoken.text, language: language, after: previous.map { Speakable($0, language: language).text })
+        let box = ReportBox()
+        let stream = narrator.speak(spoken.text, language: language, after: previous.map { Speakable($0, language: language).text },
+                                    report: { box.value = $0 })
+        reportBox = box
         pace = narrator.pace(for: language)
         self.words = Array(words)
         self.spoken = spoken
@@ -72,6 +80,7 @@ final class NarratorTake {
         spoken = Speakable([], language: .english)
         aligner = nil
         fixedLength = true
+        reportBox = ReportBox()
     }
 
     func cancel() {
@@ -133,5 +142,14 @@ extension WordTiming {
             defer { before += w }
             return voiced.lowerBound + Int(Double(voiced.count) * Double(before) / total)
         }
+    }
+}
+
+/// The narrator's report, handed over from its queue.
+private final class ReportBox: Sendable {
+    private let stored = Mutex<Narrator.Report?>(nil)
+    var value: Narrator.Report? {
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
 }

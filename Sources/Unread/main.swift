@@ -374,6 +374,10 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 print("[simulate] narrator unavailable: \(error)")
                 exit(1)
             }
+            // --readings DIR: keep what the narrator says, as the app does in ~/Library/Logs/Unread/readings.
+            func recorder() -> ReadingRecorder? {
+                value(after: "--readings").map { ReadingRecorder(app: "simulate", root: URL(fileURLWithPath: $0)) }
+            }
             // --primed [S]: start from the first sentence prepared during a hold (#5), released S seconds
             // (default 0.4) after the preparing began.
             var primed: PrimedSentence?
@@ -393,7 +397,7 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 print(String(format: "[simulate] released after a %.2fs hold", hold))
             }
             let s = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator, player: player,
-                                   overlay: overlay, startedAt: Date(), primed: primed)
+                                   overlay: overlay, startedAt: Date(), primed: primed, recorder: recorder())
             s.onFinish = { print("[session] finished"); done() }
             var reading = s
             measuring = true
@@ -415,7 +419,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                         print("[simulate] jumped")
                         s.stop()
                         reading = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator,
-                                                 player: player, overlay: overlay, startedAt: Date(), primed: primed)
+                                                 player: player, overlay: overlay, startedAt: Date(), primed: primed,
+                                                 recorder: recorder())
                         reading.onFinish = { print("[session] finished"); done() }
                         reading.start()
                     }

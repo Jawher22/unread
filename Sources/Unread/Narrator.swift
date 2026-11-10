@@ -33,7 +33,7 @@ actor Narrator {
         let warmUp: Double
     }
 
-    /// How the last sentence went, for `--narrate`.
+    /// How the last sentence went, for `--narrate` and the reading recorder.
     struct Report: Sendable {
         /// Seconds from the start of synthesis to the first decoded chunk, silent or not.
         let firstDecode: Double?
@@ -44,6 +44,16 @@ actor Narrator {
         /// The first part's stages, and how many frames it made.
         let timings: QwenTimings?
         let frames: Int
+        let voice: String
+        let start: Start
+    }
+
+    /// Whether a sentence carried on from the one before (#56), and if not, why.
+    enum Start: String, Sendable {
+        case carried
+        case noneBefore = "no sentence before"
+        case notSaidInFull = "sentence before not said in full"
+        case otherVoice = "sentence before in another voice"
     }
 
     static let sampleRate = 24_000
@@ -214,12 +224,15 @@ actor Narrator {
     /// `after`: the sentence before it in the same paragraph. If that was the last one said, and
     /// in full, this one carries on from it (#56): the talker hears its text and audio before this
     /// one's, as it does between the parts of a long sentence, so the paragraph is one performance.
-    nonisolated func speak(_ text: String, language: NLLanguage, after previous: String? = nil) -> AsyncThrowingStream<[Float], Error> {
+    ///
+    /// `report`: how it went, called on the narrator's queue before the stream finishes.
+    nonisolated func speak(_ text: String, language: NLLanguage, after previous: String? = nil,
+                           report: (@Sendable (Report) -> Void)? = nil) -> AsyncThrowingStream<[Float], Error> {
         AsyncThrowingStream { stream in
             let flag = CancelFlag()
             stream.onTermination = { _ in flag.cancel() }
             // Straight onto the actor's queue: a Task per call could reach the actor out of order.
-            queue.async { self.assumeIsolated { $0.synthesize(text, language: Self.code(language), after: previous, flag: flag, into: stream) } }
+            queue.async { self.assumeIsolated { $0.synthesize(text, language: Self.code(language), after: previous, flag: flag, report: report, into: stream) } }
         }
     }
 
@@ -252,7 +265,7 @@ actor Narrator {
     private var lastLanguage = "en"
 
     private func synthesize(_ text: String, language: String, after previous: String?, flag: CancelFlag,
-                            into stream: AsyncThrowingStream<[Float], Error>.Continuation) {
+                            report: (@Sendable (Report) -> Void)?, into stream: AsyncThrowingStream<[Float], Error>.Continuation) {
         lastReport = nil
         let carried = lastSaid
         lastSaid = nil
@@ -271,14 +284,14 @@ actor Narrator {
         engine.onDecode = { firstDecode.withLock { $0 = $0 ?? Date().timeIntervalSince(start) } }
         defer { engine.onDecode = nil }
         let clone = voices[language] ?? voices["en"]!, voice = clone.files
-        let session: QwenTalkSession
-        if let previous, let carried, carried.text == previous, carried.language == language, carried.voice == clone.preset.id {
-            session = carried.session
-        } else {
-            session = QwenTalkSession(engine: engine, voice: voice, language: language, seedText: seedSalt + text)
-        }
+        let begun: Start = if previous == nil { .noneBefore }
+            else if let carried, carried.text == previous { carried.language == language && carried.voice == clone.preset.id ? .carried : .otherVoice }
+            else { .notSaidInFull }
+        let session = begun == .carried ? carried!.session
+            : QwenTalkSession(engine: engine, voice: voice, language: language, seedText: seedSalt + text)
         let parts = parts(of: text, voice: voice, language: language)
         var leading = 0.0, stop = "", timings: QwenTimings?, frames = 0
+        var failure: Error?
         do {
             for (i, part) in parts.enumerated() {
                 let r = try session.render(part, chunkFrames: chunkFrames, cancelled: { flag.isCancelled },
@@ -288,12 +301,14 @@ actor Narrator {
                 if r.stopReason == .cancelled { break }
             }
             if stop != QwenStopReason.cancelled.rawValue { lastSaid = (text, language, clone.preset.id, session) }
-            stream.finish()
         } catch {
-            stream.finish(throwing: error)
+            failure = error
         }
-        lastReport = Report(firstDecode: firstDecode.withLock { $0 }, leadingSilence: leading, parts: parts.count, stop: stop,
-                            timings: timings, frames: frames)
+        let said = Report(firstDecode: firstDecode.withLock { $0 }, leadingSilence: leading, parts: parts.count, stop: stop,
+                          timings: timings, frames: frames, voice: clone.preset.id, start: begun)
+        lastReport = said
+        report?(said)
+        stream.finish(throwing: failure)
     }
 
     /// `text` whole, or in clause-sized parts when the talker's memory can't hold it.

@@ -9,6 +9,7 @@
 #   scripts/eval.sh score NAME…              Whisper word errors, pitch spread, pauses ("elevenlabs" is the references)
 #   scripts/eval.sh ab A B                   blind A/B page for two runs
 #   scripts/eval.sh rate NAME                a run next to the ElevenLabs references, scored 1–5
+#   scripts/eval.sh readings [--again]       the app's recorded readings as the run "real" (--again: their text through --eval as "real-eval")
 #
 # Everything under fixtures/eval/ is local (gitignored). Needs uv, a release build and the narrator model.
 set -euo pipefail

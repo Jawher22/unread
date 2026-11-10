@@ -5,10 +5,13 @@
     score RUN…            Whisper word errors, pitch spread and pauses for each run's WAVs
     ab A B                a blind A/B page for two runs; choices go to fixtures/eval/ab/
     rate RUN              each passage next to the ElevenLabs reference, scored 1–5; to fixtures/eval/ratings/
+    readings [--again]    the app's own readings (~/Library/Logs/Unread/readings) as the run "real", their text as
+                          passages in fixtures/eval/real/; --again reads that text through `Unread --eval` as "real-eval"
 
 A run is fixtures/eval/runs/<name>/ (written by `Unread --eval`), or "elevenlabs" for the references.
 """
 import json
+import os
 import random
 import sys
 import time
@@ -26,6 +29,8 @@ ROOT = mv.ROOT
 EVAL = ROOT / "fixtures/eval"
 PASSAGES = EVAL / "passages"
 REFERENCES = EVAL / "elevenlabs"
+REAL = EVAL / "real"
+READINGS = Path(os.environ.get("UNREAD_READINGS", Path.home() / "Library/Logs/Unread/readings"))
 SR = mv.SR
 # Quiet inside a passage that counts as a pause, in seconds (shorter is a stop consonant or a breath).
 MIN_PAUSE = 0.15
@@ -63,7 +68,7 @@ def passages():
 
 def spoken(pid):
     """The passage as one text: sentences joined, paragraphs a blank line apart."""
-    text = (PASSAGES / f"{pid}.txt").read_text().strip()
+    text = next(p for p in (PASSAGES / f"{pid}.txt", REAL / f"{pid}.txt") if p.exists()).read_text().strip()
     return "\n\n".join(" ".join(p.split("\n")) for p in text.split("\n\n"))
 
 
@@ -209,6 +214,68 @@ def score(*names):
         print(f"{n}: WER {errors / words:.1%} ({errors}/{words} words), pitch spread median "
               f"{np.median([r['pitch_spread'] for r in rows]):.1f} semitones, "
               f"{sum(r['seconds'] for r in rows):.0f} s of audio, longest pause {max(r['pause_max'] for r in rows):.1f} s")
+
+
+# MARK: real readings
+
+# The quiet the app puts between two sentences at 1× once each is trimmed to its 50 ms edges (`Pacing.pause`).
+SENTENCE_PAUSE = 0.4
+
+
+def spread(audio):
+    """Pitch spread in semitones (p90 − p10 of F0 over voiced frames), as `measure` takes it, and median F0."""
+    start, end = mv.voiced_span(audio)
+    f0 = mv.pitch_track(audio[start:end])
+    if f0.size < 10:
+        return None, None
+    semis = 12 * np.log2(f0)
+    return float(np.percentile(semis, 90) - np.percentile(semis, 10)), float(np.median(f0))
+
+
+def readings(*rest):
+    """Each recorded reading of 3 English sentences or more becomes passage `<id>` of the runs "real" (what the app
+    said, joined as `--eval` joins them) and, with --again, "real-eval" (the same text read by `Unread --eval` in the
+    same voice, the way the eval reads its passages)."""
+    out = run_dir("real")
+    out.mkdir(parents=True, exist_ok=True)
+    REAL.mkdir(parents=True, exist_ok=True)
+    rows, by_voice = [], {}
+    for d in sorted(p for p in READINGS.glob("*") if p.is_dir()):
+        lines = [json.loads(x) for x in (d / "sentences.jsonl").read_text().splitlines() if x.strip()]
+        lines = [x for x in lines if x["language"] == "en" and (d / x["file"]).exists()]
+        if len(lines) < 3:
+            continue
+        pid = "real-" + d.name.replace(" ", "_")
+        pause = np.zeros(int(SENTENCE_PAUSE * SR), dtype=np.float32)
+        takes = [mv.read(d / x["file"]) for x in lines]
+        mv.write(out / f"{pid}.wav", np.concatenate([a for t in takes for a in (t, pause)]))
+        (REAL / f"{pid}.txt").write_text("\n".join(x["text"] for x in lines) + "\n")
+        voice = max(set(x["voice"] for x in lines), key=[x["voice"] for x in lines].count)
+        by_voice.setdefault(voice, []).append(pid)
+        whole, f0 = spread(np.concatenate(takes))
+        each = [s for s in (spread(t)[0] for t in takes) if s is not None]
+        starts = [x["start"] for x in lines]
+        rows.append((pid, lines[0]["app"], voice, lines[0]["speed"], len(lines), sum(x["seconds"] for x in lines),
+                     starts.count("carried") / max(len(starts) - 1, 1), whole, float(np.median(each)) if each else None, f0,
+                     sorted(set(s for s in starts[1:] if s != "carried"))))
+    if not rows:
+        sys.exit(f"readings: none of 3 English sentences or more in {READINGS}")
+    print(f"{'reading':32} {'app':24} {'voice':20} {'speed':>5} {'sent':>4} {'secs':>5} {'carried':>7} {'spread':>7} {'/sent':>6} {'f0':>4}")
+    for pid, app, voice, speed, n, secs, carried, whole, each, f0, fresh in rows:
+        print(f"{pid:32} {app[:24]:24} {voice[:20]:20} {speed:5.2g} {n:4d} {secs:5.0f} {carried:7.0%} {whole or 0:6.1f}st "
+              f"{each or 0:5.1f}st {f0 or 0:4.0f}" + (f"  fresh: {', '.join(fresh)}" if fresh else ""))
+    print(f"\n{len(rows)} readings as the run \"real\" ({out.relative_to(ROOT)}), their text in {REAL.relative_to(ROOT)}")
+    if "--again" in rest:
+        sys.stdout.flush()
+        import subprocess
+        import tempfile
+        for voice, pids in by_voice.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                for pid in pids:
+                    (Path(tmp) / f"{pid}.txt").symlink_to(REAL / f"{pid}.txt")
+                subprocess.run([str(ROOT / ".build/release/Unread"), "--eval", tmp, "--out", str(run_dir("real-eval")),
+                                "--voice", voice], check=True)
+        print('then: scripts/eval.sh score real real-eval')
 
 
 # MARK: listening pages
@@ -381,4 +448,4 @@ def rate(name=None):
 if __name__ == "__main__":
     step, rest = sys.argv[1], sys.argv[2:]
     {"passages": passages, "elevenlabs": lambda: elevenlabs(*rest), "score": lambda: score(*rest),
-     "ab": lambda: ab(*rest), "rate": lambda: rate(*rest)}[step]()
+     "ab": lambda: ab(*rest), "rate": lambda: rate(*rest), "readings": lambda: readings(*rest)}[step]()

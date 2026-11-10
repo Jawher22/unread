@@ -395,7 +395,8 @@ final class AppController: NSObject {
         let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs,
                                    speculative: gesture == .hold ? primed != nil : nil)
         let s = ReadingSession(document: doc, start: start, speed: speed, narrator: narrator, player: player,
-                               overlay: overlay, startedAt: releasedAt, timing: timing, primed: primed)
+                               overlay: overlay, startedAt: releasedAt, timing: timing, primed: primed,
+                               recorder: ReadingRecorder(app: app))
         s.onFinish = { [weak self, weak s] in
             guard let self, self.session === s else { return }
             self.session = nil

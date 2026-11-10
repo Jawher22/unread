@@ -257,6 +257,8 @@ final class ReadingSession {
     /// Filled in as the first sentence goes through the pipeline, written
     /// once at first audio, then nil.
     private var timing: LatencyRecord?
+    /// Keeps what the narrator said, to judge its delivery later (`ReadingRecorder`).
+    private let recorder: ReadingRecorder?
     private var primed: PrimedSentence?
     /// The article / main area this reading stays in, and what it skips (#10).
     private var scope: ReadingScope?
@@ -298,8 +300,9 @@ final class ReadingSession {
     var isPaused: Bool { player.isPaused }
 
     init(document: ReadableDocument, start: AnyObject, speed: Float, narrator: Narrator, player: Player, overlay: Overlay,
-         startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
+         startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil, recorder: ReadingRecorder? = nil) {
         self.document = document
+        self.recorder = recorder
         self.cursor = start
         self.speed = speed
         self.narrator = narrator
@@ -666,6 +669,7 @@ final class ReadingSession {
             // Without the voice's own lead-in: the pause before it is `Pacing`'s.
             let speech = take.speech(speed: speed).trimmingLeadingQuiet(keep: Pacing.edgeSamples)
             guard !speech.samples.isEmpty else { continue } // nothing said (synthesis failed): skip it
+            if piece.sentence.cue == nil { recorder?.record(seq: piece.seq, text: piece.sentence.text, language: piece.language, take: take, speed: speed, live: false) }
             playerWantsMore = false
             spokeAnything = true
             let samples = speech.trimmingTrailingQuiet(keep: Pacing.edgeSamples).samples
@@ -760,6 +764,7 @@ final class ReadingSession {
         if first { firstAudio(said, synthMs: LatencyLog.ms(since: l.take.started)) }
         if complete {
             logScheduled(piece, from: l.runs[0].at, to: l.timeline(l.said), ending: ending)
+            recorder?.record(seq: piece.seq, text: piece.sentence.text, language: piece.language, take: l.take, speed: l.speed, live: true)
             live = nil
         } else {
             live = l
