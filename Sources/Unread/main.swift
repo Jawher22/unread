@@ -363,6 +363,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
         }
         guard let (doc, startAt) = found else { print("nothing at point"); exit(1) }
         let para = (start: startAt, ())
+        // Where a hold would have pointed, for the reading to look up again if the page rebuilt since.
+        let pointedAt = pinned == nil || args.contains("--pointed") ? point : nil
         Task { @MainActor in
             let narrator: Narrator
             do {
@@ -374,6 +376,8 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 print("[simulate] narrator unavailable: \(error)")
                 exit(1)
             }
+            // --late S: start S seconds after the pointer's lookup (rerender.html rebuilds its elements every 1.5 s).
+            if let late = value(after: "--late").flatMap(Double.init) { try? await Task.sleep(for: .seconds(late)) }
             // --primed [S]: start from the first sentence prepared during a hold (#5), released S seconds
             // (default 0.4) after the preparing began.
             var primed: PrimedSentence?
@@ -388,13 +392,13 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                     if !args.contains("--no-wake") { narrator.wake() }
                     try? await Task.sleep(for: .seconds(0.3))
                 }
-                primed = PrimedSentence.prepare(doc, from: para.start, narrator: narrator)
+                primed = PrimedSentence.prepare(doc, from: para.start, at: pointedAt, narrator: narrator)
                 try? await Task.sleep(for: .seconds(hold))
                 print(String(format: "[simulate] released after a %.2fs hold", hold))
             }
             let s = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator, player: player,
-                                   overlay: overlay, startedAt: Date(), primed: primed)
-            s.onFinish = { print("[session] finished"); done() }
+                                   overlay: overlay, startedAt: Date(), pointedAt: pointedAt, primed: primed)
+            s.onFinish = { print("[session] finished\($0 ? "" : ", nothing said")"); done() }
             var reading = s
             measuring = true
             lastTick = Date()
@@ -410,13 +414,13 @@ if let i = args.firstIndex(of: "--simulate"), args.indices.contains(i + 1) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + at) {
                     s.setAiming(true)
                     s.yieldNarrator()
-                    let primed = PrimedSentence.prepare(doc, from: para.start, narrator: narrator)
+                    let primed = PrimedSentence.prepare(doc, from: para.start, at: pointedAt, narrator: narrator)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         print("[simulate] jumped")
                         s.stop()
                         reading = ReadingSession(document: doc, start: para.start, speed: speed, narrator: narrator,
-                                                 player: player, overlay: overlay, startedAt: Date(), primed: primed)
-                        reading.onFinish = { print("[session] finished"); done() }
+                                                 player: player, overlay: overlay, startedAt: Date(), pointedAt: pointedAt, primed: primed)
+                        reading.onFinish = { print("[session] finished\($0 ? "" : ", nothing said")"); done() }
                         reading.start()
                     }
                 }

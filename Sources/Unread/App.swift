@@ -48,7 +48,8 @@ final class AppController: NSObject {
     private var aimTimer: Timer?
     private var aimDocument: ReadableDocument?
     private var aimResolvedAt = CGPoint(x: -1e6, y: -1e6)
-    private var aimTarget: (document: ReadableDocument, start: AnyObject)?
+    /// The paragraph aimed at: where it starts, the point it was found at, and its box.
+    private var aimTarget: (document: ReadableDocument, start: AnyObject, point: CGPoint, bounds: CGRect)?
     private var lastTapAt = Date.distantPast
 
     /// Speculative synthesis of the aimed sentence while the key is held.
@@ -274,15 +275,15 @@ final class AppController: NSObject {
             self.aimInFlight = false
             self.aimMiss = miss
             if reresolve { self.aimDocument = doc; self.aimResolvedAt = p }
-            self.aimed(doc, para)
+            self.aimed(doc, para, at: p)
         }
     }
 
-    private func aimed(_ doc: ReadableDocument?, _ para: (start: AnyObject, bounds: CGRect)?) {
+    private func aimed(_ doc: ReadableDocument?, _ para: (start: AnyObject, bounds: CGRect)?, at point: CGPoint) {
         if let doc, let para {
-            aimTarget = (doc, para.start)
+            aimTarget = (doc, para.start, point, para.bounds)
             if let steady = steadyAim, CFEqual(steady.start, para.start) {
-                if Date().timeIntervalSince(steady.since) >= speculateAfter { speculate(doc, from: para.start) }
+                if Date().timeIntervalSince(steady.since) >= speculateAfter { speculate(doc, from: para.start, at: point) }
             } else {
                 steadyAim = (para.start, Date())
             }
@@ -297,13 +298,13 @@ final class AppController: NSObject {
     /// so release → first audio is just scheduling. One job at a time: a stale
     /// job (pointer moved on) finishes before the next starts, so it can delay
     /// a fresh one by at most one sentence.
-    private func speculate(_ doc: ReadableDocument, from start: AnyObject) {
+    private func speculate(_ doc: ReadableDocument, from start: AnyObject, at point: CGPoint) {
         guard let narrator else { return }
         if let s = speculation, s.matches(doc, start) || !s.done { return }
         let spec = Speculation(element: doc.element, start: start)
         speculation = spec
         session?.yieldNarrator()
-        spec.primed = PrimedSentence.prepare(doc, from: start, narrator: narrator, settled: { [weak spec] in spec?.done = true })
+        spec.primed = PrimedSentence.prepare(doc, from: start, at: point, narrator: narrator, settled: { [weak spec] in spec?.done = true })
     }
 
     private func endAiming() {
@@ -330,24 +331,27 @@ final class AppController: NSObject {
             // Point-and-hold: read from the paragraph we were aiming at.
             if let target {
                 let primed = spec.flatMap { $0.matches(target.document, target.start) ? $0.claim() : nil }
-                startReading(target.document, from: target.start, releasedAt: releasedAt, gesture: .hold, primed: primed)
+                overlay.show(target.bounds, style: .loading) // until the voice starts
+                startReading(target.document, from: target.start, at: target.point, releasedAt: releasedAt, gesture: .hold, primed: primed)
             } else {
                 // Released before the first lookup came back from the AX worker
                 // (a quick hold while it's busy): look once more, at the release point.
                 let p = AX.mouseLocation()
                 let token = aimToken
                 Task { [weak self] in
-                    let found = await AXWorker.shared.run { () -> (ReadableDocument, AnyObject)? in
+                    let found = await AXWorker.shared.run { () -> (ReadableDocument, (start: AnyObject, bounds: CGRect))? in
                         guard let doc = DocumentFinder.document(at: p), let para = doc.paragraph(at: p) else { return nil }
-                        return (doc, para.start)
+                        return (doc, para)
                     }
                     guard let self, token == self.aimToken else { return }
-                    guard let (doc, start) = found else {
+                    guard let (doc, para) = found else {
                         let why = await AXWorker.shared.run { DocumentFinder.whyNothing(at: p, found: DocumentFinder.document(at: p)) }
                         print("[unread] hold found nothing to read: \(self.aimMiss ?? why)")
+                        NSSound.beep()
                         return
                     }
-                    self.startReading(doc, from: start, releasedAt: releasedAt, gesture: .hold)
+                    self.overlay.show(para.bounds, style: .loading)
+                    self.startReading(doc, from: para.start, at: p, releasedAt: releasedAt, gesture: .hold)
                 }
             }
             return
@@ -386,7 +390,7 @@ final class AppController: NSObject {
         }
     }
 
-    private func startReading(_ doc: ReadableDocument, from start: AnyObject, releasedAt: Date,
+    private func startReading(_ doc: ReadableDocument, from start: AnyObject, at point: CGPoint? = nil, releasedAt: Date,
                               gesture: LatencyRecord.Gesture, lookupMs: Double? = nil, primed: PrimedSentence? = nil) {
         guard let narrator else { return }
         session?.stop()
@@ -395,9 +399,13 @@ final class AppController: NSObject {
         let timing = LatencyRecord(app: app, gesture: gesture, lookupMs: lookupMs,
                                    speculative: gesture == .hold ? primed != nil : nil)
         let s = ReadingSession(document: doc, start: start, speed: speed, narrator: narrator, player: player,
-                               overlay: overlay, startedAt: releasedAt, timing: timing, primed: primed)
-        s.onFinish = { [weak self, weak s] in
+                               overlay: overlay, startedAt: releasedAt, pointedAt: point, timing: timing, primed: primed)
+        s.onFinish = { [weak self, weak s] spoke in
             guard let self, self.session === s else { return }
+            if !spoke {
+                print("[unread] the reading found nothing to say from where it started")
+                NSSound.beep()
+            }
             self.session = nil
             self.setStatus("Hold ⌃ and point to read")
         }

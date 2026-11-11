@@ -368,10 +368,12 @@ final class DisplayTicker: NSObject {
 /// coordinates; times are any one clock.
 @MainActor
 final class HighlightLayers {
-    enum Kind { case preview, reading }
+    /// `loading`: the aimed paragraph from the hold's release until the voice starts, breathing.
+    enum Kind { case preview, loading, reading }
 
     private enum Timing {
         static let wipe = 0.42, leave = 0.26, hide = 0.22, morph = 0.24, fadeIn = 0.16, wordIn = 0.14, wordOut = 0.2
+        static let breath = 1.1
     }
 
     private let sentenceLayer = CAShapeLayer()
@@ -388,6 +390,8 @@ final class HighlightLayers {
     private var style = HighlightStyle.standard
     private var word: WordMarkFrame?
     private var wordFade = Fade()
+    /// When the aimed paragraph started loading: its breath starts from the preview's look.
+    private var loadingSince: CFTimeInterval = 0
 
     init(in host: CALayer) {
         CATransaction.begin()
@@ -421,8 +425,16 @@ final class HighlightLayers {
             current = c
             return
         }
-        if let c = current, c.kind == .preview, kind == .preview {
-            guard c.rects != boxes else { return }
+        // Shown again where it was just hidden (a hold's release hides the preview, then shows it loading): it stays, no blink.
+        if current == nil, let l = leaving, !l.retract, l.kind != .reading, kind != .reading, l.rects == boxes {
+            leaving = nil
+            if kind == .loading, l.kind != .loading { loadingSince = now }
+            current = Sentence(rects: boxes, kind: kind, id: id, since: now - Timing.fadeIn, entrance: .fade)
+            return
+        }
+        if let c = current, c.kind != .reading, kind != .reading {
+            if kind == .loading, c.kind != .loading { loadingSince = now }
+            guard c.rects != boxes else { current?.kind = kind; return }
             current = Sentence(rects: boxes, kind: kind, id: id, since: now, entrance: .morph(from: displayed(c, at: now).rects))
             return
         }
@@ -431,6 +443,11 @@ final class HighlightLayers {
             leaving = Leaving(rects: shown.rects, kind: c.kind, opacity: shown.opacity, since: now, retract: true)
         }
         current = Sentence(rects: boxes, kind: kind, id: id, since: now, entrance: kind == .reading ? .wipe : .fade)
+    }
+
+    /// The voice has started: the loading box goes, if it's still up.
+    func hideLoading(at now: CFTimeInterval) {
+        if current?.kind == .loading { hideSentence(at: now) }
     }
 
     func hideSentence(at now: CFTimeInterval) {
@@ -465,9 +482,9 @@ final class HighlightLayers {
         if let c = current {
             let shown = displayed(c, at: now)
             sentenceLayer.path = Self.path(shown.rects)
-            paint(sentenceLayer, c.kind)
+            paint(sentenceLayer, c.kind, at: now)
             sentenceLayer.opacity = Float(shown.opacity)
-            moving = moving || now - c.since < duration(of: c.entrance)
+            moving = moving || now - c.since < duration(of: c.entrance) || (c.kind == .loading && breathes)
         } else {
             sentenceLayer.opacity = 0
         }
@@ -479,7 +496,7 @@ final class HighlightLayers {
             } else {
                 let rects = l.retract ? Self.retracted(l.rects, Ease.inOut(p)) : l.rects
                 leavingLayer.path = Self.path(rects)
-                paint(leavingLayer, l.kind)
+                paint(leavingLayer, l.kind, at: now)
                 leavingLayer.opacity = Float(l.opacity * (1 - (l.retract ? Ease.inOut(p) : Ease.out(p))))
                 moving = true
             }
@@ -548,12 +565,16 @@ final class HighlightLayers {
         return path
     }
 
-    private func paint(_ layer: CAShapeLayer, _ kind: Kind) {
+    private var breathes: Bool { !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    private func paint(_ layer: CAShapeLayer, _ kind: Kind, at now: CFTimeInterval) {
         switch kind {
-        case .preview:
+        case .preview, .loading:
+            // Loading breathes from the preview's look and back, so "it's coming" reads without a spinner.
+            let b = kind == .loading && breathes ? 0.5 - 0.5 * cos(2 * .pi * (now - loadingSince) / Timing.breath) : 0
             let accent = NSColor.controlAccentColor
-            layer.fillColor = accent.withAlphaComponent(0.08).cgColor
-            layer.strokeColor = accent.withAlphaComponent(0.55).cgColor
+            layer.fillColor = accent.withAlphaComponent(0.08 + 0.14 * b).cgColor
+            layer.strokeColor = accent.withAlphaComponent(0.55 + 0.3 * b).cgColor
             layer.lineWidth = 1.5
         case .reading:
             layer.fillColor = style.color(style.sentenceAlpha).cgColor
