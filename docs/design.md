@@ -428,7 +428,7 @@ Tracked as [GitHub issues](https://github.com/Jawher22/unread/issues), one miles
 - **A faster storyteller:** keep the time stretch (1.2× by default), or clone from a compressed clip so the voice itself reads faster (§7, narrator pace)? Decided by ear.
 - **How far ahead the word mark runs.** 100 ms by default since 2026-11-09 (research: lag is noticed from 45 ms, lead only from 125 ms). Measured (§7, mark lead), 100 ms leaves almost no word late but shows 43–64% of words more than 125 ms early, and 50 ms balances the two better by BT.1359's thresholds. BT.1359 is about lips and sound, though; a reader's eyes run ahead of the voice anyway (eye–voice span ~0.5 s), so early may matter less than late. Decided by the author reading along: 50 or 100.
 - License (MIT like Hex is the likely default).
-- When to make the repo public. It's currently private at https://github.com/Jawher22/unread (created 2026-11-03). Not before the author has used it daily for real reading.
+- ~~When to make the repo public.~~ Public since 2026-11-11 at https://github.com/Jawher22/unread (created private 2026-11-03), so a friend could try it. The license is still open (above).
 
 ## 10. Naming
 

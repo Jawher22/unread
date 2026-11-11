@@ -18,7 +18,7 @@ No selecting, no copy-paste, no "open in reader". Point at a paragraph, hold a k
 
 A soft chime plays when reading ends, whether it reached the end or you stopped it.
 
-The highlight is drawn *on top of the app you're already in* (Safari, Chrome, Arc, Dia, Electron apps, TextEdit, Notes…). There is no separate reader window. If you scroll away it stops following you; scroll back and it picks up again.
+The highlight is drawn *on top of the app you're already in* (Safari, Chrome, Arc, Dia, Electron apps, TextEdit, Notes, PDFs in Preview and in the browser, Apple Books…). There is no separate reader window. If you scroll away it stops following you; scroll back and it picks up again.
 
 English and French are detected per sentence and switched automatically.
 
@@ -36,6 +36,7 @@ Measured on an M-series MacBook: ~0.3–0.6 s from release to first audio after 
 ## Requirements
 
 - Apple Silicon Mac, macOS 15 or later
+- To build: Swift 6.2 or later (Xcode 26)
 - Accessibility permission (to read on-screen text and watch the hotkey)
 - The narrator's model (2.88 GB), fetched once with `scripts/fetch-narrator.sh`, and the word aligner's (~100 MB), downloaded on first launch to `~/.cache/fluidaudio`
 
@@ -47,7 +48,7 @@ scripts/bundle.sh --install   # builds, signs and installs ~/Applications/Unread
 open ~/Applications/Unread.app
 ```
 
-The first build compiles FluidAudio (~15 min). On first launch, grant Accessibility when prompted (System Settings → Privacy & Security → Accessibility); Unread picks the grant up without a relaunch. It turns on **Launch at Login** the first time it runs; toggle it from the menu. Logs go to `~/Library/Logs/Unread/unread.log`.
+The first build compiles FluidAudio (~15 min). The first launch compiles the voice model for the Neural Engine, which takes about a minute: while the menu says "Loading voice…", ⌃ only beeps. Later launches take a few seconds. On first launch, grant Accessibility when prompted (System Settings → Privacy & Security → Accessibility); Unread picks the grant up without a relaunch. It turns on **Launch at Login** the first time it runs; toggle it from the menu. Logs go to `~/Library/Logs/Unread/unread.log`.
 
 The script signs with your first "Apple Development" identity (or `$UNREAD_SIGN_IDENTITY`). A stable identity means the Accessibility grant survives rebuilds; without one it falls back to ad-hoc signing and you'll re-grant after every build.
 
@@ -81,18 +82,16 @@ Text comes from the macOS Accessibility tree, not screenshots. Web content is re
 
 ## Known limitations
 
-- Reads everything in the page, including navigation, timestamps and buttons. Article-only extraction is next.
-- In Chromium-based apps the highlight is sometimes block-level instead of sentence-level.
-- Native text views don't auto-scroll yet.
-- PDFs, EPUBs and apps that don't expose text (Kindle, canvas apps) aren't supported yet.
-- Signed for local use only; not notarized yet.
+- English and French only. The word-by-word mark is timed from the audio in English and estimated in French.
+- In Chrome, Arc and Dia a page's first couple of seconds are highlighted a block at a time, until the browser starts giving word positions.
+- Code blocks and tables aren't read: a soft double tap marks them and the reading goes on.
+- Apps that don't expose their text (Kindle, canvas apps) aren't supported.
+- No download yet: you build it yourself, and it's signed for local use only (not notarized).
 
 ## Roadmap
 
-- Main-content extraction (skip navigation and other page chrome)
 - Floating mini-player pill, media keys and Now Playing
 - "Design a voice" and "use my own voice"
-- PDF and EPUB, OCR fallback
 - Notarized release, Homebrew cask
 
 ## Credits
