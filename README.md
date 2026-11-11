@@ -24,7 +24,7 @@ English and French are detected per sentence and switched automatically.
 
 ## Why it's fast
 
-Same playbook as [Hex](https://github.com/kitlangton/Hex), in reverse:
+Four things make it feel instant:
 
 - **A narrator on the Neural Engine.** Qwen3-TTS 1.7B through Core ML ([TinyTrashLabs' model set](https://huggingface.co/tinytrashlabs/Qwen3-TTS-1.7B-Base-ANE)), cloning one of 34 designed voices (English and French), streaming as it speaks: ~0.7× real time, the GPU untouched.
 - **Always warm.** The model loads once at launch (a few seconds) and stays resident; ⌃ going down wakes it after a while idle.
@@ -99,4 +99,3 @@ Text comes from the macOS Accessibility tree, not screenshots. Web content is re
 - Qwen3-TTS: the voice, through [Gloam Voice Studio](https://github.com/TinyTrashLabs/gloam-voice-studio)'s Core ML runtime (vendored, see `Vendor/QwenANE`)
 - [FluidAudio](https://github.com/FluidInference/FluidAudio): CoreML speech models for Apple devices (the word aligner)
 - [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): the first voice
-- [Hex](https://github.com/kitlangton/Hex): the inspiration for the feel
