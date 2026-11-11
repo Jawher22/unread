@@ -16,7 +16,7 @@ struct PrimedSentence {
     let prepared: Task<Prepared?, Never>
 
     @MainActor
-    static func prepare(_ doc: ReadableDocument, from start: AnyObject, narrator: Narrator,
+    static func prepare(_ doc: ReadableDocument, from start: AnyObject, at point: CGPoint?, narrator: Narrator,
                         settled: @escaping @MainActor () -> Void = {}) -> PrimedSentence {
         PrimedSentence(prepared: Task { @MainActor () -> Prepared? in
             defer { settled() }
@@ -24,8 +24,7 @@ struct PrimedSentence {
                 let t = Date()
                 AXWorker.speculating = true
                 defer { AXWorker.speculating = false }
-                let scope = doc.scope(from: start)
-                guard let sentence = doc.sentence(from: start, in: scope) else { return nil }
+                guard let (sentence, scope) = doc.opening(from: start, at: point) else { return nil }
                 return (sentence, scope, LatencyLog.ms(since: t))
             }
             guard let (sentence, scope, extractMs) = found else { return nil }
@@ -75,7 +74,8 @@ final class ReadingSession {
     /// The narrator's audio is stretched to the speed as it's played, so a change needs no new synthesis.
     var speed: Float
     let narrator: Narrator
-    var onFinish: (() -> Void)?
+    /// The reading came to its end. `spoke`: false if it found nothing to say from where it started.
+    var onFinish: ((_ spoke: Bool) -> Void)?
 
     private let player: Player
     private let overlay: Overlay
@@ -254,6 +254,8 @@ final class ReadingSession {
     /// Newer highlight requests win over older ones still in flight.
     private var highlightToken = 0
     private let startedAt: Date
+    /// Where the hold that started it pointed: the first sentence is looked up there again if the page rebuilt since.
+    private let pointedAt: CGPoint?
     /// Filled in as the first sentence goes through the pipeline, written
     /// once at first audio, then nil.
     private var timing: LatencyRecord?
@@ -298,8 +300,9 @@ final class ReadingSession {
     var isPaused: Bool { player.isPaused }
 
     init(document: ReadableDocument, start: AnyObject, speed: Float, narrator: Narrator, player: Player, overlay: Overlay,
-         startedAt: Date, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
+         startedAt: Date, pointedAt: CGPoint? = nil, timing: LatencyRecord? = nil, primed: PrimedSentence? = nil) {
         self.document = document
+        self.pointedAt = pointedAt
         self.cursor = start
         self.speed = speed
         self.narrator = narrator
@@ -525,12 +528,13 @@ final class ReadingSession {
         }
         guard let position = cursor else { if queued.isEmpty, ready.isEmpty { finish() }; return }
         producing = true
-        let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted
+        let doc = document, scopeNow = scope, needScope = !scopeResolved, last = lastExtracted, point = pointedAt
         Task { [weak self] in
             let extractStart = Date()
             let (found, newScope, rebuilt, open, more, grows) = await AXWorker.shared.run { () -> (Sentence?, ReadingScope?, Bool, Bool, Int?, Bool) in
-                var sc = needScope ? doc.scope(from: position) : scopeNow
-                var s = doc.sentence(from: position, in: sc)
+                let opening = needScope ? doc.opening(from: position, at: point) : nil
+                var sc = needScope ? opening?.scope : scopeNow
+                var s = needScope ? opening?.sentence : doc.sentence(from: position, in: sc)
                 var rebuilt = false
                 if s == nil, let last { s = doc.sentence(after: last, scope: &sc); rebuilt = s != nil } // page re-rendered?
                 // The last text on the page, not ending like a sentence: it may still be being written.
@@ -702,6 +706,7 @@ final class ReadingSession {
     private func place(_ piece: Pending, at start: Int) -> Int {
         queued.append(Playing(sentence: piece.sentence, start: start, wordStarts: piece.sentence.words.map { _ in nil }))
         justRead = nil
+        overlay.endLoading()
         if queued.count == 1 { showCurrent(scroll: true) }
         return queued.count - 1
     }
@@ -872,7 +877,7 @@ final class ReadingSession {
         guard !cancelled else { return }
         stop()
         if spokeAnything { player.chime() }
-        onFinish?()
+        onFinish?(spokeAnything)
     }
 
     // MARK: Highlight

@@ -7,7 +7,8 @@ import QuartzCore
 /// aiming preview, and a reading whose window isn't known, draw in one panel per screen above every app.
 @MainActor
 final class Overlay {
-    enum Style { case preview, reading }
+    /// `loading`: the aimed paragraph from a hold's release until the voice starts.
+    enum Style { case preview, loading, reading }
 
     private struct Surface { let panel: NSPanel; let layers: HighlightLayers }
     private var screens: [Surface] = []
@@ -166,7 +167,7 @@ final class Overlay {
     func show(_ rects: [CGRect], style kind: Style, id: Int? = nil) {
         log("show \(kind) " + rects.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" }.joined(separator: " "))
         guard !rects.isEmpty else { hide(); return }
-        let layerKind: HighlightLayers.Kind = kind == .preview ? .preview : .reading
+        let layerKind: HighlightLayers.Kind = switch kind { case .preview: .preview; case .loading: .loading; case .reading: .reading }
         if kind == .reading, let a = attached {
             screens.forEach { $0.layers.hideSentence(at: now) }
             let mine = rects.map { local($0, in: a.surface) }
@@ -178,6 +179,12 @@ final class Overlay {
                 if mine.isEmpty { s.layers.hideSentence(at: now) } else { s.layers.showSentence(mine, kind: layerKind, style: style, id: id, at: now) }
             }
         }
+        changed()
+    }
+
+    /// The voice has started: the loading box goes (the reading's highlight takes its place).
+    func endLoading() {
+        screens.forEach { $0.layers.hideLoading(at: now) }
         changed()
     }
 

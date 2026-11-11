@@ -113,6 +113,19 @@ extension ReadableDocument {
         return sentence(from: next, in: scope)
     }
 
+    /// A reading's first sentence from `start`, the paragraph a hold found at `point`, and the scope it reads in.
+    /// A page can rebuild its elements between that lookup and this one (a chat answer re-rendered as it streams):
+    /// `start` then reads as nothing, and the reading would end before a word. So the paragraph at `point` is
+    /// looked up again, in the new tree.
+    func opening(from start: AnyObject, at point: CGPoint?) -> (sentence: Sentence, scope: ReadingScope?)? {
+        let scope = self.scope(from: start)
+        if let s = sentence(from: start, in: scope) { return (s, scope) }
+        guard let point, let again = paragraph(at: point)?.start, !CFEqual(again, start) else { return nil }
+        print("[unread] page re-rendered since the pointer's lookup; found the paragraph at the pointer again")
+        let fresh = self.scope(from: again)
+        return sentence(from: again, in: fresh).map { ($0, fresh) }
+    }
+
     /// Opaque start position of a sentence's range (web only; a native range
     /// doubles as its own start).
     func startOf(_ s: Sentence) -> AnyObject {
@@ -317,7 +330,7 @@ final class WebDocument: ReadableDocument {
 
     /// The hold loop asks 30 times a second; while the pointer stays inside
     /// the last paragraph's box, that's still the answer.
-    private var lastParagraph: (start: AnyObject, bounds: CGRect)?
+    private var lastParagraph: (start: AnyObject, bounds: CGRect, range: AnyObject)?
 
     /// Consecutive sentences share most of their ancestors; remember what each
     /// element turned out to be, so judging a sentence costs a few AX calls
@@ -339,12 +352,13 @@ final class WebDocument: ReadableDocument {
     private var childrenMemo: [AXKey: [AXUIElement]] = [:]
 
     func paragraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
-        if let last = lastParagraph, last.bounds.contains(point) { return last }
+        // Unless the page rebuilt its elements since (stale markers read as nothing): one call.
+        if let last = lastParagraph, last.bounds.contains(point), !string(last.range).isEmpty { return (last.start, last.bounds) }
         lastParagraph = findParagraph(at: point)
-        return lastParagraph
+        return lastParagraph.map { ($0.start, $0.bounds) }
     }
 
-    private func findParagraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect)? {
+    private func findParagraph(at point: CGPoint) -> (start: AnyObject, bounds: CGRect, range: AnyObject)? {
         guard let m = marker(at: point),
               let para = p("AXParagraphTextMarkerRangeForTextMarker", m),
               SpeechText.clean(string(para)) != nil,
@@ -356,7 +370,7 @@ final class WebDocument: ReadableDocument {
                   return AX.rect(p("AXBoundsForTextMarkerRange", para))
               }()
         else { return nil }
-        return (start(of: para), bounds)
+        return (start(of: para), bounds, para)
     }
 
     func documentStart() -> AnyObject? {
